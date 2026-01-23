@@ -8,6 +8,7 @@ from rapidfuzz import fuzz
 import feedparser
 import time
 import json
+import contextlib
 
 # ANSI color codes for terminal output
 class Colors:
@@ -800,6 +801,20 @@ if __name__ == "__main__":
         Colors.disable()
         sys.argv.remove('--no-color')
 
+    # Check for --output / -o flag
+    output_path = None
+    for i, arg in enumerate(sys.argv[:]):
+        if arg.startswith('--output='):
+            output_path = arg.split('=', 1)[1]
+            sys.argv.remove(arg)
+            break
+        elif arg in ('--output', '-o') and i + 1 < len(sys.argv):
+            output_path = sys.argv[i + 1]
+            sys.argv.remove(sys.argv[i + 1])
+            sys.argv.remove(arg)
+            break
+
+
     # Check for --sleep flag
     sleep_time = 1.0
     for i, arg in enumerate(sys.argv):
@@ -827,7 +842,7 @@ if __name__ == "__main__":
             break
 
     if len(sys.argv) < 2:
-        print("Usage: check_hallucinated_references.py [--no-color] [--sleep=SECONDS] [--openalex-key=KEY] <path_to_pdf>")
+        print("Usage: check_hallucinated_references.py [--no-color] [--sleep=SECONDS] [--openalex-key=KEY] [--output=FILE|-o FILE] <path_to_pdf>")
         sys.exit(1)
 
     pdf_path = sys.argv[1]
@@ -835,5 +850,11 @@ if __name__ == "__main__":
         print(f"Error: File '{pdf_path}' not found")
         sys.exit(1)
 
-    main(pdf_path, sleep_time=sleep_time, openalex_key=openalex_key)
-
+    if output_path:
+        Colors.disable()
+        with open(output_path, "w", encoding="utf-8") as f, \
+             contextlib.redirect_stdout(f), \
+             contextlib.redirect_stderr(f):
+            main(pdf_path, sleep_time=sleep_time, openalex_key=openalex_key)
+    else:
+        main(pdf_path, sleep_time=sleep_time, openalex_key=openalex_key)

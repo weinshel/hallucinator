@@ -40,6 +40,10 @@ python check_hallucinated_references.py <path_to_pdf>
 # Without colored output (for piping or non-color terminals)
 python check_hallucinated_references.py --no-color <path_to_pdf>
 
+# Save output to file
+python check_hallucinated_references.py --output log.txt <path_to_pdf>
+
+
 # Adjust delay before DBLP requests (default: 1 second, to avoid rate limiting)
 python check_hallucinated_references.py --sleep=0.5 <path_to_pdf>
 

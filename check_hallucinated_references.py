@@ -341,6 +341,9 @@ def clean_title(title, from_quotes=False):
         segment = title[segment_start:pos]
         # If segment > 2 chars, it's likely a real sentence end, not an abbreviation
         if len(segment) > 2:
+            # But skip if period is immediately followed by a letter (no space) - product names like "big.LITTLE", "Node.js"
+            if pos + 1 < len(title) and title[pos + 1].isalpha():
+                continue
             title = title[:pos]
             break
 

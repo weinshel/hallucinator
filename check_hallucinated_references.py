@@ -373,6 +373,7 @@ def clean_title(title, from_quotes=False):
         r'\s+arXiv\s+preprint.*$',  # "arXiv preprint arXiv:..."
         r'\s+arXiv:\d+.*$',  # "arXiv:2503..."
         r'\s+CoRR\s+abs/.*$',  # "CoRR abs/1234.5678"
+        r',?\s*(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+(?:19|20)\d{2}.*$',  # "June 2024"
     ]
 
     for pattern in cutoff_patterns:

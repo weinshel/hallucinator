@@ -1,14 +1,24 @@
 import re
 import sys
+import os
 import requests
 import urllib.parse
 import unicodedata
+import logging
 from bs4 import BeautifulSoup
 from rapidfuzz import fuzz
 import feedparser
 import time
 import json
 import contextlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+logger = logging.getLogger(__name__)
+
+# Request timeout in seconds - can override with DB_TIMEOUT env var for testing
+# Set to a low value (e.g., 0.001) to force timeouts for testing warnings
+DB_TIMEOUT = float(os.environ.get('DB_TIMEOUT', '10'))
+DB_TIMEOUT_SHORT = float(os.environ.get('DB_TIMEOUT_SHORT', '5'))  # For OpenReview
 
 # ANSI color codes for terminal output
 class Colors:
@@ -711,9 +721,9 @@ def query_dblp(title):
     query = ' '.join(words)
     url = f"https://dblp.org/search/publ/api?q={urllib.parse.quote(query)}&format=json"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=DB_TIMEOUT)
         if response.status_code != 200:
-            return None, []
+            return None, [], None
         result = response.json()
         hits = result.get("result", {}).get("hits", {}).get("hit", [])
         for hit in hits:
@@ -725,10 +735,12 @@ def query_dblp(title):
                     authors = [authors.get("text", "")]
                 else:
                     authors = [a.get("text", "") if isinstance(a, dict) else a for a in authors]
-                return found_title, authors
+                paper_url = info.get("url")  # DBLP provides URL
+                return found_title, authors, paper_url
     except Exception as e:
         print(f"[Error] DBLP search failed: {e}")
-    return None, []
+        raise  # Re-raise so failed_dbs gets tracked
+    return None, [], None
 
 def query_arxiv(title):
     # Use first 6 significant words for query (skip stop words)
@@ -736,15 +748,19 @@ def query_arxiv(title):
     query = ' '.join(words)
     url = f"http://export.arxiv.org/api/query?search_query=all:{urllib.parse.quote(query)}&start=0&max_results=5"
     try:
-        feed = feedparser.parse(url)
+        # feedparser doesn't support timeout directly, so we fetch with requests first
+        response = requests.get(url, timeout=DB_TIMEOUT)
+        feed = feedparser.parse(response.content)
         for entry in feed.entries:
             entry_title = entry.title
             if fuzz.ratio(normalize_title(title), normalize_title(entry_title)) >= 95:
                 authors = [author.name for author in entry.authors]
-                return entry_title, authors
+                paper_url = entry.link  # arXiv provides direct link
+                return entry_title, authors, paper_url
     except Exception as e:
         print(f"[Error] arXiv search failed: {e}")
-    return None, []
+        raise  # Re-raise so failed_dbs gets tracked
+    return None, [], None
 
 def query_crossref(title):
     # Use first 6 significant words for query (skip stop words)
@@ -752,18 +768,21 @@ def query_crossref(title):
     query = ' '.join(words)
     url = f"https://api.crossref.org/works?query.title={urllib.parse.quote(query)}&rows=5"
     try:
-        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"})
+        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=DB_TIMEOUT)
         if response.status_code != 200:
-            return None, []
+            return None, [], None
         results = response.json().get("message", {}).get("items", [])
         for item in results:
             found_title = item.get("title", [""])[0]
             if fuzz.ratio(normalize_title(title), normalize_title(found_title)) >= 95:
                 authors = [f"{a.get('given', '')} {a.get('family', '')}".strip() for a in item.get("author", [])]
-                return found_title, authors
+                doi = item.get("DOI")
+                paper_url = f"https://doi.org/{doi}" if doi else None
+                return found_title, authors, paper_url
     except Exception as e:
         print(f"[Error] CrossRef search failed: {e}")
-    return None, []
+        raise  # Re-raise so failed_dbs gets tracked
+    return None, [], None
 
 def query_openalex(title, api_key):
     """Query OpenAlex API for paper information."""
@@ -771,9 +790,9 @@ def query_openalex(title, api_key):
     query = ' '.join(words)
     url = f"https://api.openalex.org/works?filter=title.search:{urllib.parse.quote(query)}&api_key={api_key}"
     try:
-        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"})
+        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=DB_TIMEOUT)
         if response.status_code != 200:
-            return None, []
+            return None, [], None
         results = response.json().get("results", [])
         for item in results[:5]:  # Check top 5 results
             found_title = item.get("title", "")
@@ -786,17 +805,22 @@ def query_openalex(title, api_key):
                     display_name = author_info.get("display_name", "")
                     if display_name:
                         authors.append(display_name)
-                return found_title, authors
+                # Get DOI URL or OpenAlex landing page
+                doi = item.get("doi")
+                paper_url = doi if doi else item.get("id")
+                return found_title, authors, paper_url
     except Exception as e:
         print(f"[Error] OpenAlex search failed: {e}")
-    return None, []
+        raise  # Re-raise so failed_dbs gets tracked
+    return None, [], None
 
 def query_neurips(title):
+    """Query NeurIPS papers archive."""
     try:
         years = [2023, 2022, 2021, 2020, 2019, 2018]
         for year in years:
             search_url = f"https://papers.nips.cc/paper_files/paper/{year}/hash/index.html"
-            response = requests.get(search_url)
+            response = requests.get(search_url, timeout=DB_TIMEOUT)
             if response.status_code != 200:
                 continue
 
@@ -804,33 +828,39 @@ def query_neurips(title):
             for a in soup.find_all("a"):
                 if fuzz.ratio(normalize_title(title), normalize_title(a.text)) >= 95:
                     paper_url = "https://papers.nips.cc" + a['href']
-                    paper_response = requests.get(paper_url)
+                    paper_response = requests.get(paper_url, timeout=DB_TIMEOUT)
                     if paper_response.status_code != 200:
-                        return a.text.strip(), []
+                        return a.text.strip(), [], paper_url
                     author_soup = BeautifulSoup(paper_response.content, "html.parser")
                     authors = [tag.text.strip() for tag in author_soup.find_all("li", class_="author")]
-                    return a.text.strip(), authors
+                    return a.text.strip(), authors, paper_url
     except Exception as e:
         print(f"[Error] NeurIPS search failed: {e}")
-    return None, []
+        raise  # Re-raise so failed_dbs gets tracked
+    return None, [], None
 
 def query_acl(title):
+    """Query ACL Anthology for paper information."""
     try:
         query = urllib.parse.quote(title)
         url = f"https://aclanthology.org/search/?q={query}"
-        response = requests.get(url)
+        response = requests.get(url, timeout=DB_TIMEOUT)
         if response.status_code != 200:
-            return None, []
+            return None, [], None
         soup = BeautifulSoup(response.text, 'html.parser')
         for entry in soup.select(".d-sm-flex.align-items-stretch.p-2"):
             entry_title_tag = entry.select_one("h5")
             if entry_title_tag and fuzz.ratio(normalize_title(title), normalize_title(entry_title_tag.text)) >= 95:
                 author_tags = entry.select("span.badge.badge-light")
                 authors = [a.text.strip() for a in author_tags]
-                return entry_title_tag.text.strip(), authors
+                # Try to get paper URL from the entry
+                link_tag = entry.select_one("a[href*='/papers/']")
+                paper_url = f"https://aclanthology.org{link_tag['href']}" if link_tag else None
+                return entry_title_tag.text.strip(), authors, paper_url
     except Exception as e:
         print(f"[Error] ACL Anthology search failed: {e}")
-    return None, []
+        raise  # Re-raise so failed_dbs gets tracked
+    return None, [], None
 
 def query_openreview(title):
     """Query OpenReview API for paper information."""
@@ -838,9 +868,9 @@ def query_openreview(title):
     query = ' '.join(words)
     url = f"https://api2.openreview.net/notes/search?query={urllib.parse.quote(query)}&limit=20"
     try:
-        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"})
+        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=DB_TIMEOUT_SHORT)
         if response.status_code != 200:
-            return None, []
+            return None, [], None
         results = response.json().get("notes", [])
         for item in results:
             content = item.get("content", {})
@@ -855,10 +885,14 @@ def query_openreview(title):
                     authors = authors_field.get("value", [])
                 else:
                     authors = authors_field if isinstance(authors_field, list) else []
-                return found_title, authors
+                # Construct OpenReview URL from forum ID
+                forum_id = item.get("forum") or item.get("id")
+                paper_url = f"https://openreview.net/forum?id={forum_id}" if forum_id else None
+                return found_title, authors, paper_url
     except Exception as e:
         print(f"[Error] OpenReview search failed: {e}")
-    return None, []
+        raise  # Re-raise so failed_dbs gets tracked
+    return None, [], None
 
 def query_semantic_scholar(title):
     """Query Semantic Scholar API for paper information.
@@ -868,20 +902,135 @@ def query_semantic_scholar(title):
     """
     words = get_query_words(title, 6)
     query = ' '.join(words)
-    url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={urllib.parse.quote(query)}&limit=10&fields=title,authors"
+    url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={urllib.parse.quote(query)}&limit=10&fields=title,authors,url"
     try:
-        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"})
+        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=DB_TIMEOUT)
         if response.status_code != 200:
-            return None, []
+            return None, [], None
         results = response.json().get("data", [])
         for item in results:
             found_title = item.get("title", "")
             if found_title and fuzz.ratio(normalize_title(title), normalize_title(found_title)) >= 95:
                 authors = [a.get("name", "") for a in item.get("authors", []) if a.get("name")]
-                return found_title, authors
+                paper_url = item.get("url")  # Semantic Scholar provides URL
+                return found_title, authors, paper_url
     except Exception as e:
         print(f"[Error] Semantic Scholar search failed: {e}")
-    return None, []
+        raise  # Re-raise so failed_dbs gets tracked
+    return None, [], None
+
+def query_all_databases_concurrent(title, ref_authors, openalex_key=None, longer_timeout=False):
+    """Query all databases concurrently for a single reference.
+
+    Args:
+        title: Paper title to search for
+        ref_authors: Authors from the reference
+        openalex_key: Optional OpenAlex API key
+        longer_timeout: If True, use longer timeouts (for retries)
+
+    Returns a dict with:
+        - status: 'verified' | 'not_found' | 'author_mismatch'
+        - source: database name where found (if any)
+        - found_authors: authors from the database (if found)
+        - paper_url: URL to the paper (if found)
+        - error_type: None | 'not_found' | 'author_mismatch'
+        - failed_dbs: list of database names that failed/timed out
+    """
+    # Define the databases to query
+    # Each entry is (name, query_func)
+    databases = [
+        ('CrossRef', lambda: query_crossref(title)),
+        ('arXiv', lambda: query_arxiv(title)),
+        ('DBLP', lambda: query_dblp(title)),
+        ('OpenReview', lambda: query_openreview(title)),
+        ('Semantic Scholar', lambda: query_semantic_scholar(title)),
+        ('ACL Anthology', lambda: query_acl(title)),
+        ('NeurIPS', lambda: query_neurips(title)),
+    ]
+
+    # Add OpenAlex if API key is provided
+    if openalex_key:
+        databases.insert(0, ('OpenAlex', lambda: query_openalex(title, openalex_key)))
+
+    result = {
+        'status': 'not_found',
+        'source': None,
+        'found_authors': [],
+        'paper_url': None,
+        'error_type': 'not_found',
+        'failed_dbs': [],
+    }
+
+    # Track author mismatches to report if nothing better found
+    first_mismatch = None
+    failed_dbs = []
+
+    def query_single_db(db_info):
+        """Execute a single database query. Returns (name, found_title, found_authors, paper_url, error)."""
+        name, query_func = db_info
+        try:
+            found_title, found_authors, paper_url = query_func()
+            if found_title:
+                logger.debug(f"    {name}: FOUND")
+            else:
+                logger.debug(f"    {name}: not found")
+            return (name, found_title, found_authors, paper_url, None)
+        except requests.exceptions.Timeout:
+            logger.warning(f"    {name}: TIMEOUT")
+            return (name, None, [], None, "timeout")
+        except Exception as e:
+            logger.warning(f"    {name}: ERROR - {str(e)[:50]}")
+            return (name, None, [], None, str(e))
+
+    # Use ThreadPoolExecutor to query databases concurrently
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        # Submit all queries
+        future_to_db = {executor.submit(query_single_db, db): db[0] for db in databases}
+
+        for future in as_completed(future_to_db):
+            db_name = future_to_db[future]
+            try:
+                name, found_title, found_authors, paper_url, error = future.result()
+
+                if error:
+                    failed_dbs.append(name)
+                    continue
+
+                if found_title:
+                    # Check author match
+                    if not ref_authors or validate_authors(ref_authors, found_authors):
+                        # Found and verified - cancel remaining futures and return
+                        for f in future_to_db:
+                            f.cancel()
+                        return {
+                            'status': 'verified',
+                            'source': name,
+                            'found_authors': found_authors,
+                            'paper_url': paper_url,
+                            'error_type': None,
+                            'failed_dbs': [],
+                        }
+                    else:
+                        # Author mismatch - save first one but keep looking
+                        if first_mismatch is None:
+                            first_mismatch = {
+                                'status': 'author_mismatch',
+                                'source': name,
+                                'found_authors': found_authors,
+                                'paper_url': paper_url,
+                                'error_type': 'author_mismatch',
+                                'failed_dbs': [],
+                            }
+            except Exception:
+                failed_dbs.append(db_name)
+
+    # If we found the title but authors didn't match, report that
+    if first_mismatch:
+        return first_mismatch
+
+    result['failed_dbs'] = failed_dbs
+    return result
+
 
 def validate_authors(ref_authors, found_authors):
     def normalize_author(name):
@@ -922,78 +1071,229 @@ def validate_authors(ref_authors, found_authors):
         found_set = set(normalize_author(a) for a in found_authors)
     return bool(ref_set & found_set)
 
-def main(pdf_path, sleep_time=1.0, openalex_key=None):
-    refs, skip_stats = extract_references_with_titles_and_authors(pdf_path, return_stats=True)
-    print("Analyzing paper %s"%(pdf_path.split("/")[-1]))
+def check_references(refs, sleep_time=1.0, openalex_key=None, on_progress=None, max_concurrent_refs=4):
+    """Check references against databases with concurrent queries.
 
-    found = 0
-    failed = 0
-    mismatched = 0
+    Args:
+        refs: List of (title, authors) tuples
+        sleep_time: (unused, kept for API compatibility)
+        openalex_key: Optional OpenAlex API key
+        on_progress: Optional callback function(event_type, data)
+            event_type can be: 'checking', 'result', 'warning', 'retry_pass'
+            data varies by event type
+        max_concurrent_refs: Max number of references to check in parallel (default 4)
 
-    for i, (title, ref_authors) in enumerate(refs):
-        # Query services in order of rate limit generosity:
-        # 1. OpenAlex (if API key provided) - most generous
-        # 2. CrossRef - generous, large coverage
-        # 3. arXiv - moderate limits
-        # 4. DBLP - most aggressive rate limiting, query last
+    Returns:
+        Tuple of (results, check_stats) where:
+        - results: List of result dicts with title, ref_authors, status, source, found_authors, error_type
+        - check_stats: Dict with 'total_timeouts', 'retried_count', 'retry_successes'
+    """
+    import threading
 
-        # Helper: check if authors match (skip validation if no ref_authors)
-        def check_authors(ref_authors, found_authors, source):
-            nonlocal found, mismatched
-            if not ref_authors or validate_authors(ref_authors, found_authors):
-                found += 1
-                return True
+    results = [None] * len(refs)  # Pre-allocate to maintain order
+    # Track indices of "not found" results that had failed DBs for retry
+    retry_candidates = []
+    # Track total timeout/failure count
+    total_timeouts = 0
+    timeouts_lock = threading.Lock()
+    retry_lock = threading.Lock()
+
+    def check_single_ref(i, title, ref_authors):
+        """Check a single reference and return result."""
+        nonlocal total_timeouts
+
+        # Notify progress: starting to check this reference
+        if on_progress:
+            on_progress('checking', {
+                'index': i,
+                'total': len(refs),
+                'title': title,
+            })
+
+        # Query all databases concurrently
+        result = query_all_databases_concurrent(
+            title, ref_authors,
+            openalex_key=openalex_key
+        )
+
+        # Build full result record
+        full_result = {
+            'title': title,
+            'ref_authors': ref_authors,
+            'status': result['status'],
+            'source': result['source'],
+            'found_authors': result['found_authors'],
+            'paper_url': result.get('paper_url'),
+            'error_type': result['error_type'],
+            'failed_dbs': result.get('failed_dbs', []),
+        }
+        results[i] = full_result
+
+        # Track for retry if not found and had failures
+        failed_dbs = result.get('failed_dbs', [])
+        if failed_dbs:
+            with timeouts_lock:
+                total_timeouts += len(failed_dbs)
+            logger.debug(f"  Failed DBs: {', '.join(failed_dbs)}")
+            # Notify progress: warning about failed DBs
+            if on_progress:
+                status = result['status']
+                if status == 'not_found':
+                    context = "not found in other DBs"
+                    will_retry = " (will retry)"
+                elif status == 'verified':
+                    context = f"verified via {result['source']}"
+                    will_retry = ""
+                else:
+                    context = f"{status} via {result['source']}"
+                    will_retry = ""
+                on_progress('warning', {
+                    'index': i,
+                    'total': len(refs),
+                    'title': title,
+                    'failed_dbs': failed_dbs,
+                    'status': status,
+                    'message': f"{', '.join(failed_dbs)} timed out; {context}{will_retry}",
+                })
+        if result['status'] == 'not_found' and failed_dbs:
+            with retry_lock:
+                retry_candidates.append((i, failed_dbs))
+            logger.info(f"  -> Will retry ({len(failed_dbs)} DBs failed: {', '.join(failed_dbs)})")
+
+        # Notify progress: result for this reference
+        if on_progress:
+            on_progress('result', {
+                'index': i,
+                'total': len(refs),
+                'title': title,
+                'status': result['status'],
+                'source': result['source'],
+            })
+
+    # Process references in parallel with bounded concurrency
+    with ThreadPoolExecutor(max_workers=max_concurrent_refs) as executor:
+        futures = []
+        for i, (title, ref_authors) in enumerate(refs):
+            future = executor.submit(check_single_ref, i, title, ref_authors)
+            futures.append(future)
+
+        # Wait for all to complete
+        for future in futures:
+            future.result()  # This will raise any exceptions
+
+    # Retry pass for "not found" references that had DB failures
+    retry_successes = 0
+    if retry_candidates:
+        logger.info(f"=== RETRY PASS: {len(retry_candidates)} references had DB failures ===")
+        if on_progress:
+            on_progress('retry_pass', {
+                'count': len(retry_candidates),
+            })
+
+        for retry_num, (idx, failed_dbs) in enumerate(retry_candidates, 1):
+            title = results[idx]['title']
+            ref_authors = results[idx]['ref_authors']
+            short_title = title[:50] + '...' if len(title) > 50 else title
+            logger.info(f"[RETRY {retry_num}/{len(retry_candidates)}] {short_title}")
+
+            if on_progress:
+                on_progress('checking', {
+                    'index': idx,
+                    'total': len(refs),
+                    'title': f"[RETRY] {title}",
+                })
+
+            # Retry with all DBs
+            result = query_all_databases_concurrent(
+                title, ref_authors,
+                openalex_key=openalex_key
+            )
+
+            # Only update if we found something better
+            if result['status'] != 'not_found':
+                results[idx]['status'] = result['status']
+                results[idx]['source'] = result['source']
+                results[idx]['found_authors'] = result['found_authors']
+                results[idx]['error_type'] = result['error_type']
+                retry_successes += 1
+                logger.info(f"  -> RECOVERED: {result['status'].upper()} ({result['source']})")
+
+                if on_progress:
+                    on_progress('result', {
+                        'index': idx,
+                        'total': len(refs),
+                        'title': f"[RETRY] {title}",
+                        'status': result['status'],
+                        'source': result['source'],
+                    })
             else:
-                print_hallucinated_reference(
-                    title, "author_mismatch", source=source,
-                    ref_authors=ref_authors, found_authors=found_authors
-                )
-                mismatched += 1
-                return True  # Still handled, continue to next ref
+                logger.info(f"  -> Still not found")
 
-        # 1. OpenAlex (if API key provided)
-        # Note: OpenAlex sometimes returns incorrect authors, so on mismatch we check other sources
-        if openalex_key:
-            found_title, found_authors = query_openalex(title, openalex_key)
-            if found_title and found_authors:
-                if not ref_authors or validate_authors(ref_authors, found_authors):
-                    found += 1
-                    continue
-                # Author mismatch on OpenAlex - continue to check other sources
+    if retry_candidates:
+        logger.info(f"=== RETRY COMPLETE: {retry_successes}/{len(retry_candidates)} recovered ===")
 
-        # 2. CrossRef
-        found_title, found_authors = query_crossref(title)
-        if found_title:
-            check_authors(ref_authors, found_authors, "CrossRef")
-            continue
+    check_stats = {
+        'total_timeouts': total_timeouts,
+        'retried_count': len(retry_candidates),
+        'retry_successes': retry_successes,
+    }
+    return results, check_stats
 
-        # 3. arXiv
-        found_title, found_authors = query_arxiv(title)
-        if found_title:
-            check_authors(ref_authors, found_authors, "arXiv")
-            continue
 
-        # 4. DBLP - sleep before to avoid rate limiting
-        time.sleep(sleep_time)
-        found_title, found_authors = query_dblp(title)
-        if found_title:
-            check_authors(ref_authors, found_authors, "DBLP")
-            continue
+def main(pdf_path, sleep_time=1.0, openalex_key=None):
+    # Extract references
+    print(f"Extracting references from {pdf_path.split('/')[-1]}...")
+    refs, skip_stats = extract_references_with_titles_and_authors(pdf_path, return_stats=True)
 
-        # 5. OpenReview (last resort for conference papers)
-        found_title, found_authors = query_openreview(title)
-        if found_title:
-            check_authors(ref_authors, found_authors, "OpenReview")
-            continue
+    total = len(refs)
+    print(f"Found {total} references to check")
+    if skip_stats['skipped_url'] + skip_stats['skipped_short_title'] > 0:
+        print(f"{Colors.DIM}(Skipped {skip_stats['skipped_url']} URLs, {skip_stats['skipped_short_title']} short titles){Colors.RESET}")
+    print()
 
-        # 6. Semantic Scholar (aggregates Academia.edu, SSRN, PubMed, etc.)
-        found_title, found_authors = query_semantic_scholar(title)
-        if found_title:
-            check_authors(ref_authors, found_authors, "Semantic Scholar")
-            continue
+    # Progress callback for CLI
+    def cli_progress(event_type, data):
+        if event_type == 'checking':
+            idx = data['index'] + 1
+            total = data['total']
+            short_title = data['title'][:50] + '...' if len(data['title']) > 50 else data['title']
+            print(f"[{idx}/{total}] Checking: \"{short_title}\"")
+        elif event_type == 'result':
+            idx = data['index'] + 1
+            total = data['total']
+            status = data['status']
+            source = data['source']
+            if status == 'verified':
+                print(f"[{idx}/{total}] -> {Colors.GREEN}VERIFIED{Colors.RESET} ({source})")
+            elif status == 'author_mismatch':
+                print(f"[{idx}/{total}] -> {Colors.YELLOW}AUTHOR MISMATCH{Colors.RESET} ({source})")
+            else:
+                print(f"[{idx}/{total}] -> {Colors.RED}NOT FOUND{Colors.RESET}")
+        elif event_type == 'warning':
+            idx = data['index'] + 1
+            total = data['total']
+            message = data['message']
+            print(f"[{idx}/{total}] {Colors.YELLOW}WARNING:{Colors.RESET} {message}")
 
-        print_hallucinated_reference(title, "not_found", searched_openalex=bool(openalex_key))
-        failed += 1
+    # Check all references with progress
+    results, check_stats = check_references(refs, sleep_time=sleep_time, openalex_key=openalex_key, on_progress=cli_progress)
+
+    # Count results
+    found = sum(1 for r in results if r['status'] == 'verified')
+    failed = sum(1 for r in results if r['status'] == 'not_found')
+    mismatched = sum(1 for r in results if r['status'] == 'author_mismatch')
+
+    # Print detailed hallucination info
+    for result in results:
+        if result['status'] == 'not_found':
+            print_hallucinated_reference(result['title'], "not_found", searched_openalex=bool(openalex_key))
+        elif result['status'] == 'author_mismatch':
+            print_hallucinated_reference(
+                result['title'], "author_mismatch",
+                source=result['source'],
+                ref_authors=result['ref_authors'],
+                found_authors=result['found_authors']
+            )
 
     # Print summary
     print()
@@ -1007,6 +1307,8 @@ def main(pdf_path, sleep_time=1.0, openalex_key=None):
         print(f"  {Colors.DIM}Skipped: {total_skipped} (URLs: {skip_stats['skipped_url']}, short titles: {skip_stats['skipped_short_title']}){Colors.RESET}")
     if skip_stats['skipped_no_authors'] > 0:
         print(f"  {Colors.DIM}Title-only (no authors extracted): {skip_stats['skipped_no_authors']}{Colors.RESET}")
+    if check_stats['total_timeouts'] > 0:
+        print(f"  {Colors.DIM}DB timeouts/errors: {check_stats['total_timeouts']} (retried {check_stats['retried_count']}, {check_stats['retry_successes']} recovered){Colors.RESET}")
     print()
     print(f"  {Colors.GREEN}Verified:{Colors.RESET} {found}")
     if mismatched > 0:

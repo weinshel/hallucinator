@@ -11,17 +11,29 @@ Created by Gianluca Stringhini with the help of Claude Code and ChatGPT
   - IEEE (quoted titles)
   - ACM (year before title)
   - USENIX (author-title-venue format)
-- Validates references against multiple academic databases (in order):
+  - AAAI/ACM author-year format
+- Validates references against multiple academic databases:
   - OpenAlex (optional, with API key)
   - CrossRef
   - arXiv
   - DBLP
   - OpenReview
   - Semantic Scholar (aggregates Academia.edu, SSRN, PubMed, and more)
+  - ACL Anthology
+  - NeurIPS
+- **Fast concurrent processing**:
+  - 4 references checked in parallel
+  - All 8 databases queried simultaneously per reference
+  - Early exit when match found
+  - Configurable timeouts via `DB_TIMEOUT` env var
+- **Real-time progress streaming** in web interface via Server-Sent Events
+- **Automatic retry** for failed/timed out database queries
 - Author matching to detect title matches with wrong authors
 - Colored terminal output for easy identification of issues
 - Handles em-dash citations (same authors as previous reference)
 - Web interface for easy PDF upload and analysis
+- **Archive support** - Upload ZIP or tar.gz files with multiple PDFs
+- Clickable source links to verified papers (DOI, arXiv, etc.)
 - Google Scholar links for manual verification of flagged references
 
 ## Installation
@@ -71,15 +83,11 @@ python check_hallucinated_references.py --no-color <path_to_pdf>
 # Save output to file
 python check_hallucinated_references.py --output log.txt <path_to_pdf>
 
-
-# Adjust delay before DBLP requests (default: 1 second, to avoid rate limiting)
-python check_hallucinated_references.py --sleep=0.5 <path_to_pdf>
-
-# Use OpenAlex API (queries OpenAlex first, then CrossRef, arXiv, DBLP on failure)
+# Use OpenAlex API for improved coverage
 python check_hallucinated_references.py --openalex-key=YOUR_API_KEY <path_to_pdf>
 
 # Combine options
-python check_hallucinated_references.py --no-color --sleep=0.1 <path_to_pdf>
+python check_hallucinated_references.py --no-color --output results.txt --openalex-key=KEY <path_to_pdf>
 ```
 
 ### Options
@@ -87,8 +95,8 @@ python check_hallucinated_references.py --no-color --sleep=0.1 <path_to_pdf>
 | Option | Description |
 |--------|-------------|
 | `--no-color` | Disable colored output (useful for piping or logging) |
-| `--sleep=SECONDS` | Set delay before DBLP requests to avoid rate limiting (default: 1.0 second). Only applies when a reference isn't found in earlier databases. |
-| `--openalex-key=KEY` | OpenAlex API key. If provided, queries OpenAlex first before other databases. Get a free key at https://openalex.org/settings/api |
+| `--output=FILE` | Save output to a file |
+| `--openalex-key=KEY` | OpenAlex API key for improved coverage. Get a free key at https://openalex.org/settings/api |
 
 ## Web Interface
 
@@ -109,15 +117,21 @@ The server will start at `http://localhost:5001`.
 ### Using the Web Interface
 
 1. Open `http://localhost:5001` in your browser
-2. Upload a PDF file using the file picker
+2. Upload a PDF file or archive (ZIP/tar.gz with multiple PDFs)
 3. (Optional) Enter your OpenAlex API key for improved coverage
 4. Click "Analyze References"
-5. View results showing:
+5. Watch real-time progress:
+   - Progress bar and current reference being checked
+   - Live results streaming in as each reference is verified
+   - Retry pass for any timed-out queries
+6. View final results showing:
    - Summary statistics (verified, author mismatches, not found)
-   - List of potentially hallucinated references
-   - Google Scholar links for manual verification
+   - Timeout warnings showing which databases failed
+   - List of potentially hallucinated references with Google Scholar links
+   - Per-reference timeout info (which DBs timed out for each "not found" reference)
+   - Collapsible list of verified references with clickable source links
 
-The web interface displays the same information as the command-line tool but provides clickable Google Scholar links to quickly verify flagged references.
+The web interface uses Server-Sent Events (SSE) for real-time streaming progress, so you can watch each reference being checked rather than waiting for the entire analysis to complete.
 
 
 
@@ -152,14 +166,13 @@ SUMMARY
 2. **Reference Section Detection**: Locates the "References" or "Bibliography" section
 3. **Reference Segmentation**: Splits references by numbered patterns ([1], [2], etc.)
 4. **Title & Author Extraction**: Parses each reference to extract title and authors
-5. **Database Validation**: Queries databases in order of rate-limit generosity:
-   - OpenAlex (if API key provided) - most generous rate limits
-   - CrossRef - good coverage, generous limits
-   - arXiv - moderate limits
-   - DBLP - more restrictive, queried with configurable delay
-   - OpenReview - conference papers (ICLR, NeurIPS, etc.)
-   - Semantic Scholar - aggregates Academia.edu, SSRN, PubMed, and institutional repositories
+5. **Concurrent Database Validation**:
+   - Checks 4 references in parallel
+   - For each reference, queries all 8 databases simultaneously
+   - Returns immediately when a verified match is found (early exit)
+   - Databases: OpenAlex, CrossRef, arXiv, DBLP, OpenReview, Semantic Scholar, ACL Anthology, NeurIPS
 6. **Author Matching**: Confirms that found titles have matching authors
+7. **Retry Pass**: References marked "not found" due to timeouts are retried at the end
 
 ## Skipped References
 

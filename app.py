@@ -5,7 +5,11 @@ import tempfile
 import tarfile
 import urllib.parse
 import zipfile
-from flask import Flask, render_template, request, jsonify
+import json
+import queue
+import threading
+import sys
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 
 from check_hallucinated_references import (
     extract_references_with_titles_and_authors,
@@ -16,11 +20,14 @@ from check_hallucinated_references import (
     query_openreview,
     query_semantic_scholar,
     validate_authors,
+    check_references,
+    query_all_databases_concurrent,
 )
 
 # Configure logging
+log_level = logging.DEBUG if os.environ.get('FLASK_DEBUG', '').lower() in ('1', 'true') else logging.INFO
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format='%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -177,8 +184,14 @@ def extract_pdfs_from_archive(archive_path, file_type, extract_dir):
     return pdf_files
 
 
-def analyze_pdf(pdf_path, openalex_key=None):
+def analyze_pdf(pdf_path, openalex_key=None, on_progress=None):
     """Analyze PDF and return structured results.
+
+    Args:
+        pdf_path: Path to PDF file
+        openalex_key: Optional OpenAlex API key
+        on_progress: Optional callback function(event_type, data)
+            event_type can be: 'extraction_complete', 'checking', 'result', 'warning'
 
     Returns (results, skip_stats) where results is a list of dicts with keys:
         - title: reference title
@@ -191,106 +204,46 @@ def analyze_pdf(pdf_path, openalex_key=None):
     logger.info("Extracting references from PDF...")
     refs, skip_stats = extract_references_with_titles_and_authors(pdf_path, return_stats=True)
     logger.info(f"Found {len(refs)} references to check (skipped {skip_stats['skipped_url']} URLs, {skip_stats['skipped_short_title']} short titles)")
-    results = []
 
-    for i, (title, ref_authors) in enumerate(refs, 1):
-        short_title = title[:60] + '...' if len(title) > 60 else title
-        logger.info(f"[{i}/{len(refs)}] Checking: {short_title}")
+    # Notify extraction complete
+    if on_progress:
+        on_progress('extraction_complete', {
+            'total_refs': len(refs),
+            'skip_stats': skip_stats,
+        })
 
-        result = {
-            'title': title,
-            'status': 'verified',
-            'error_type': None,
-            'source': None,
-            'ref_authors': ref_authors,
-            'found_authors': [],
-        }
+    # Progress wrapper that also logs
+    def progress_wrapper(event_type, data):
+        if event_type == 'checking':
+            short_title = data['title'][:60] + '...' if len(data['title']) > 60 else data['title']
+            logger.info(f"[{data['index']+1}/{data['total']}] Checking: {short_title}")
+        elif event_type == 'result':
+            status = data['status'].upper()
+            source = f" ({data['source']})" if data['source'] else ""
+            logger.info(f"[{data['index']+1}/{data['total']}] -> {status}{source}")
+        elif event_type == 'warning':
+            logger.warning(f"[{data['index']+1}/{data['total']}] {data['message']}")
 
-        # Helper: check authors (skip validation if no ref_authors)
-        def check_and_set_result(source, found_authors):
-            if not ref_authors or validate_authors(ref_authors, found_authors):
-                result['status'] = 'verified'
-                result['source'] = source
-            else:
-                result['status'] = 'author_mismatch'
-                result['error_type'] = 'author_mismatch'
-                result['source'] = source
-                result['found_authors'] = found_authors
+        if on_progress:
+            on_progress(event_type, data)
 
-        # 1. OpenAlex (if API key provided)
-        # Note: OpenAlex sometimes returns incorrect authors, so on mismatch we check other sources
-        if openalex_key:
-            logger.info(f"     Querying OpenAlex...")
-            found_title, found_authors = query_openalex(title, openalex_key)
-            if found_title and found_authors:
-                if not ref_authors or validate_authors(ref_authors, found_authors):
-                    result['status'] = 'verified'
-                    result['source'] = 'OpenAlex'
-                    logger.info(f"     -> FOUND & VERIFIED (OpenAlex)")
-                    results.append(result)
-                    continue
-                logger.info(f"     -> Found but author mismatch, checking other sources...")
-
-        # 2. CrossRef
-        logger.info(f"     Querying CrossRef...")
-        found_title, found_authors = query_crossref(title)
-        if found_title:
-            check_and_set_result('CrossRef', found_authors)
-            logger.info(f"     -> FOUND - {result['status'].upper()} (CrossRef)")
-            results.append(result)
-            continue
-        logger.info(f"     -> Not in CrossRef")
-
-        # 3. arXiv
-        logger.info(f"     Querying arXiv...")
-        found_title, found_authors = query_arxiv(title)
-        if found_title:
-            check_and_set_result('arXiv', found_authors)
-            logger.info(f"     -> FOUND - {result['status'].upper()} (arXiv)")
-            results.append(result)
-            continue
-        logger.info(f"     -> Not in arXiv")
-
-        # 4. DBLP
-        logger.info(f"     Querying DBLP...")
-        found_title, found_authors = query_dblp(title)
-        if found_title:
-            check_and_set_result('DBLP', found_authors)
-            logger.info(f"     -> FOUND - {result['status'].upper()} (DBLP)")
-            results.append(result)
-            continue
-        logger.info(f"     -> Not in DBLP")
-
-        # 5. OpenReview (last resort for conference papers)
-        logger.info(f"     Querying OpenReview...")
-        found_title, found_authors = query_openreview(title)
-        if found_title:
-            check_and_set_result('OpenReview', found_authors)
-            logger.info(f"     -> FOUND - {result['status'].upper()} (OpenReview)")
-            results.append(result)
-            continue
-        logger.info(f"     -> Not in OpenReview")
-
-        # 6. Semantic Scholar (aggregates Academia.edu, SSRN, PubMed, etc.)
-        logger.info(f"     Querying Semantic Scholar...")
-        found_title, found_authors = query_semantic_scholar(title)
-        if found_title:
-            check_and_set_result('Semantic Scholar', found_authors)
-            logger.info(f"     -> FOUND - {result['status'].upper()} (Semantic Scholar)")
-            results.append(result)
-            continue
-        logger.info(f"     -> Not in Semantic Scholar")
-
-        # Not found in any database
-        result['status'] = 'not_found'
-        result['error_type'] = 'not_found'
-        logger.warning(f"     => NOT FOUND in any database!")
-        results.append(result)
+    # Use concurrent checking
+    results, check_stats = check_references(
+        refs,
+        sleep_time=1.0,
+        openalex_key=openalex_key,
+        on_progress=progress_wrapper
+    )
 
     verified = sum(1 for r in results if r['status'] == 'verified')
     not_found = sum(1 for r in results if r['status'] == 'not_found')
     mismatched = sum(1 for r in results if r['status'] == 'author_mismatch')
     logger.info(f"Analysis complete: {verified} verified, {not_found} not found, {mismatched} mismatched")
+
+    # Merge check_stats into skip_stats for convenience
+    skip_stats['total_timeouts'] = check_stats['total_timeouts']
+    skip_stats['retried_count'] = check_stats['retried_count']
+    skip_stats['retry_successes'] = check_stats['retry_successes']
 
     return results, skip_stats
 
@@ -457,6 +410,255 @@ def analyze():
     finally:
         # Cleanup temp directory
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.route('/analyze/stream', methods=['POST'])
+def analyze_stream():
+    """SSE endpoint for streaming analysis progress (supports single PDFs and archives)."""
+    if 'pdf' not in request.files:
+        logger.warning("Request received with no file")
+        return jsonify({'error': 'No file provided'}), 400
+
+    uploaded_file = request.files['pdf']
+    if uploaded_file.filename == '':
+        logger.warning("Request received with empty filename")
+        return jsonify({'error': 'No file selected'}), 400
+
+    file_type = get_file_type(uploaded_file.filename)
+    if file_type is None:
+        logger.warning(f"Unsupported file type: {uploaded_file.filename}")
+        return jsonify({'error': 'File must be a PDF, ZIP, or tar.gz archive'}), 400
+
+    openalex_key = request.form.get('openalex_key', '').strip() or None
+
+    logger.info(f"=== New streaming analysis request: {uploaded_file.filename} (type: {file_type}) ===")
+
+    # Create temp directory and save file
+    temp_dir = tempfile.mkdtemp()
+    pdf_files = []  # List of (filename, path) tuples
+
+    try:
+        if file_type == 'pdf':
+            temp_path = os.path.join(temp_dir, 'upload.pdf')
+            uploaded_file.save(temp_path)
+            pdf_files = [(uploaded_file.filename, temp_path)]
+        else:
+            # Archive handling
+            suffix = '.zip' if file_type == 'zip' else '.tar.gz'
+            archive_path = os.path.join(temp_dir, f'archive{suffix}')
+            uploaded_file.save(archive_path)
+
+            extract_dir = os.path.join(temp_dir, 'extracted')
+            os.makedirs(extract_dir)
+
+            try:
+                pdf_files = extract_pdfs_from_archive(archive_path, file_type, extract_dir)
+            except ValueError as e:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return jsonify({'error': str(e)}), 400
+
+            if not pdf_files:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return jsonify({'error': 'No PDF files found in archive'}), 400
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({'error': str(e)}), 500
+
+    is_archive = len(pdf_files) > 1
+
+    def generate():
+        """Generator for SSE events."""
+        event_queue = queue.Queue()
+        all_file_results = []  # List of per-file result dicts
+        current_file_results = []
+        current_skip_stats = [None]
+        current_filename = [None]
+
+        def on_progress(event_type, data):
+            logger.debug(f"SSE: Queueing event {event_type}")
+            # Add current filename context for archive mode
+            if is_archive and current_filename[0]:
+                data = dict(data) if data else {}
+                data['filename'] = current_filename[0]
+            event_queue.put((event_type, data))
+
+        def run_analysis():
+            try:
+                # Send archive_start event if processing multiple files
+                if is_archive:
+                    event_queue.put(('archive_start', {'file_count': len(pdf_files)}))
+
+                for file_idx, (filename, pdf_path) in enumerate(pdf_files):
+                    current_filename[0] = filename
+                    current_file_results.clear()
+
+                    # Send file_start event
+                    event_queue.put(('file_start', {
+                        'file_index': file_idx,
+                        'file_count': len(pdf_files),
+                        'filename': filename,
+                    }))
+
+                    try:
+                        results, skip_stats = analyze_pdf(pdf_path, openalex_key=openalex_key, on_progress=on_progress)
+                        current_skip_stats[0] = skip_stats
+                        current_file_results.extend(results)
+
+                        # Calculate file summary
+                        verified = sum(1 for r in results if r['status'] == 'verified')
+                        not_found = sum(1 for r in results if r['status'] == 'not_found')
+                        mismatched = sum(1 for r in results if r['status'] == 'author_mismatch')
+                        total_skipped = skip_stats.get('skipped_url', 0) + skip_stats.get('skipped_short_title', 0)
+
+                        file_result = {
+                            'filename': filename,
+                            'success': True,
+                            'summary': {
+                                'total_raw': skip_stats.get('total_raw', 0),
+                                'total': len(results),
+                                'verified': verified,
+                                'not_found': not_found,
+                                'mismatched': mismatched,
+                                'skipped': total_skipped,
+                                'skipped_url': skip_stats.get('skipped_url', 0),
+                                'skipped_short_title': skip_stats.get('skipped_short_title', 0),
+                                'title_only': skip_stats.get('skipped_no_authors', 0),
+                                'total_timeouts': skip_stats.get('total_timeouts', 0),
+                                'retried_count': skip_stats.get('retried_count', 0),
+                                'retry_successes': skip_stats.get('retry_successes', 0),
+                            },
+                            'results': results,
+                        }
+                        all_file_results.append(file_result)
+
+                        # Send file_complete event
+                        event_queue.put(('file_complete', file_result))
+
+                    except Exception as e:
+                        logger.error(f"Error processing {filename}: {e}")
+                        file_result = {
+                            'filename': filename,
+                            'success': False,
+                            'error': str(e),
+                            'results': [],
+                        }
+                        all_file_results.append(file_result)
+                        event_queue.put(('file_complete', file_result))
+
+                event_queue.put(('analysis_done', None))
+            except Exception as e:
+                event_queue.put(('error', {'message': str(e)}))
+            finally:
+                event_queue.put(('done', None))
+
+        # Start analysis in background thread
+        analysis_thread = threading.Thread(target=run_analysis)
+        analysis_thread.start()
+
+        try:
+            while True:
+                try:
+                    event_type, data = event_queue.get(timeout=30)
+                except queue.Empty:
+                    # Send keepalive
+                    yield b": keepalive\n\n"
+                    continue
+
+                if event_type == 'done':
+                    logger.debug("SSE: Done signal received")
+                    break
+                elif event_type == 'error':
+                    logger.debug(f"SSE: Sending error event")
+                    yield f"event: error\ndata: {json.dumps(data)}\n\n".encode('utf-8')
+                    break
+                elif event_type == 'archive_start':
+                    logger.debug(f"SSE: Sending archive_start event")
+                    yield f"event: archive_start\ndata: {json.dumps(data)}\n\n".encode('utf-8')
+                elif event_type == 'file_start':
+                    logger.debug(f"SSE: Sending file_start event for {data.get('filename')}")
+                    yield f"event: file_start\ndata: {json.dumps(data)}\n\n".encode('utf-8')
+                elif event_type == 'file_complete':
+                    logger.debug(f"SSE: Sending file_complete event for {data.get('filename')}")
+                    yield f"event: file_complete\ndata: {json.dumps(data)}\n\n".encode('utf-8')
+                elif event_type == 'extraction_complete':
+                    logger.debug(f"SSE: Sending extraction_complete event")
+                    yield f"event: extraction_complete\ndata: {json.dumps(data)}\n\n".encode('utf-8')
+                elif event_type == 'retry_pass':
+                    logger.debug(f"SSE: Sending retry_pass event")
+                    yield f"event: retry_pass\ndata: {json.dumps(data)}\n\n".encode('utf-8')
+                elif event_type == 'checking':
+                    logger.debug(f"SSE: Sending checking event for index {data.get('index')}")
+                    yield f"event: checking\ndata: {json.dumps(data)}\n\n".encode('utf-8')
+                elif event_type == 'result':
+                    # Include full result data
+                    result_data = {
+                        'index': data['index'],
+                        'total': data['total'],
+                        'title': data['title'],
+                        'status': data['status'],
+                        'source': data['source'],
+                    }
+                    if 'filename' in data:
+                        result_data['filename'] = data['filename']
+                    logger.debug(f"SSE: Sending result event for index {data.get('index')}")
+                    yield f"event: result\ndata: {json.dumps(result_data)}\n\n".encode('utf-8')
+                elif event_type == 'warning':
+                    warning_data = {
+                        'index': data['index'],
+                        'total': data['total'],
+                        'title': data['title'],
+                        'failed_dbs': data['failed_dbs'],
+                        'message': data['message'],
+                    }
+                    if 'filename' in data:
+                        warning_data['filename'] = data['filename']
+                    logger.debug(f"SSE: Sending warning event for index {data.get('index')}")
+                    yield f"event: warning\ndata: {json.dumps(warning_data)}\n\n".encode('utf-8')
+                elif event_type == 'analysis_done':
+                    # Send complete event with aggregated summary
+                    logger.debug("SSE: Sending complete event")
+
+                    # Aggregate stats across all files
+                    agg_summary = {
+                        'total_raw': 0, 'total': 0, 'verified': 0, 'not_found': 0,
+                        'mismatched': 0, 'skipped': 0, 'skipped_url': 0,
+                        'skipped_short_title': 0, 'title_only': 0,
+                        'total_timeouts': 0, 'retried_count': 0, 'retry_successes': 0,
+                    }
+                    all_results = []
+                    for fr in all_file_results:
+                        if fr.get('success'):
+                            for key in agg_summary:
+                                agg_summary[key] += fr['summary'].get(key, 0)
+                            all_results.extend(fr['results'])
+
+                    complete_data = {
+                        'summary': agg_summary,
+                        'results': all_results,
+                    }
+                    if is_archive:
+                        complete_data['file_count'] = len(pdf_files)
+                        complete_data['files'] = all_file_results
+
+                    yield f"event: complete\ndata: {json.dumps(complete_data)}\n\n".encode('utf-8')
+
+        finally:
+            analysis_thread.join(timeout=1)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    response = Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+        }
+    )
+    response.direct_passthrough = True
+    return response
 
 
 if __name__ == '__main__':

@@ -72,15 +72,19 @@
             background: #9ca3af;
             cursor: not-allowed;
         }
-        .spinner {
+        .progress-section {
             display: none;
+            margin-top: 1rem;
+        }
+        .progress-section.visible {
+            display: block;
+        }
+        .progress-header {
+            display: flex;
             align-items: center;
             gap: 0.5rem;
-            margin-top: 1rem;
-            color: #666;
-        }
-        .spinner.visible {
-            display: flex;
+            margin-bottom: 0.75rem;
+            color: #333;
         }
         .spinner-icon {
             width: 20px;
@@ -92,6 +96,58 @@
         }
         @keyframes spin {
             to { transform: rotate(360deg); }
+        }
+        .progress-bar-container {
+            background: #e5e7eb;
+            border-radius: 4px;
+            height: 8px;
+            margin-bottom: 0.75rem;
+            overflow: hidden;
+        }
+        .progress-bar {
+            background: #2563eb;
+            height: 100%;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .progress-status {
+            font-size: 0.9rem;
+            color: #666;
+            margin-bottom: 0.5rem;
+        }
+        .progress-current {
+            font-size: 0.85rem;
+            color: #888;
+            font-style: italic;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .progress-results {
+            margin-top: 1rem;
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 0.85rem;
+            border: 1px solid #e5e7eb;
+            border-radius: 4px;
+            padding: 0.5rem;
+            background: #fafafa;
+        }
+        .progress-result-item {
+            padding: 0.25rem 0;
+            border-bottom: 1px solid #eee;
+        }
+        .progress-result-item:last-child {
+            border-bottom: none;
+        }
+        .progress-result-verified {
+            color: #16a34a;
+        }
+        .progress-result-mismatch {
+            color: #ca8a04;
+        }
+        .progress-result-notfound {
+            color: #dc2626;
         }
         .results {
             display: none;
@@ -222,6 +278,62 @@
             padding: 2rem;
             text-align: center;
             color: #16a34a;
+        }
+        .verified-section {
+            border-top: 1px solid #eee;
+            margin-top: 1rem;
+        }
+        .verified-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 1.5rem;
+            background: #f0fdf4;
+            cursor: pointer;
+            user-select: none;
+            color: #16a34a;
+            font-weight: 500;
+        }
+        .verified-header:hover {
+            background: #dcfce7;
+        }
+        .verified-toggle {
+            transition: transform 0.2s;
+        }
+        .verified-section.expanded .verified-toggle {
+            transform: rotate(180deg);
+        }
+        .verified-list {
+            display: none;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .verified-section.expanded .verified-list {
+            display: block;
+        }
+        .verified-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1.5rem;
+            border-bottom: 1px solid #eee;
+            gap: 1rem;
+        }
+        .verified-item:last-child {
+            border-bottom: none;
+        }
+        .verified-title {
+            flex: 1;
+            word-break: break-word;
+        }
+        .verified-source {
+            color: #16a34a;
+            font-size: 0.85rem;
+            white-space: nowrap;
+            text-decoration: none;
+        }
+        a.verified-source:hover {
+            text-decoration: underline;
         }
         /* Multi-file archive styles */
         .file-section {
@@ -360,9 +472,17 @@
             </div>
             <button type="submit" id="submitBtn">Analyze References</button>
         </form>
-        <div class="spinner" id="spinner">
-            <div class="spinner-icon"></div>
-            <span>Analyzing references... This may take a few minutes.</span>
+        <div class="progress-section" id="progressSection">
+            <div class="progress-header">
+                <div class="spinner-icon"></div>
+                <span id="progressHeaderText">Analyzing references...</span>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <div class="progress-status" id="progressStatus">Extracting references...</div>
+            <div class="progress-current" id="progressCurrent"></div>
+            <div class="progress-results" id="progressResults"></div>
         </div>
         <div class="error-message" id="errorMessage"></div>
     </div>
@@ -405,7 +525,12 @@
     <script>
         const form = document.getElementById('analyzeForm');
         const submitBtn = document.getElementById('submitBtn');
-        const spinner = document.getElementById('spinner');
+        const progressSection = document.getElementById('progressSection');
+        const progressBar = document.getElementById('progressBar');
+        const progressStatus = document.getElementById('progressStatus');
+        const progressCurrent = document.getElementById('progressCurrent');
+        const progressResults = document.getElementById('progressResults');
+        const progressHeaderText = document.getElementById('progressHeaderText');
         const errorMessage = document.getElementById('errorMessage');
         const results = document.getElementById('results');
         const openalexKeyInput = document.getElementById('openalexKey');
@@ -415,6 +540,14 @@
         if (savedKey) {
             openalexKeyInput.value = savedKey;
         }
+
+        // Track live results during streaming
+        let liveResults = [];
+        let totalRefs = 0;
+        let isArchive = false;
+        let archiveFileCount = 0;
+        let currentFileIndex = 0;
+        let currentFilename = '';
 
         function createScholarLink(title) {
             const encoded = encodeURIComponent(title);
@@ -446,9 +579,20 @@
                 `;
             }
 
+            // Show which databases timed out
+            let timeoutHtml = '';
+            if (ref.failed_dbs && ref.failed_dbs.length > 0) {
+                timeoutHtml = `
+                    <div class="timeout-info" style="margin-top: 0.5rem; padding: 0.375rem 0.75rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 0.25rem; color: #92400e; font-size: 0.85rem;">
+                        ⚠️ Timed out: ${ref.failed_dbs.map(db => escapeHtml(db)).join(', ')}
+                    </div>
+                `;
+            }
+
             div.innerHTML = `
                 <div class="reference-title">${escapeHtml(ref.title)}</div>
                 <div class="reference-status ${statusClass}">${statusText}</div>
+                ${timeoutHtml}
                 ${authorHtml}
                 <a href="${createScholarLink(ref.title)}" target="_blank" class="scholar-link">
                     Search on Google Scholar &rarr;
@@ -486,6 +630,21 @@
             }
             skippedDetails.textContent = detailParts.join(' | ');
 
+            // Show timeout warning separately if there were timeouts
+            let timeoutWarning = document.getElementById('timeoutWarning');
+            if (!timeoutWarning) {
+                timeoutWarning = document.createElement('div');
+                timeoutWarning.id = 'timeoutWarning';
+                timeoutWarning.style.cssText = 'margin-top: 0.75rem; padding: 0.5rem 1rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 0.375rem; color: #92400e; font-size: 0.9rem;';
+                skippedDetails.parentNode.insertBefore(timeoutWarning, skippedDetails.nextSibling);
+            }
+            if (data.summary.total_timeouts > 0) {
+                timeoutWarning.innerHTML = `⚠️ DB timeouts: ${data.summary.total_timeouts} (retried ${data.summary.retried_count}, ${data.summary.retry_successes} recovered)`;
+                timeoutWarning.style.display = 'block';
+            } else {
+                timeoutWarning.style.display = 'none';
+            }
+
             // Update problematic percentage
             const problematicPercent = document.getElementById('problematicPercent');
             const problematic = data.summary.not_found + data.summary.mismatched;
@@ -506,11 +665,12 @@
             document.querySelector('.summary').style.display = 'block';
             document.getElementById('hallucinations').style.display = 'block';
 
-            // Render hallucinations
+            // Render all results
             const list = document.getElementById('hallucinationList');
             list.innerHTML = '';
 
             const hallucinations = data.results.filter(r => r.status !== 'verified');
+            const verified = data.results.filter(r => r.status === 'verified');
 
             if (hallucinations.length === 0) {
                 list.innerHTML = '<div class="no-hallucinations">All references verified!</div>';
@@ -518,6 +678,33 @@
                 hallucinations.forEach(ref => {
                     list.appendChild(renderHallucination(ref));
                 });
+            }
+
+            // Show verified references in collapsible section
+            if (verified.length > 0) {
+                const verifiedSection = document.createElement('div');
+                verifiedSection.className = 'verified-section';
+                verifiedSection.innerHTML = `
+                    <div class="verified-header" onclick="this.parentElement.classList.toggle('expanded')">
+                        <span>Verified References (${verified.length})</span>
+                        <span class="verified-toggle">▼</span>
+                    </div>
+                    <div class="verified-list"></div>
+                `;
+                const verifiedList = verifiedSection.querySelector('.verified-list');
+                verified.forEach(ref => {
+                    const item = document.createElement('div');
+                    item.className = 'verified-item';
+                    const sourceLink = ref.paper_url
+                        ? `<a href="${escapeHtml(ref.paper_url)}" target="_blank" class="verified-source">${escapeHtml(ref.source || 'Unknown')} ↗</a>`
+                        : `<span class="verified-source">${escapeHtml(ref.source || 'Unknown')}</span>`;
+                    item.innerHTML = `
+                        <span class="verified-title">${escapeHtml(ref.title)}</span>
+                        ${sourceLink}
+                    `;
+                    verifiedList.appendChild(item);
+                });
+                list.appendChild(verifiedSection);
             }
         }
 
@@ -561,6 +748,9 @@
                     </div>
                 </div>
                 <div class="${aggPercentClass}">${aggPercentText}</div>
+                <div class="timeout-warning" style="margin-top: 0.75rem; padding: 0.5rem 1rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 0.375rem; color: #92400e; font-size: 0.9rem;">
+                        ⚠️ DB timeouts: ${data.summary.total_timeouts || 0} (retried ${data.summary.retried_count || 0}, ${data.summary.retry_successes || 0} recovered)
+                    </div>
             `;
             container.appendChild(header);
 
@@ -648,6 +838,11 @@
                         </div>
                     </div>
                     <div class="${filePercentClass}">${filePercentText}</div>
+                    ${file.summary.total_timeouts > 0 ? `
+                        <div class="timeout-warning" style="margin-top: 0.5rem; padding: 0.375rem 0.75rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 0.25rem; color: #92400e; font-size: 0.85rem;">
+                            ⚠️ DB timeouts: ${file.summary.total_timeouts} (retried ${file.summary.retried_count}, ${file.summary.retry_successes} recovered)
+                        </div>
+                    ` : ''}
                 </div>
             `;
 
@@ -661,13 +856,83 @@
                 });
             }
 
+            // Add verified references section
+            const verified = file.results.filter(r => r.status === 'verified');
+            if (verified.length > 0) {
+                html += `
+                    <div class="verified-section">
+                        <div class="verified-header" onclick="this.parentElement.classList.toggle('expanded')">
+                            <span>Verified References (${verified.length})</span>
+                            <span class="verified-toggle">▼</span>
+                        </div>
+                        <div class="verified-list">
+                            ${verified.map(ref => `
+                                <div class="verified-item">
+                                    <span class="verified-title">${escapeHtml(ref.title)}</span>
+                                    ${ref.paper_url
+                                        ? `<a href="${escapeHtml(ref.paper_url)}" target="_blank" class="verified-source">${escapeHtml(ref.source || 'Unknown')} ↗</a>`
+                                        : `<span class="verified-source">${escapeHtml(ref.source || 'Unknown')}</span>`
+                                    }
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
             return html;
+        }
+
+        function resetProgressUI() {
+            liveResults = [];
+            totalRefs = 0;
+            isArchive = false;
+            archiveFileCount = 0;
+            currentFileIndex = 0;
+            currentFilename = '';
+            progressBar.style.width = '0%';
+            progressStatus.textContent = 'Extracting references...';
+            progressCurrent.textContent = '';
+            progressResults.innerHTML = '';
+            progressHeaderText.textContent = 'Analyzing references...';
+        }
+
+        function addProgressResult(data) {
+            const item = document.createElement('div');
+            item.className = 'progress-result-item';
+
+            let statusClass = '';
+            let statusText = '';
+            if (data.status === 'verified') {
+                statusClass = 'progress-result-verified';
+                statusText = `VERIFIED (${data.source})`;
+            } else if (data.status === 'author_mismatch') {
+                statusClass = 'progress-result-mismatch';
+                statusText = `MISMATCH (${data.source})`;
+            } else {
+                statusClass = 'progress-result-notfound';
+                statusText = 'NOT FOUND';
+            }
+
+            const shortTitle = data.title.length > 50 ? data.title.substring(0, 50) + '...' : data.title;
+            item.innerHTML = `<span class="${statusClass}">[${data.index + 1}/${data.total}]</span> ${escapeHtml(shortTitle)} - <span class="${statusClass}">${statusText}</span>`;
+
+            progressResults.appendChild(item);
+            progressResults.scrollTop = progressResults.scrollHeight;
         }
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
 
             const formData = new FormData(form);
+            const fileInput = document.getElementById('pdfFile');
+            const file = fileInput.files[0];
+
+            if (!file) {
+                errorMessage.textContent = 'Please select a file';
+                errorMessage.classList.add('visible');
+                return;
+            }
 
             // Save OpenAlex API key to localStorage
             const keyValue = openalexKeyInput.value.trim();
@@ -679,40 +944,177 @@
 
             // Reset UI
             submitBtn.disabled = true;
-            spinner.classList.add('visible');
+            resetProgressUI();
+            progressSection.classList.add('visible');
             errorMessage.classList.remove('visible');
             results.classList.remove('visible');
 
+            // Use SSE for all uploads (PDFs and archives)
             try {
-                const response = await fetch('/analyze', {
+                const response = await fetch('/analyze/stream', {
                     method: 'POST',
                     body: formData,
                 });
 
-                const data = await response.json();
-
-                if (!response.ok || data.error) {
-                    throw new Error(data.error || 'Analysis failed');
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Analysis failed');
                 }
 
-                // Reset the hallucinations header visibility
-                document.getElementById('hallucinations').querySelector('h2').style.display = 'block';
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
 
-                // Check if this is a multi-file result
-                if (data.files && data.file_count > 0) {
-                    renderMultiFileResults(data);
-                } else {
-                    renderSingleFileResults(data);
+                // Process SSE events - split by double newline
+                function processEvent(eventText) {
+                    const lines = eventText.trim().split('\n');
+                    let eventType = null;
+                    let eventData = null;
+
+                    for (const line of lines) {
+                        if (line.startsWith('event:')) {
+                            eventType = line.substring(6).trim();
+                        } else if (line.startsWith('data:')) {
+                            try {
+                                eventData = JSON.parse(line.substring(5).trim());
+                            } catch (e) {
+                                console.error('Failed to parse SSE data:', line);
+                            }
+                        }
+                    }
+
+                    if (!eventType || !eventData) return;
+
+                    console.log('SSE event:', eventType, eventData);
+                    if (eventData && eventData.summary) {
+                        console.log('Summary data:', eventData.summary);
+                        console.log('total_timeouts:', eventData.summary.total_timeouts);
+                    }
+
+                    if (eventType === 'archive_start') {
+                        isArchive = true;
+                        archiveFileCount = eventData.file_count;
+                        progressHeaderText.textContent = `Processing ${archiveFileCount} files...`;
+                        progressStatus.textContent = `Archive with ${archiveFileCount} PDFs`;
+                    } else if (eventType === 'file_start') {
+                        currentFileIndex = eventData.file_index;
+                        currentFilename = eventData.filename;
+                        liveResults = []; // Reset for new file
+                        totalRefs = 0;
+                        if (isArchive) {
+                            progressHeaderText.textContent = `File ${currentFileIndex + 1}/${archiveFileCount}: ${currentFilename}`;
+                            // Add file separator in results
+                            const separator = document.createElement('div');
+                            separator.className = 'progress-result-item';
+                            separator.innerHTML = `<strong style="color: #2563eb;">--- ${escapeHtml(currentFilename)} ---</strong>`;
+                            progressResults.appendChild(separator);
+                            progressResults.scrollTop = progressResults.scrollHeight;
+                        }
+                        progressStatus.textContent = 'Extracting references...';
+                    } else if (eventType === 'file_complete') {
+                        if (isArchive) {
+                            const fc = eventData;
+                            if (fc.success) {
+                                progressStatus.textContent = `File ${currentFileIndex + 1}/${archiveFileCount} complete: ${fc.summary.verified} verified, ${fc.summary.not_found} not found`;
+                            } else {
+                                progressStatus.textContent = `File ${currentFileIndex + 1}/${archiveFileCount} failed: ${fc.error}`;
+                            }
+                            // Update overall progress bar based on files completed
+                            const filePct = ((currentFileIndex + 1) / archiveFileCount) * 100;
+                            progressBar.style.width = filePct + '%';
+                        }
+                    } else if (eventType === 'extraction_complete') {
+                        totalRefs = eventData.total_refs;
+                        const prefix = isArchive ? `[${currentFilename}] ` : '';
+                        progressStatus.textContent = `${prefix}Found ${totalRefs} references to check`;
+                        if (!isArchive) {
+                            progressHeaderText.textContent = `Checking ${totalRefs} references...`;
+                        }
+                    } else if (eventType === 'retry_pass') {
+                        progressStatus.textContent = `Retrying ${eventData.count} references that had timeouts...`;
+                        progressHeaderText.textContent = `Retry pass...`;
+                    } else if (eventType === 'checking') {
+                        const shortTitle = eventData.title.length > 60
+                            ? eventData.title.substring(0, 60) + '...'
+                            : eventData.title;
+                        progressCurrent.textContent = `[${eventData.index + 1}/${eventData.total}] Checking: "${shortTitle}"`;
+                        // For single PDF, update progress bar based on refs; for archive, keep file-based progress
+                        if (!isArchive) {
+                            const pct = ((eventData.index) / eventData.total) * 100;
+                            progressBar.style.width = pct + '%';
+                        }
+                    } else if (eventType === 'result') {
+                        liveResults.push(eventData);
+                        addProgressResult(eventData);
+
+                        // Update status with running totals
+                        const verified = liveResults.filter(r => r.status === 'verified').length;
+                        const notFound = liveResults.filter(r => r.status === 'not_found').length;
+                        const mismatch = liveResults.filter(r => r.status === 'author_mismatch').length;
+
+                        if (!isArchive) {
+                            const pct = ((eventData.index + 1) / eventData.total) * 100;
+                            progressBar.style.width = pct + '%';
+                            progressStatus.textContent = `Checked ${eventData.index + 1}/${eventData.total}: ${verified} verified, ${notFound} not found, ${mismatch} mismatched`;
+                        } else {
+                            progressStatus.textContent = `[${currentFilename}] ${eventData.index + 1}/${eventData.total}: ${verified} verified, ${notFound} not found, ${mismatch} mismatched`;
+                        }
+                    } else if (eventType === 'warning') {
+                        // Display warning about failed databases
+                        const warningItem = document.createElement('div');
+                        warningItem.className = 'progress-result-item';
+                        warningItem.innerHTML = `
+                            <span style="color: #d97706;">⚠️ [${eventData.index + 1}/${eventData.total}]</span>
+                            <span style="color: #92400e;">${escapeHtml(eventData.message)}</span>
+                        `;
+                        progressResults.appendChild(warningItem);
+                        progressResults.scrollTop = progressResults.scrollHeight;
+                    } else if (eventType === 'complete') {
+                        // Analysis complete - render full results
+                        progressSection.classList.remove('visible');
+
+                        // Reset the hallucinations header visibility
+                        document.getElementById('hallucinations').querySelector('h2').style.display = 'block';
+
+                        // Check if this is a multi-file result
+                        if (eventData.files && eventData.file_count > 1) {
+                            renderMultiFileResults(eventData);
+                        } else {
+                            renderSingleFileResults({
+                                summary: eventData.summary,
+                                results: eventData.results,
+                            });
+                        }
+
+                        results.classList.add('visible');
+                    } else if (eventType === 'error') {
+                        throw new Error(eventData.message || 'Analysis failed');
+                    }
                 }
 
-                results.classList.add('visible');
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+
+                    // SSE events are separated by double newlines
+                    const events = buffer.split('\n\n');
+                    buffer = events.pop(); // Keep incomplete event in buffer
+
+                    for (const eventText of events) {
+                        if (eventText.trim()) {
+                            processEvent(eventText);
+                        }
+                    }
+                }
 
             } catch (err) {
+                progressSection.classList.remove('visible');
                 errorMessage.textContent = err.message;
                 errorMessage.classList.add('visible');
             } finally {
                 submitBtn.disabled = false;
-                spinner.classList.remove('visible');
             }
         });
     </script>

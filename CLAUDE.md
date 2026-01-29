@@ -46,9 +46,10 @@ docker run -p 5001:5001 hallucinator
 
 ### Concurrency Model
 - **4 references checked in parallel** (configurable via `max_concurrent_refs`)
-- **6 databases queried concurrently** per reference (all at once)
+- **8 databases queried concurrently** per reference (all at once)
 - **Early exit** - Returns immediately when verified match found
-- **Request timeouts** - 10s default, 5s for OpenReview
+- **Request timeouts** - 10s default (`DB_TIMEOUT`), 5s for OpenReview (`DB_TIMEOUT_SHORT`)
+- **Configurable timeouts** - Set `DB_TIMEOUT` and `DB_TIMEOUT_SHORT` env vars for testing
 
 ### Database Sources
 - OpenAlex (optional, needs API key)
@@ -57,6 +58,8 @@ docker run -p 5001:5001 hallucinator
 - DBLP
 - OpenReview
 - Semantic Scholar
+- ACL Anthology
+- NeurIPS
 
 ### Key Files
 - `check_hallucinated_references.py` - Core validation logic, CLI interface
@@ -82,4 +85,6 @@ docker run -p 5001:5001 hallucinator
 - **Concurrent queries**: `ThreadPoolExecutor` for parallel DB queries and reference checking
 - **SSE streaming**: Real-time progress via Server-Sent Events (`/analyze/stream` endpoint)
 - **Progress callbacks**: `on_progress(event_type, data)` pattern for both CLI and web
+  - Events: `checking`, `result`, `warning`, `retry_pass`
 - **Retry mechanism**: Tracks failed DBs and retries "not found" references at the end
+- **Timeout tracking**: Per-reference tracking of which DBs timed out, displayed in final results

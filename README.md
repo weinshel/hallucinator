@@ -19,10 +19,13 @@ Created by Gianluca Stringhini with the help of Claude Code and ChatGPT
   - DBLP
   - OpenReview
   - Semantic Scholar (aggregates Academia.edu, SSRN, PubMed, and more)
+  - ACL Anthology
+  - NeurIPS
 - **Fast concurrent processing**:
   - 4 references checked in parallel
-  - All 6 databases queried simultaneously per reference
+  - All 8 databases queried simultaneously per reference
   - Early exit when match found
+  - Configurable timeouts via `DB_TIMEOUT` env var
 - **Real-time progress streaming** in web interface via Server-Sent Events
 - **Automatic retry** for failed/timed out database queries
 - Author matching to detect title matches with wrong authors
@@ -122,8 +125,10 @@ The server will start at `http://localhost:5001`.
    - Live results streaming in as each reference is verified
    - Retry pass for any timed-out queries
 6. View final results showing:
-   - Summary statistics (verified, author mismatches, not found, timeouts)
+   - Summary statistics (verified, author mismatches, not found)
+   - Timeout warnings showing which databases failed
    - List of potentially hallucinated references with Google Scholar links
+   - Per-reference timeout info (which DBs timed out for each "not found" reference)
    - Collapsible list of verified references with clickable source links
 
 The web interface uses Server-Sent Events (SSE) for real-time streaming progress, so you can watch each reference being checked rather than waiting for the entire analysis to complete.
@@ -163,9 +168,9 @@ SUMMARY
 4. **Title & Author Extraction**: Parses each reference to extract title and authors
 5. **Concurrent Database Validation**:
    - Checks 4 references in parallel
-   - For each reference, queries all 6 databases simultaneously
+   - For each reference, queries all 8 databases simultaneously
    - Returns immediately when a verified match is found (early exit)
-   - Databases: OpenAlex, CrossRef, arXiv, DBLP, OpenReview, Semantic Scholar
+   - Databases: OpenAlex, CrossRef, arXiv, DBLP, OpenReview, Semantic Scholar, ACL Anthology, NeurIPS
 6. **Author Matching**: Confirms that found titles have matching authors
 7. **Retry Pass**: References marked "not found" due to timeouts are retried at the end
 

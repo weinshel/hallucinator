@@ -191,7 +191,7 @@ def analyze_pdf(pdf_path, openalex_key=None, on_progress=None):
         pdf_path: Path to PDF file
         openalex_key: Optional OpenAlex API key
         on_progress: Optional callback function(event_type, data)
-            event_type can be: 'extraction_complete', 'checking', 'result'
+            event_type can be: 'extraction_complete', 'checking', 'result', 'warning'
 
     Returns (results, skip_stats) where results is a list of dicts with keys:
         - title: reference title
@@ -221,6 +221,8 @@ def analyze_pdf(pdf_path, openalex_key=None, on_progress=None):
             status = data['status'].upper()
             source = f" ({data['source']})" if data['source'] else ""
             logger.info(f"[{data['index']+1}/{data['total']}] -> {status}{source}")
+        elif event_type == 'warning':
+            logger.warning(f"[{data['index']+1}/{data['total']}] {data['message']}")
 
         if on_progress:
             on_progress(event_type, data)
@@ -600,6 +602,18 @@ def analyze_stream():
                         result_data['filename'] = data['filename']
                     logger.debug(f"SSE: Sending result event for index {data.get('index')}")
                     yield f"event: result\ndata: {json.dumps(result_data)}\n\n".encode('utf-8')
+                elif event_type == 'warning':
+                    warning_data = {
+                        'index': data['index'],
+                        'total': data['total'],
+                        'title': data['title'],
+                        'failed_dbs': data['failed_dbs'],
+                        'message': data['message'],
+                    }
+                    if 'filename' in data:
+                        warning_data['filename'] = data['filename']
+                    logger.debug(f"SSE: Sending warning event for index {data.get('index')}")
+                    yield f"event: warning\ndata: {json.dumps(warning_data)}\n\n".encode('utf-8')
                 elif event_type == 'analysis_done':
                     # Send complete event with aggregated summary
                     logger.debug("SSE: Sending complete event")

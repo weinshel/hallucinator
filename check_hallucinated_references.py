@@ -1,5 +1,6 @@
 import re
 import sys
+import os
 import requests
 import urllib.parse
 import unicodedata
@@ -13,6 +14,11 @@ import contextlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
+
+# Request timeout in seconds - can override with DB_TIMEOUT env var for testing
+# Set to a low value (e.g., 0.001) to force timeouts for testing warnings
+DB_TIMEOUT = float(os.environ.get('DB_TIMEOUT', '10'))
+DB_TIMEOUT_SHORT = float(os.environ.get('DB_TIMEOUT_SHORT', '5'))  # For OpenReview
 
 # ANSI color codes for terminal output
 class Colors:
@@ -715,7 +721,7 @@ def query_dblp(title):
     query = ' '.join(words)
     url = f"https://dblp.org/search/publ/api?q={urllib.parse.quote(query)}&format=json"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=DB_TIMEOUT)
         if response.status_code != 200:
             return None, [], None
         result = response.json()
@@ -733,6 +739,7 @@ def query_dblp(title):
                 return found_title, authors, paper_url
     except Exception as e:
         print(f"[Error] DBLP search failed: {e}")
+        raise  # Re-raise so failed_dbs gets tracked
     return None, [], None
 
 def query_arxiv(title):
@@ -742,7 +749,7 @@ def query_arxiv(title):
     url = f"http://export.arxiv.org/api/query?search_query=all:{urllib.parse.quote(query)}&start=0&max_results=5"
     try:
         # feedparser doesn't support timeout directly, so we fetch with requests first
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=DB_TIMEOUT)
         feed = feedparser.parse(response.content)
         for entry in feed.entries:
             entry_title = entry.title
@@ -752,6 +759,7 @@ def query_arxiv(title):
                 return entry_title, authors, paper_url
     except Exception as e:
         print(f"[Error] arXiv search failed: {e}")
+        raise  # Re-raise so failed_dbs gets tracked
     return None, [], None
 
 def query_crossref(title):
@@ -760,7 +768,7 @@ def query_crossref(title):
     query = ' '.join(words)
     url = f"https://api.crossref.org/works?query.title={urllib.parse.quote(query)}&rows=5"
     try:
-        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=10)
+        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=DB_TIMEOUT)
         if response.status_code != 200:
             return None, [], None
         results = response.json().get("message", {}).get("items", [])
@@ -773,6 +781,7 @@ def query_crossref(title):
                 return found_title, authors, paper_url
     except Exception as e:
         print(f"[Error] CrossRef search failed: {e}")
+        raise  # Re-raise so failed_dbs gets tracked
     return None, [], None
 
 def query_openalex(title, api_key):
@@ -781,7 +790,7 @@ def query_openalex(title, api_key):
     query = ' '.join(words)
     url = f"https://api.openalex.org/works?filter=title.search:{urllib.parse.quote(query)}&api_key={api_key}"
     try:
-        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=10)
+        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=DB_TIMEOUT)
         if response.status_code != 200:
             return None, [], None
         results = response.json().get("results", [])
@@ -802,14 +811,16 @@ def query_openalex(title, api_key):
                 return found_title, authors, paper_url
     except Exception as e:
         print(f"[Error] OpenAlex search failed: {e}")
+        raise  # Re-raise so failed_dbs gets tracked
     return None, [], None
 
 def query_neurips(title):
+    """Query NeurIPS papers archive."""
     try:
         years = [2023, 2022, 2021, 2020, 2019, 2018]
         for year in years:
             search_url = f"https://papers.nips.cc/paper_files/paper/{year}/hash/index.html"
-            response = requests.get(search_url)
+            response = requests.get(search_url, timeout=DB_TIMEOUT)
             if response.status_code != 200:
                 continue
 
@@ -817,33 +828,39 @@ def query_neurips(title):
             for a in soup.find_all("a"):
                 if fuzz.ratio(normalize_title(title), normalize_title(a.text)) >= 95:
                     paper_url = "https://papers.nips.cc" + a['href']
-                    paper_response = requests.get(paper_url)
+                    paper_response = requests.get(paper_url, timeout=DB_TIMEOUT)
                     if paper_response.status_code != 200:
-                        return a.text.strip(), []
+                        return a.text.strip(), [], paper_url
                     author_soup = BeautifulSoup(paper_response.content, "html.parser")
                     authors = [tag.text.strip() for tag in author_soup.find_all("li", class_="author")]
-                    return a.text.strip(), authors
+                    return a.text.strip(), authors, paper_url
     except Exception as e:
         print(f"[Error] NeurIPS search failed: {e}")
-    return None, []
+        raise  # Re-raise so failed_dbs gets tracked
+    return None, [], None
 
 def query_acl(title):
+    """Query ACL Anthology for paper information."""
     try:
         query = urllib.parse.quote(title)
         url = f"https://aclanthology.org/search/?q={query}"
-        response = requests.get(url)
+        response = requests.get(url, timeout=DB_TIMEOUT)
         if response.status_code != 200:
-            return None, []
+            return None, [], None
         soup = BeautifulSoup(response.text, 'html.parser')
         for entry in soup.select(".d-sm-flex.align-items-stretch.p-2"):
             entry_title_tag = entry.select_one("h5")
             if entry_title_tag and fuzz.ratio(normalize_title(title), normalize_title(entry_title_tag.text)) >= 95:
                 author_tags = entry.select("span.badge.badge-light")
                 authors = [a.text.strip() for a in author_tags]
-                return entry_title_tag.text.strip(), authors
+                # Try to get paper URL from the entry
+                link_tag = entry.select_one("a[href*='/papers/']")
+                paper_url = f"https://aclanthology.org{link_tag['href']}" if link_tag else None
+                return entry_title_tag.text.strip(), authors, paper_url
     except Exception as e:
         print(f"[Error] ACL Anthology search failed: {e}")
-    return None, []
+        raise  # Re-raise so failed_dbs gets tracked
+    return None, [], None
 
 def query_openreview(title):
     """Query OpenReview API for paper information."""
@@ -851,7 +868,7 @@ def query_openreview(title):
     query = ' '.join(words)
     url = f"https://api2.openreview.net/notes/search?query={urllib.parse.quote(query)}&limit=20"
     try:
-        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=5)
+        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=DB_TIMEOUT_SHORT)
         if response.status_code != 200:
             return None, [], None
         results = response.json().get("notes", [])
@@ -874,6 +891,7 @@ def query_openreview(title):
                 return found_title, authors, paper_url
     except Exception as e:
         print(f"[Error] OpenReview search failed: {e}")
+        raise  # Re-raise so failed_dbs gets tracked
     return None, [], None
 
 def query_semantic_scholar(title):
@@ -886,7 +904,7 @@ def query_semantic_scholar(title):
     query = ' '.join(words)
     url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={urllib.parse.quote(query)}&limit=10&fields=title,authors,url"
     try:
-        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=10)
+        response = requests.get(url, headers={"User-Agent": "Academic Reference Parser"}, timeout=DB_TIMEOUT)
         if response.status_code != 200:
             return None, [], None
         results = response.json().get("data", [])
@@ -898,6 +916,7 @@ def query_semantic_scholar(title):
                 return found_title, authors, paper_url
     except Exception as e:
         print(f"[Error] Semantic Scholar search failed: {e}")
+        raise  # Re-raise so failed_dbs gets tracked
     return None, [], None
 
 def query_all_databases_concurrent(title, ref_authors, openalex_key=None, longer_timeout=False):
@@ -925,6 +944,8 @@ def query_all_databases_concurrent(title, ref_authors, openalex_key=None, longer
         ('DBLP', lambda: query_dblp(title)),
         ('OpenReview', lambda: query_openreview(title)),
         ('Semantic Scholar', lambda: query_semantic_scholar(title)),
+        ('ACL Anthology', lambda: query_acl(title)),
+        ('NeurIPS', lambda: query_neurips(title)),
     ]
 
     # Add OpenAlex if API key is provided
@@ -962,7 +983,7 @@ def query_all_databases_concurrent(title, ref_authors, openalex_key=None, longer
             return (name, None, [], None, str(e))
 
     # Use ThreadPoolExecutor to query databases concurrently
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         # Submit all queries
         future_to_db = {executor.submit(query_single_db, db): db[0] for db in databases}
 
@@ -1058,7 +1079,7 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, on_progress=None, 
         sleep_time: (unused, kept for API compatibility)
         openalex_key: Optional OpenAlex API key
         on_progress: Optional callback function(event_type, data)
-            event_type can be: 'checking', 'result', 'retry_pass'
+            event_type can be: 'checking', 'result', 'warning', 'retry_pass'
             data varies by event type
         max_concurrent_refs: Max number of references to check in parallel (default 4)
 
@@ -1104,6 +1125,7 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, on_progress=None, 
             'found_authors': result['found_authors'],
             'paper_url': result.get('paper_url'),
             'error_type': result['error_type'],
+            'failed_dbs': result.get('failed_dbs', []),
         }
         results[i] = full_result
 
@@ -1113,6 +1135,26 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, on_progress=None, 
             with timeouts_lock:
                 total_timeouts += len(failed_dbs)
             logger.debug(f"  Failed DBs: {', '.join(failed_dbs)}")
+            # Notify progress: warning about failed DBs
+            if on_progress:
+                status = result['status']
+                if status == 'not_found':
+                    context = "not found in other DBs"
+                    will_retry = " (will retry)"
+                elif status == 'verified':
+                    context = f"verified via {result['source']}"
+                    will_retry = ""
+                else:
+                    context = f"{status} via {result['source']}"
+                    will_retry = ""
+                on_progress('warning', {
+                    'index': i,
+                    'total': len(refs),
+                    'title': title,
+                    'failed_dbs': failed_dbs,
+                    'status': status,
+                    'message': f"{', '.join(failed_dbs)} timed out; {context}{will_retry}",
+                })
         if result['status'] == 'not_found' and failed_dbs:
             with retry_lock:
                 retry_candidates.append((i, failed_dbs))
@@ -1227,6 +1269,11 @@ def main(pdf_path, sleep_time=1.0, openalex_key=None):
                 print(f"[{idx}/{total}] -> {Colors.YELLOW}AUTHOR MISMATCH{Colors.RESET} ({source})")
             else:
                 print(f"[{idx}/{total}] -> {Colors.RED}NOT FOUND{Colors.RESET}")
+        elif event_type == 'warning':
+            idx = data['index'] + 1
+            total = data['total']
+            message = data['message']
+            print(f"[{idx}/{total}] {Colors.YELLOW}WARNING:{Colors.RESET} {message}")
 
     # Check all references with progress
     results, check_stats = check_references(refs, sleep_time=sleep_time, openalex_key=openalex_key, on_progress=cli_progress)

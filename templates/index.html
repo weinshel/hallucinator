@@ -579,9 +579,20 @@
                 `;
             }
 
+            // Show which databases timed out
+            let timeoutHtml = '';
+            if (ref.failed_dbs && ref.failed_dbs.length > 0) {
+                timeoutHtml = `
+                    <div class="timeout-info" style="margin-top: 0.5rem; padding: 0.375rem 0.75rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 0.25rem; color: #92400e; font-size: 0.85rem;">
+                        ⚠️ Timed out: ${ref.failed_dbs.map(db => escapeHtml(db)).join(', ')}
+                    </div>
+                `;
+            }
+
             div.innerHTML = `
                 <div class="reference-title">${escapeHtml(ref.title)}</div>
                 <div class="reference-status ${statusClass}">${statusText}</div>
+                ${timeoutHtml}
                 ${authorHtml}
                 <a href="${createScholarLink(ref.title)}" target="_blank" class="scholar-link">
                     Search on Google Scholar &rarr;
@@ -617,10 +628,22 @@
             if (data.summary.title_only > 0) {
                 detailParts.push(`Title-only (no authors extracted): ${data.summary.title_only}`);
             }
-            if (data.summary.total_timeouts > 0) {
-                detailParts.push(`DB timeouts: ${data.summary.total_timeouts} (retried ${data.summary.retried_count}, ${data.summary.retry_successes} recovered)`);
-            }
             skippedDetails.textContent = detailParts.join(' | ');
+
+            // Show timeout warning separately if there were timeouts
+            let timeoutWarning = document.getElementById('timeoutWarning');
+            if (!timeoutWarning) {
+                timeoutWarning = document.createElement('div');
+                timeoutWarning.id = 'timeoutWarning';
+                timeoutWarning.style.cssText = 'margin-top: 0.75rem; padding: 0.5rem 1rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 0.375rem; color: #92400e; font-size: 0.9rem;';
+                skippedDetails.parentNode.insertBefore(timeoutWarning, skippedDetails.nextSibling);
+            }
+            if (data.summary.total_timeouts > 0) {
+                timeoutWarning.innerHTML = `⚠️ DB timeouts: ${data.summary.total_timeouts} (retried ${data.summary.retried_count}, ${data.summary.retry_successes} recovered)`;
+                timeoutWarning.style.display = 'block';
+            } else {
+                timeoutWarning.style.display = 'none';
+            }
 
             // Update problematic percentage
             const problematicPercent = document.getElementById('problematicPercent');
@@ -725,6 +748,9 @@
                     </div>
                 </div>
                 <div class="${aggPercentClass}">${aggPercentText}</div>
+                <div class="timeout-warning" style="margin-top: 0.75rem; padding: 0.5rem 1rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 0.375rem; color: #92400e; font-size: 0.9rem;">
+                        ⚠️ DB timeouts: ${data.summary.total_timeouts || 0} (retried ${data.summary.retried_count || 0}, ${data.summary.retry_successes || 0} recovered)
+                    </div>
             `;
             container.appendChild(header);
 
@@ -812,6 +838,11 @@
                         </div>
                     </div>
                     <div class="${filePercentClass}">${filePercentText}</div>
+                    ${file.summary.total_timeouts > 0 ? `
+                        <div class="timeout-warning" style="margin-top: 0.5rem; padding: 0.375rem 0.75rem; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 0.25rem; color: #92400e; font-size: 0.85rem;">
+                            ⚠️ DB timeouts: ${file.summary.total_timeouts} (retried ${file.summary.retried_count}, ${file.summary.retry_successes} recovered)
+                        </div>
+                    ` : ''}
                 </div>
             `;
 
@@ -955,6 +986,10 @@
                     if (!eventType || !eventData) return;
 
                     console.log('SSE event:', eventType, eventData);
+                    if (eventData && eventData.summary) {
+                        console.log('Summary data:', eventData.summary);
+                        console.log('total_timeouts:', eventData.summary.total_timeouts);
+                    }
 
                     if (eventType === 'archive_start') {
                         isArchive = true;
@@ -1024,6 +1059,16 @@
                         } else {
                             progressStatus.textContent = `[${currentFilename}] ${eventData.index + 1}/${eventData.total}: ${verified} verified, ${notFound} not found, ${mismatch} mismatched`;
                         }
+                    } else if (eventType === 'warning') {
+                        // Display warning about failed databases
+                        const warningItem = document.createElement('div');
+                        warningItem.className = 'progress-result-item';
+                        warningItem.innerHTML = `
+                            <span style="color: #d97706;">⚠️ [${eventData.index + 1}/${eventData.total}]</span>
+                            <span style="color: #92400e;">${escapeHtml(eventData.message)}</span>
+                        `;
+                        progressResults.appendChild(warningItem);
+                        progressResults.scrollTop = progressResults.scrollHeight;
                     } else if (eventType === 'complete') {
                         // Analysis complete - render full results
                         progressSection.classList.remove('visible');

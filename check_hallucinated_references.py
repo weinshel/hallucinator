@@ -443,6 +443,7 @@ def clean_title(title, from_quotes=False):
         r'\s+arXiv:\d+.*$',  # "arXiv:2503..."
         r'\s+CoRR\s+abs/.*$',  # "CoRR abs/1234.5678"
         r',?\s*(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+(?:19|20)\d{2}.*$',  # "June 2024"
+        r'[.,]\s*[Aa]ccessed\s+.*$',  # ", Accessed July 23, 2020" (URL access date)
     ]
 
     for pattern in cutoff_patterns:
@@ -527,30 +528,39 @@ def extract_title_from_reference(ref_text):
             quoted_part = match.group(1).strip()
             after_quote = ref_text[match.end():].strip()
 
-            # Check if there's a subtitle after the quote (starts with : or -)
-            if after_quote and after_quote[0] in ':-':
-                subtitle_text = after_quote[1:].strip()
-                # Find where subtitle ends at venue/year markers
-                end_patterns = [
-                    r'\.\s*[Ii]n\s+',           # ". In "
-                    r'\.\s*(?:Proc|IEEE|ACM|USENIX|NDSS|CCS|AAAI|WWW|CHI|arXiv)',
-                    r',\s*[Ii]n\s+',            # ", in "
-                    r'\.\s*\((?:19|20)\d{2}\)', # ". (2022)" style venue year
-                    r'[,\.]\s*(?:19|20)\d{2}',  # year
-                    r'\s+(?:19|20)\d{2}\.',     # year at end
-                    r'[.,]\s+[A-Z][a-z]+\s+\d+[,\s]',  # ". Word Number" journal format (". Science 344,")
-                ]
-                subtitle_end = len(subtitle_text)
-                for ep in end_patterns:
-                    m = re.search(ep, subtitle_text)
-                    if m:
-                        subtitle_end = min(subtitle_end, m.start())
+            # Check if there's a subtitle after the quote
+            # Can start with : or - or directly with a capital letter
+            if after_quote:
+                # Determine if there's a subtitle and extract it
+                subtitle_text = None
+                if after_quote[0] in ':-':
+                    subtitle_text = after_quote[1:].strip()
+                elif after_quote[0].isupper():
+                    # Subtitle starts directly with capital letter (no delimiter)
+                    subtitle_text = after_quote
 
-                subtitle = subtitle_text[:subtitle_end].strip()
-                subtitle = re.sub(r'[.,;:]+$', '', subtitle)
-                if subtitle and len(subtitle.split()) >= 2:
-                    title = f'{quoted_part}: {subtitle}'
-                    return title, True
+                if subtitle_text:
+                    # Find where subtitle ends at venue/year markers
+                    end_patterns = [
+                        r'\.\s*[Ii]n\s+',           # ". In "
+                        r'\.\s*(?:Proc|IEEE|ACM|USENIX|NDSS|CCS|AAAI|WWW|CHI|arXiv)',
+                        r',\s*[Ii]n\s+',            # ", in "
+                        r'\.\s*\((?:19|20)\d{2}\)', # ". (2022)" style venue year
+                        r'[,\.]\s*(?:19|20)\d{2}',  # year
+                        r'\s+(?:19|20)\d{2}\.',     # year at end
+                        r'[.,]\s+[A-Z][a-z]+\s+\d+[,\s]',  # ". Word Number" journal format (". Science 344,")
+                    ]
+                    subtitle_end = len(subtitle_text)
+                    for ep in end_patterns:
+                        m = re.search(ep, subtitle_text)
+                        if m:
+                            subtitle_end = min(subtitle_end, m.start())
+
+                    subtitle = subtitle_text[:subtitle_end].strip()
+                    subtitle = re.sub(r'[.,;:]+$', '', subtitle)
+                    if subtitle and len(subtitle.split()) >= 2:
+                        title = f'{quoted_part}: {subtitle}'
+                        return title, True
 
             # No subtitle - just use quoted part if long enough
             if len(quoted_part.split()) >= 3:
@@ -722,7 +732,18 @@ def get_query_words(title, n=6):
     """Extract n significant words from title for query, skipping stop words and short words."""
     all_words = re.findall(r'[a-zA-Z0-9]+', title)
     # Skip stop words and words shorter than 3 characters (e.g., "s" from "Twitter's")
-    significant = [w for w in all_words if w.lower() not in STOP_WORDS and len(w) >= 3]
+    def is_significant(w):
+        if w.lower() in STOP_WORDS:
+            return False
+        # Keep words with 3+ chars, OR short alphanumeric terms like "L2", "3D", "AI", "5G"
+        if len(w) >= 3:
+            return True
+        # Keep short words that mix letters and digits (technical terms)
+        has_letter = any(c.isalpha() for c in w)
+        has_digit = any(c.isdigit() for c in w)
+        return has_letter and has_digit
+
+    significant = [w for w in all_words if is_significant(w)]
     return significant[:n] if len(significant) >= 3 else all_words[:n]
 
 def query_dblp(title):

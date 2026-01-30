@@ -91,6 +91,21 @@ python app.py
 
 Upload a PDF (or ZIP/tar.gz of multiple PDFs), optionally enter API keys, click Analyze. Watch results stream in real-time.
 
+### Web Interface Features
+
+**Retry Failed Queries**
+If a database times out during analysis, a "Retry" button appears next to the affected reference. Click it to retry those specific databases with a longer timeout.
+
+**Mark as Safe**
+False positive? Click "Mark as safe" on any flagged reference to move it to the verified list. This updates the summary counts and is useful for references that exist but aren't indexed (technical reports, books, etc.).
+
+**Download Report**
+After analysis, download a report of problematic references in HTML or plain text format. The report includes:
+- The analyzed filename
+- Summary statistics
+- All problematic references with details
+- Author comparisons for mismatches
+
 ### Docker
 
 ```bash

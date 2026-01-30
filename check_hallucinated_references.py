@@ -1042,7 +1042,7 @@ def query_ssrn(title):
     return None, [], None
 
 
-def query_all_databases_concurrent(title, ref_authors, openalex_key=None, s2_api_key=None, longer_timeout=False, only_dbs=None, dblp_offline_path=None):
+def query_all_databases_concurrent(title, ref_authors, openalex_key=None, s2_api_key=None, longer_timeout=False, only_dbs=None, dblp_offline_path=None, check_openalex_authors=False):
     """Query all databases concurrently for a single reference.
 
     Args:
@@ -1157,8 +1157,8 @@ def query_all_databases_concurrent(title, ref_authors, openalex_key=None, s2_api
                         }
                     else:
                         # Author mismatch - save first one but keep looking
-                        # Skip OpenAlex mismatches as they often have false positives
-                        if first_mismatch is None and name != 'OpenAlex':
+                        # Skip OpenAlex mismatches unless explicitly enabled (they often have false positives)
+                        if first_mismatch is None and (name != 'OpenAlex' or check_openalex_authors):
                             first_mismatch = {
                                 'status': 'author_mismatch',
                                 'source': name,
@@ -1217,7 +1217,7 @@ def validate_authors(ref_authors, found_authors):
         found_set = set(normalize_author(a) for a in found_authors)
     return bool(ref_set & found_set)
 
-def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, on_progress=None, max_concurrent_refs=4, dblp_offline_path=None):
+def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, on_progress=None, max_concurrent_refs=4, dblp_offline_path=None, check_openalex_authors=False):
     """Check references against databases with concurrent queries.
 
     Args:
@@ -1263,7 +1263,8 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
             title, ref_authors,
             openalex_key=openalex_key,
             s2_api_key=s2_api_key,
-            dblp_offline_path=dblp_offline_path
+            dblp_offline_path=dblp_offline_path,
+            check_openalex_authors=check_openalex_authors
         )
 
         # Build full result record
@@ -1360,7 +1361,8 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
                 s2_api_key=s2_api_key,
                 longer_timeout=True,
                 only_dbs=failed_dbs_for_ref,
-                dblp_offline_path=dblp_offline_path
+                dblp_offline_path=dblp_offline_path,
+                check_openalex_authors=check_openalex_authors
             )
 
             # Only update if we found something better
@@ -1394,7 +1396,7 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
     return results, check_stats
 
 
-def main(pdf_path, sleep_time=1.0, openalex_key=None, s2_api_key=None, dblp_offline_path=None):
+def main(pdf_path, sleep_time=1.0, openalex_key=None, s2_api_key=None, dblp_offline_path=None, check_openalex_authors=False):
     # Print DBLP offline status / staleness warning
     if dblp_offline_path:
         from dblp_offline import check_staleness, get_db_metadata
@@ -1459,7 +1461,7 @@ def main(pdf_path, sleep_time=1.0, openalex_key=None, s2_api_key=None, dblp_offl
             print(f"[{idx}/{total}] {Colors.YELLOW}WARNING:{Colors.RESET} {message}")
 
     # Check all references with progress
-    results, check_stats = check_references(refs, sleep_time=sleep_time, openalex_key=openalex_key, s2_api_key=s2_api_key, on_progress=cli_progress, dblp_offline_path=dblp_offline_path)
+    results, check_stats = check_references(refs, sleep_time=sleep_time, openalex_key=openalex_key, s2_api_key=s2_api_key, on_progress=cli_progress, dblp_offline_path=dblp_offline_path, check_openalex_authors=check_openalex_authors)
 
     # Count results
     found = sum(1 for r in results if r['status'] == 'verified')
@@ -1587,6 +1589,14 @@ if __name__ == "__main__":
             sys.argv.remove(arg)
             break
 
+    # Check for --check-openalex-authors flag
+    check_openalex_authors = False
+    for i, arg in enumerate(sys.argv[:]):
+        if arg == '--check-openalex-authors':
+            check_openalex_authors = True
+            sys.argv.remove(arg)
+            break
+
     # Handle --update-dblp: download and build database, then exit
     if update_dblp_path:
         from dblp_offline import update_dblp_db
@@ -1613,6 +1623,7 @@ if __name__ == "__main__":
         print("  --s2-api-key=KEY        Semantic Scholar API key")
         print("  --dblp-offline=PATH     Use offline DBLP database (SQLite)")
         print("  --update-dblp=PATH      Download DBLP dump and build offline database")
+        print("  --check-openalex-authors  Flag author mismatches from OpenAlex (off by default)")
         sys.exit(1)
 
     pdf_path = sys.argv[1]
@@ -1625,6 +1636,6 @@ if __name__ == "__main__":
         with open(output_path, "w", encoding="utf-8") as f, \
              contextlib.redirect_stdout(f), \
              contextlib.redirect_stderr(f):
-            main(pdf_path, sleep_time=sleep_time, openalex_key=openalex_key, s2_api_key=s2_api_key, dblp_offline_path=dblp_offline_path)
+            main(pdf_path, sleep_time=sleep_time, openalex_key=openalex_key, s2_api_key=s2_api_key, dblp_offline_path=dblp_offline_path, check_openalex_authors=check_openalex_authors)
     else:
-        main(pdf_path, sleep_time=sleep_time, openalex_key=openalex_key, s2_api_key=s2_api_key, dblp_offline_path=dblp_offline_path)
+        main(pdf_path, sleep_time=sleep_time, openalex_key=openalex_key, s2_api_key=s2_api_key, dblp_offline_path=dblp_offline_path, check_openalex_authors=check_openalex_authors)

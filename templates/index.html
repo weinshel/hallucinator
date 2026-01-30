@@ -55,6 +55,20 @@
         input[type="file"] {
             background: #fafafa;
         }
+        .checkbox-group {
+            margin-top: 0.5rem;
+        }
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            cursor: pointer;
+            font-weight: normal;
+        }
+        .checkbox-label input[type="checkbox"] {
+            width: auto;
+            margin: 0;
+        }
         button {
             background: #2563eb;
             color: white;
@@ -481,6 +495,13 @@
                 </label>
                 <input type="text" id="s2ApiKey" name="s2_api_key" placeholder="Enter your Semantic Scholar API key">
             </div>
+            <div class="form-group checkbox-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="checkOpenalexAuthors" name="check_openalex_authors" value="true">
+                    <span>Check author mismatches from OpenAlex</span>
+                    <span class="label-hint">(off by default due to false positives)</span>
+                </label>
+            </div>
             <button type="submit" id="submitBtn">Analyze References</button>
         </form>
         <div class="progress-section" id="progressSection">
@@ -546,8 +567,9 @@
         const results = document.getElementById('results');
         const openalexKeyInput = document.getElementById('openalexKey');
         const s2ApiKeyInput = document.getElementById('s2ApiKey');
+        const checkOpenalexAuthorsInput = document.getElementById('checkOpenalexAuthors');
 
-        // Load saved API keys from localStorage
+        // Load saved settings from localStorage
         const savedOpenalexKey = localStorage.getItem('openalexKey');
         if (savedOpenalexKey) {
             openalexKeyInput.value = savedOpenalexKey;
@@ -555,6 +577,10 @@
         const savedS2Key = localStorage.getItem('s2ApiKey');
         if (savedS2Key) {
             s2ApiKeyInput.value = savedS2Key;
+        }
+        const savedCheckOpenalexAuthors = localStorage.getItem('checkOpenalexAuthors');
+        if (savedCheckOpenalexAuthors === 'true') {
+            checkOpenalexAuthorsInput.checked = true;
         }
 
         // Track live results during streaming
@@ -962,6 +988,12 @@
                 localStorage.setItem('s2ApiKey', s2KeyValue);
             } else {
                 localStorage.removeItem('s2ApiKey');
+            }
+            // Save checkbox state
+            if (checkOpenalexAuthorsInput.checked) {
+                localStorage.setItem('checkOpenalexAuthors', 'true');
+            } else {
+                localStorage.removeItem('checkOpenalexAuthors');
             }
 
             // Reset UI

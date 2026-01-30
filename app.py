@@ -201,7 +201,7 @@ def extract_pdfs_from_archive(archive_path, file_type, extract_dir):
     return pdf_files
 
 
-def analyze_pdf(pdf_path, openalex_key=None, s2_api_key=None, on_progress=None, dblp_offline_path=None):
+def analyze_pdf(pdf_path, openalex_key=None, s2_api_key=None, on_progress=None, dblp_offline_path=None, check_openalex_authors=False):
     """Analyze PDF and return structured results.
 
     Args:
@@ -253,7 +253,8 @@ def analyze_pdf(pdf_path, openalex_key=None, s2_api_key=None, on_progress=None, 
         openalex_key=openalex_key,
         s2_api_key=s2_api_key,
         on_progress=progress_wrapper,
-        dblp_offline_path=dblp_offline_path
+        dblp_offline_path=dblp_offline_path,
+        check_openalex_authors=check_openalex_authors
     )
 
     verified = sum(1 for r in results if r['status'] == 'verified')
@@ -274,11 +275,11 @@ def index():
     return render_template('index.html')
 
 
-def analyze_single_pdf(pdf_path, filename, openalex_key=None, s2_api_key=None, dblp_offline_path=None):
+def analyze_single_pdf(pdf_path, filename, openalex_key=None, s2_api_key=None, dblp_offline_path=None, check_openalex_authors=False):
     """Analyze a single PDF and return a file result dict."""
     logger.info(f"--- Processing: {filename} ---")
     try:
-        results, skip_stats = analyze_pdf(pdf_path, openalex_key=openalex_key, s2_api_key=s2_api_key, dblp_offline_path=dblp_offline_path)
+        results, skip_stats = analyze_pdf(pdf_path, openalex_key=openalex_key, s2_api_key=s2_api_key, dblp_offline_path=dblp_offline_path, check_openalex_authors=check_openalex_authors)
 
         verified = sum(1 for r in results if r['status'] == 'verified')
         not_found = sum(1 for r in results if r['status'] == 'not_found')
@@ -329,6 +330,7 @@ def analyze():
 
     openalex_key = request.form.get('openalex_key', '').strip() or None
     s2_api_key = request.form.get('s2_api_key', '').strip() or None
+    check_openalex_authors = request.form.get('check_openalex_authors') == 'true'
 
     logger.info(f"=== New analysis request: {uploaded_file.filename} (type: {file_type}) ===")
     if openalex_key:
@@ -345,7 +347,7 @@ def analyze():
             uploaded_file.save(temp_path)
             logger.info(f"Processing single PDF: {uploaded_file.filename}")
 
-            results, skip_stats = analyze_pdf(temp_path, openalex_key=openalex_key, s2_api_key=s2_api_key, dblp_offline_path=DBLP_OFFLINE_PATH)
+            results, skip_stats = analyze_pdf(temp_path, openalex_key=openalex_key, s2_api_key=s2_api_key, dblp_offline_path=DBLP_OFFLINE_PATH, check_openalex_authors=check_openalex_authors)
 
             verified = sum(1 for r in results if r['status'] == 'verified')
             not_found = sum(1 for r in results if r['status'] == 'not_found')
@@ -455,6 +457,7 @@ def analyze_stream():
 
     openalex_key = request.form.get('openalex_key', '').strip() or None
     s2_api_key = request.form.get('s2_api_key', '').strip() or None
+    check_openalex_authors = request.form.get('check_openalex_authors') == 'true'
 
     logger.info(f"=== New streaming analysis request: {uploaded_file.filename} (type: {file_type}) ===")
 
@@ -525,7 +528,7 @@ def analyze_stream():
                     }))
 
                     try:
-                        results, skip_stats = analyze_pdf(pdf_path, openalex_key=openalex_key, s2_api_key=s2_api_key, on_progress=on_progress, dblp_offline_path=DBLP_OFFLINE_PATH)
+                        results, skip_stats = analyze_pdf(pdf_path, openalex_key=openalex_key, s2_api_key=s2_api_key, on_progress=on_progress, dblp_offline_path=DBLP_OFFLINE_PATH, check_openalex_authors=check_openalex_authors)
                         current_skip_stats[0] = skip_stats
                         current_file_results.extend(results)
 

@@ -78,6 +78,7 @@ python check_hallucinated_references.py --dblp-offline=dblp.db paper.pdf
 | `--no-color` | Disable colored output |
 | `--dblp-offline=PATH` | Use offline DBLP database instead of API |
 | `--update-dblp=PATH` | Download DBLP dump and build offline database |
+| `--check-openalex-authors` | Flag author mismatches from OpenAlex (off by default due to false positives) |
 
 ---
 

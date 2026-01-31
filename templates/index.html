@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/png" href="/static/logo.png">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <title>Hallucinated Reference Checker</title>
     <style>
         :root {
@@ -47,6 +48,21 @@
             background: var(--bg-primary);
             color: var(--text-primary);
             transition: background 0.3s, color 0.3s;
+        }
+        @media (min-width: 1200px) {
+            body {
+                max-width: 1100px;
+            }
+        }
+        @media (min-width: 1600px) {
+            body {
+                max-width: 1400px;
+            }
+        }
+        @media (min-width: 1900px) {
+            body {
+                max-width: 1600px;
+            }
         }
         h1 {
             color: var(--text-heading);
@@ -123,6 +139,139 @@
         }
         .drop-zone input[type="file"] {
             display: none;
+        }
+        /* PDF Preview Panel */
+        .main-container {
+            display: flex;
+            gap: 1rem;
+            align-items: flex-start;
+        }
+        .main-content {
+            flex: 1;
+            min-width: 0;
+        }
+        .pdf-preview-panel {
+            display: none;
+            width: 450px;
+            flex-shrink: 0;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            box-shadow: 0 2px 4px var(--shadow-color);
+            position: sticky;
+            top: 1rem;
+            max-height: calc(100vh - 2rem);
+            overflow: hidden;
+        }
+        @media (min-width: 1200px) {
+            .pdf-preview-panel {
+                width: 500px;
+            }
+        }
+        @media (min-width: 1600px) {
+            .pdf-preview-panel {
+                width: 600px;
+            }
+        }
+        @media (min-width: 1900px) {
+            .pdf-preview-panel {
+                width: 700px;
+            }
+        }
+        .pdf-preview-panel.visible {
+            display: flex;
+            flex-direction: column;
+        }
+        .pdf-preview-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+        }
+        .pdf-preview-header h3 {
+            margin: 0;
+            font-size: 0.95rem;
+            color: var(--text-heading);
+        }
+        .pdf-preview-close {
+            background: none;
+            border: none;
+            font-size: 1.25rem;
+            cursor: pointer;
+            color: var(--text-secondary);
+            padding: 0;
+            line-height: 1;
+        }
+        .pdf-preview-close:hover {
+            color: var(--text-primary);
+        }
+        .pdf-preview-controls {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.5rem;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+        }
+        .pdf-preview-controls button {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.85rem;
+        }
+        .pdf-preview-controls span {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            min-width: 80px;
+            text-align: center;
+        }
+        .pdf-preview-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0.5rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .pdf-preview-container canvas {
+            max-width: 100%;
+            box-shadow: 0 1px 3px var(--shadow-color);
+        }
+        .pdf-toggle-btn {
+            position: fixed;
+            bottom: 1rem;
+            right: 1rem;
+            background: var(--link-color);
+            color: white;
+            border: none;
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            box-shadow: 0 2px 8px var(--shadow-color);
+            z-index: 1001;
+            display: none;
+            transition: background 0.2s;
+        }
+        .pdf-toggle-btn:hover {
+            background: #1d4ed8;
+        }
+        .dark .pdf-toggle-btn:hover {
+            background: #3b82f6;
+        }
+        .pdf-toggle-btn.visible {
+            display: block;
+        }
+        @media (max-width: 900px) {
+            .main-container {
+                flex-direction: column;
+            }
+            .pdf-preview-panel {
+                width: 100%;
+                position: static;
+                max-height: 50vh;
+            }
         }
         .form-group {
             margin-bottom: 1rem;
@@ -409,6 +558,28 @@
             background: #6b7280;
             color: white;
         }
+        .find-in-pdf-btn {
+            background: none;
+            border: 1px solid #8b5cf6;
+            color: #8b5cf6;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: none;
+        }
+        .find-in-pdf-btn.visible {
+            display: inline-block;
+        }
+        .find-in-pdf-btn:hover {
+            background: #8b5cf6;
+            color: white;
+        }
+        .find-in-pdf-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
         .retry-btn {
             background: none;
             border: 1px solid #f59e0b;
@@ -683,6 +854,8 @@
     </div>
     -->
 
+    <div class="main-container">
+    <div class="main-content">
     <div class="upload-form">
         <form id="analyzeForm">
             <div class="form-group">
@@ -780,6 +953,27 @@
             <div id="hallucinationList"></div>
         </div>
     </div>
+    </div><!-- end main-content -->
+
+    <!-- PDF Preview Panel -->
+    <div class="pdf-preview-panel" id="pdfPreviewPanel">
+        <div class="pdf-preview-header">
+            <h3>📄 PDF Preview</h3>
+            <button class="pdf-preview-close" id="pdfPreviewClose" title="Close preview">&times;</button>
+        </div>
+        <div class="pdf-preview-controls">
+            <button id="pdfPrevPage" title="Previous page">◀</button>
+            <span id="pdfPageInfo">Page 1 / 1</span>
+            <button id="pdfNextPage" title="Next page">▶</button>
+            <button id="pdfZoomOut" title="Zoom out">−</button>
+            <button id="pdfZoomIn" title="Zoom in">+</button>
+        </div>
+        <div class="pdf-preview-container" id="pdfPreviewContainer"></div>
+    </div>
+    </div><!-- end main-container -->
+
+    <!-- Floating button to show PDF preview -->
+    <button class="pdf-toggle-btn" id="pdfToggleBtn">📄 Show PDF</button>
 
     <script>
         const form = document.getElementById('analyzeForm');
@@ -860,6 +1054,343 @@
         function updateSelectedFile(file) {
             selectedFileDiv.textContent = '📎 ' + file.name;
             selectedFileDiv.style.display = 'inline-block';
+            // Load PDF preview if it's a PDF file
+            if (file.name.toLowerCase().endsWith('.pdf')) {
+                loadPdfPreview(file);
+            }
+        }
+
+        // PDF Preview functionality
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        let pdfDoc = null;
+        let currentPage = 1;
+        let pdfScale = 1.5;
+        let referenceStartPage = 1;
+
+        const pdfPreviewPanel = document.getElementById('pdfPreviewPanel');
+        const pdfPreviewContainer = document.getElementById('pdfPreviewContainer');
+        const pdfPageInfo = document.getElementById('pdfPageInfo');
+        const pdfToggleBtn = document.getElementById('pdfToggleBtn');
+        const pdfPreviewClose = document.getElementById('pdfPreviewClose');
+
+        document.getElementById('pdfPrevPage').addEventListener('click', () => {
+            if (currentPage > 1) {
+                currentPage--;
+                renderPage(currentPage);
+            }
+        });
+
+        document.getElementById('pdfNextPage').addEventListener('click', () => {
+            if (pdfDoc && currentPage < pdfDoc.numPages) {
+                currentPage++;
+                renderPage(currentPage);
+            }
+        });
+
+        document.getElementById('pdfZoomIn').addEventListener('click', async () => {
+            pdfScale = Math.min(pdfScale + 0.25, 3.0);
+            await renderPage(currentPage);
+        });
+
+        document.getElementById('pdfZoomOut').addEventListener('click', async () => {
+            pdfScale = Math.max(pdfScale - 0.25, 0.5);
+            await renderPage(currentPage);
+        });
+
+        pdfPreviewClose.addEventListener('click', () => {
+            pdfPreviewPanel.classList.remove('visible');
+            pdfToggleBtn.textContent = '📄 Show PDF';
+        });
+
+        pdfToggleBtn.addEventListener('click', () => {
+            const isVisible = pdfPreviewPanel.classList.toggle('visible');
+            pdfToggleBtn.textContent = isVisible ? '📄 Hide PDF' : '📄 Show PDF';
+        });
+
+        async function loadPdfPreview(file) {
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+                // Find the page containing "References" section
+                referenceStartPage = await findReferencesPage(pdfDoc);
+                currentPage = referenceStartPage;
+
+                renderPage(currentPage);
+                pdfToggleBtn.classList.add('visible');
+                updateFindInPdfButtons();
+            } catch (error) {
+                console.error('Error loading PDF:', error);
+            }
+        }
+
+        async function findReferencesPage(pdf) {
+            // Search from the end of the document (references are usually at the end)
+            for (let i = pdf.numPages; i >= 1; i--) {
+                const page = await pdf.getPage(i);
+                const textContent = await page.getTextContent();
+                const text = textContent.items.map(item => item.str).join(' ');
+
+                // Look for "References" or "Bibliography" header
+                if (/\bReferences\b|\bBibliography\b|\bREFERENCES\b/i.test(text)) {
+                    return i;
+                }
+            }
+            return pdf.numPages; // Default to last page if not found
+        }
+
+        // Store current highlight for redrawing on zoom
+        let currentHighlight = null;
+
+        async function renderPage(pageNum, highlight = null) {
+            if (!pdfDoc) return;
+
+            // Store highlight for redrawing on zoom
+            if (highlight !== undefined) {
+                currentHighlight = highlight;
+            }
+
+            const page = await pdfDoc.getPage(pageNum);
+            const viewport = page.getViewport({ scale: pdfScale });
+
+            // Create canvas
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            // Clear container and add canvas
+            pdfPreviewContainer.innerHTML = '';
+            pdfPreviewContainer.appendChild(canvas);
+
+            // Render PDF page
+            await page.render({
+                canvasContext: context,
+                viewport: viewport
+            }).promise;
+
+            // Draw highlight box if provided
+            if (currentHighlight && currentHighlight.pageNum === pageNum) {
+                const h = currentHighlight;
+                context.strokeStyle = '#f59e0b';
+                context.lineWidth = 3;
+                context.fillStyle = 'rgba(245, 158, 11, 0.2)';
+
+                const x = h.x * pdfScale;
+                const y = h.y * pdfScale;
+                const width = h.width * pdfScale;
+                const height = h.height * pdfScale;
+
+                // Draw filled rectangle with border
+                context.fillRect(x - 5, y - 5, width + 10, height + 10);
+                context.strokeRect(x - 5, y - 5, width + 10, height + 10);
+            }
+
+            // Update page info
+            pdfPageInfo.textContent = `Page ${pageNum} / ${pdfDoc.numPages}`;
+        }
+
+        function showPdfPreview() {
+            if (pdfDoc) {
+                pdfPreviewPanel.classList.add('visible');
+                pdfToggleBtn.textContent = '📄 Hide PDF';
+            }
+        }
+
+        async function findReferenceInPdf(title) {
+            if (!pdfDoc) {
+                alert('No PDF loaded. Please upload a PDF file first.');
+                return;
+            }
+
+            // Extract first few significant words for searching
+            const searchWords = title
+                .toLowerCase()
+                .replace(/[^\w\s]/g, ' ')
+                .split(/\s+/)
+                .filter(w => w.length > 3)
+                .slice(0, 6);
+
+            if (searchWords.length === 0) {
+                alert('Could not extract search terms from title.');
+                return;
+            }
+
+            // Search pages from end to start (references are always at the end)
+            // Return the first match found searching backwards
+            for (let pageNum = pdfDoc.numPages; pageNum >= 1; pageNum--) {
+                try {
+                    const result = await searchPageForText(pageNum, searchWords);
+                    if (result.found && result.bounds) {
+                        currentPage = pageNum;
+
+                        const highlight = {
+                            pageNum: pageNum,
+                            x: result.bounds.x,
+                            y: result.bounds.y,
+                            width: result.bounds.width,
+                            height: result.bounds.height
+                        };
+
+                        await renderPage(pageNum, highlight);
+                        showPdfPreview();
+
+                        // Scroll to the found position
+                        const scrollY = result.bounds.y * pdfScale;
+                        setTimeout(() => {
+                            pdfPreviewContainer.scrollTop = Math.max(0, scrollY - 100);
+                        }, 100);
+                        return;
+                    }
+                } catch (error) {
+                    console.error(`Error searching page ${pageNum}:`, error);
+                }
+            }
+
+            alert('Reference not found in PDF. The text may be formatted differently.');
+        }
+
+        async function searchPageForText(pageNum, searchWords) {
+            try {
+                const page = await pdfDoc.getPage(pageNum);
+                const textContent = await page.getTextContent();
+                const viewport = page.getViewport({ scale: 1 });
+
+                // Collect text items with their bounding boxes
+                const textItems = [];
+                for (const item of textContent.items) {
+                    if (!item.str) continue;
+                    // Transform: [scaleX, skewX, skewY, scaleY, translateX, translateY]
+                    const x = item.transform ? item.transform[4] : 0;
+                    const y = item.transform ? viewport.height - item.transform[5] : 0;
+                    const width = item.width || 100;
+                    const height = item.height || 12;
+                    // Keep original text and normalized version
+                    const normalized = item.str.toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+                    if (normalized) {
+                        textItems.push({ text: normalized, x, y, width, height, original: item.str });
+                    }
+                }
+
+                // No text items found
+                if (textItems.length === 0) {
+                    return { found: false, bounds: null };
+                }
+
+                let bestMatch = null;
+                let bestScore = 0;
+                let bestItemStart = -1;
+
+                // Helper to safely get bounds for item range with padding
+                function getBoundsForRange(startIdx, endIdx) {
+                    const safeStart = Math.max(0, Math.min(startIdx, textItems.length - 1));
+                    const safeEnd = Math.max(safeStart, Math.min(endIdx, textItems.length - 1));
+                    const matchedItems = textItems.slice(safeStart, safeEnd + 1);
+                    if (matchedItems.length === 0) return null;
+                    const padding = 8;
+                    const minX = Math.min(...matchedItems.map(it => it.x)) - padding;
+                    const minY = Math.min(...matchedItems.map(it => it.y)) - padding;
+                    const maxX = Math.max(...matchedItems.map(it => it.x + it.width)) + padding;
+                    const maxY = Math.max(...matchedItems.map(it => it.y + it.height)) + padding;
+                    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+                }
+
+                // Find items that contain each search word
+                function findItemsContainingWords(words) {
+                    const matchedItems = [];
+                    for (const word of words) {
+                        for (let i = 0; i < textItems.length; i++) {
+                            if (textItems[i].text.includes(word)) {
+                                if (!matchedItems.includes(textItems[i])) {
+                                    matchedItems.push(textItems[i]);
+                                }
+                                break; // Only find first occurrence of each word
+                            }
+                        }
+                    }
+                    return matchedItems;
+                }
+
+                // Strategy 1: Find items containing each search word, check if they cluster together
+                const matchedItems = findItemsContainingWords(searchWords);
+
+                if (matchedItems.length >= Math.ceil(searchWords.length * 0.5)) {
+                    // Check if matched items are spatially close (same reference)
+                    const avgY = matchedItems.reduce((sum, it) => sum + it.y, 0) / matchedItems.length;
+                    const ySpread = Math.max(...matchedItems.map(it => it.y)) - Math.min(...matchedItems.map(it => it.y));
+
+                    // If items are within reasonable vertical spread (e.g., 2-3 lines), consider it a match
+                    if (ySpread < 100) {
+                        bestScore = matchedItems.length;
+                        const padding = 8;
+                        const minX = Math.min(...matchedItems.map(it => it.x)) - padding;
+                        const minY = Math.min(...matchedItems.map(it => it.y)) - padding;
+                        const maxX = Math.max(...matchedItems.map(it => it.x + it.width)) + padding;
+                        const maxY = Math.max(...matchedItems.map(it => it.y + it.height)) + padding;
+                        bestMatch = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+                    }
+                }
+
+                // Strategy 2: Find the most distinctive word and highlight around it
+                if (!bestMatch || bestScore < Math.ceil(searchWords.length * 0.5)) {
+                    // Find rarest/longest word as anchor
+                    const anchorWord = searchWords.reduce((a, b) => a.length > b.length ? a : b);
+
+                    for (let i = 0; i < textItems.length; i++) {
+                        if (textItems[i].text.includes(anchorWord)) {
+                            // Found anchor - find nearby items that match other search words
+                            const anchorY = textItems[i].y;
+                            const nearbyItems = textItems.filter(it =>
+                                Math.abs(it.y - anchorY) < 60 // Within ~3 lines
+                            );
+
+                            let matchCount = 0;
+                            const matchingNearby = [];
+                            for (const word of searchWords) {
+                                const found = nearbyItems.find(it => it.text.includes(word));
+                                if (found) {
+                                    matchCount++;
+                                    if (!matchingNearby.includes(found)) matchingNearby.push(found);
+                                }
+                            }
+
+                            if (matchCount > bestScore && matchingNearby.length > 0) {
+                                bestScore = matchCount;
+                                const padding = 8;
+                                const minX = Math.min(...matchingNearby.map(it => it.x)) - padding;
+                                const minY = Math.min(...matchingNearby.map(it => it.y)) - padding;
+                                const maxX = Math.max(...matchingNearby.map(it => it.x + it.width)) + padding;
+                                const maxY = Math.max(...matchingNearby.map(it => it.y + it.height)) + padding;
+                                bestMatch = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+                            }
+                            break; // Use first anchor found
+                        }
+                    }
+                }
+
+                const threshold = Math.ceil(searchWords.length * 0.5);
+                return {
+                    found: bestScore >= threshold,
+                    bounds: bestMatch,
+                    score: bestScore
+                };
+            } catch (error) {
+                console.error(`Error in searchPageForText for page ${pageNum}:`, error);
+                return { found: false, bounds: null, score: 0 };
+            }
+        }
+
+        // Show/hide "Find in PDF" buttons based on whether PDF is loaded
+        function updateFindInPdfButtons() {
+            const buttons = document.querySelectorAll('.find-in-pdf-btn');
+            buttons.forEach(btn => {
+                if (pdfDoc) {
+                    btn.classList.add('visible');
+                } else {
+                    btn.classList.remove('visible');
+                }
+            });
         }
 
         // Track live results during streaming
@@ -972,6 +1503,9 @@
                     <a href="${createReportUrl(ref)}" target="_blank" class="report-btn">
                         ⚑ Report false positive
                     </a>
+                    <button class="find-in-pdf-btn" onclick="findReferenceInPdf('${escapeHtml(ref.title).replace(/'/g, "\\'")}')">
+                        📍 Find in PDF
+                    </button>
                 </div>
             `;
 
@@ -1607,6 +2141,7 @@ https://github.com/idramalab/hallucinator
                 hallucinations.forEach(ref => {
                     list.appendChild(renderHallucination(ref));
                 });
+                updateFindInPdfButtons();
             }
 
             // Show verified references in collapsible section
@@ -1747,6 +2282,9 @@ https://github.com/idramalab/hallucinator
 
                 container.appendChild(section);
             });
+
+            // Update "Find in PDF" button visibility
+            updateFindInPdfButtons();
 
             // Show the hallucinations container (we're using it for multi-file display)
             document.getElementById('hallucinations').style.display = 'block';

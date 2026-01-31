@@ -965,8 +965,6 @@
             <button id="pdfPrevPage" title="Previous page">◀</button>
             <span id="pdfPageInfo">Page 1 / 1</span>
             <button id="pdfNextPage" title="Next page">▶</button>
-            <button id="pdfZoomOut" title="Zoom out">−</button>
-            <button id="pdfZoomIn" title="Zoom in">+</button>
         </div>
         <div class="pdf-preview-container" id="pdfPreviewContainer"></div>
     </div>
@@ -1086,16 +1084,6 @@
                 currentPage++;
                 renderPage(currentPage);
             }
-        });
-
-        document.getElementById('pdfZoomIn').addEventListener('click', async () => {
-            pdfScale = Math.min(pdfScale + 0.25, 3.0);
-            await renderPage(currentPage);
-        });
-
-        document.getElementById('pdfZoomOut').addEventListener('click', async () => {
-            pdfScale = Math.max(pdfScale - 0.25, 0.5);
-            await renderPage(currentPage);
         });
 
         pdfPreviewClose.addEventListener('click', () => {

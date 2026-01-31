@@ -639,29 +639,32 @@ def extract_title_from_reference(ref_text):
                 return title, False  # from_quotes=False
 
     # === Format 5: ALL CAPS authors (e.g., "SURNAME, F., AND SURNAME, G. Title here.") ===
-    # Detect transition from ALL CAPS to mixed case as title start
-    all_caps_match = re.search(r'^([A-Z][A-Z\s,.\-\']+(?:AND|ET\s+AL\.?)?[A-Z,.\s]+)\s+([A-Z][a-z])', ref_text)
-    if all_caps_match:
-        title_start = all_caps_match.start(2)
-        title_text = ref_text[title_start:]
-        # Find title end at venue markers
-        title_end_patterns = [
-            r'\.\s*[Ii]n\s+[A-Z]',  # ". In Proceedings"
-            r'\.\s*(?:Proceedings|IEEE|ACM|USENIX|NDSS|arXiv|Technical\s+report)',
-            r'\.\s*[A-Z][a-z]+\s+\d+,\s*\d+\s*\(',  # ". Journal 55, 3 (2012)"
-            r'\.\s*(?:Ph\.?D\.?\s+thesis|Master.s\s+thesis)',
-        ]
-        title_end = len(title_text)
-        for pattern in title_end_patterns:
-            m = re.search(pattern, title_text)
-            if m:
-                title_end = min(title_end, m.start())
+    # Only triggers if text starts with a multi-char ALL CAPS surname (not just initials like "H. W.")
+    # Look for pattern: "SURNAME... [initial]. Title" where Title starts with capital
+    if re.match(r'^[A-Z]{2,}', ref_text):
+        # Find title start: period-space-Capital followed by lowercase word
+        # Handles both "A title..." and "Title..." patterns
+        title_start_match = re.search(r'\.\s+([A-Z][a-z]*\s+[a-z])', ref_text)
+        if title_start_match:
+            title_text = ref_text[title_start_match.start(1):]
+            # Find title end at venue markers
+            title_end_patterns = [
+                r'\.\s*[Ii]n\s+[A-Z]',  # ". In Proceedings"
+                r'\.\s*(?:Proceedings|IEEE|ACM|USENIX|NDSS|arXiv|Technical\s+report)',
+                r'\.\s*[A-Z][a-z]+\s+\d+,\s*\d+\s*\(',  # ". Journal 55, 3 (2012)"
+                r'\.\s*(?:Ph\.?D\.?\s+thesis|Master.s\s+thesis)',
+            ]
+            title_end = len(title_text)
+            for pattern in title_end_patterns:
+                m = re.search(pattern, title_text)
+                if m:
+                    title_end = min(title_end, m.start())
 
-        if title_end > 0:
-            title = title_text[:title_end].strip()
-            title = re.sub(r'\.\s*$', '', title)
-            if len(title.split()) >= 3:
-                return title, False
+            if title_end > 0:
+                title = title_text[:title_end].strip()
+                title = re.sub(r'\.\s*$', '', title)
+                if len(title.split()) >= 3:
+                    return title, False
 
     # === Fallback: second sentence if it looks like a title ===
     # Use smart splitting that skips author initials like "M." "J."
@@ -738,7 +741,7 @@ def extract_references_with_titles_and_authors(pdf_path, return_stats=False):
 
         title, from_quotes = extract_title_from_reference(ref_text)
         title = clean_title(title, from_quotes=from_quotes)
-        if not title or len(title.split()) < 5:
+        if not title or len(title.split()) < 4:
             stats['skipped_short_title'] += 1
             continue
 

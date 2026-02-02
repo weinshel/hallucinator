@@ -191,6 +191,183 @@ def validate_doi(doi):
         return {'valid': False, 'error': f'DOI lookup failed: {e}'}
 
 
+def check_retraction(doi):
+    """Check if a paper with given DOI has been retracted using CrossRef API.
+
+    CrossRef includes Retraction Watch database data since 2023.
+
+    Returns a dict with:
+        - retracted: True if paper has been retracted
+        - retraction_doi: DOI of the retraction notice (if available)
+        - retraction_date: Date of retraction (if available)
+        - retraction_type: Type of notice (Retraction, Expression of Concern, etc.)
+        - error: Error message (if lookup failed)
+    """
+    if not doi:
+        return {'retracted': False, 'error': None}
+
+    url = f"https://api.crossref.org/works/{doi}"
+    headers = {
+        "User-Agent": "HallucinatedReferenceChecker/1.0 (mailto:hallucination-checker@example.com)"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=get_timeout())
+
+        if response.status_code == 200:
+            data = response.json()
+            work = data.get('message', {})
+
+            # Check for update-to relations indicating retraction
+            update_to = work.get('update-to', [])
+            for update in update_to:
+                update_type = update.get('type', '').lower()
+                if update_type in ['retraction', 'removal']:
+                    return {
+                        'retracted': True,
+                        'retraction_doi': update.get('DOI'),
+                        'retraction_date': update.get('updated', {}).get('date-time'),
+                        'retraction_type': update.get('type', 'Retraction').title(),
+                        'error': None
+                    }
+
+            # Also check the relation field for retractions
+            relation = work.get('relation', {})
+            is_retracted_by = relation.get('is-retracted-by', [])
+            if is_retracted_by:
+                retraction = is_retracted_by[0]
+                return {
+                    'retracted': True,
+                    'retraction_doi': retraction.get('id'),
+                    'retraction_date': None,
+                    'retraction_type': 'Retraction',
+                    'error': None
+                }
+
+            # Check for expression of concern
+            has_expression_of_concern = relation.get('has-expression-of-concern', [])
+            if has_expression_of_concern:
+                concern = has_expression_of_concern[0]
+                return {
+                    'retracted': True,
+                    'retraction_doi': concern.get('id'),
+                    'retraction_date': None,
+                    'retraction_type': 'Expression of Concern',
+                    'error': None
+                }
+
+            return {'retracted': False, 'error': None}
+
+        elif response.status_code == 404:
+            # DOI not found in CrossRef - can't check retraction status
+            return {'retracted': False, 'error': None}
+        else:
+            return {'retracted': False, 'error': f'CrossRef lookup failed: HTTP {response.status_code}'}
+
+    except requests.exceptions.Timeout:
+        return {'retracted': False, 'error': 'Retraction check timed out'}
+    except requests.exceptions.RequestException as e:
+        return {'retracted': False, 'error': f'Retraction check failed: {e}'}
+
+
+def check_retraction_by_title(title):
+    """Check if a paper has been retracted by searching CrossRef by title.
+
+    Searches CrossRef's retraction database (includes Retraction Watch) by title.
+    Uses fuzzy matching to verify the found paper matches the reference.
+
+    Returns a dict with:
+        - retracted: True if paper has been retracted
+        - retraction_doi: DOI of the retraction notice (if available)
+        - original_doi: DOI of the original retracted paper
+        - retraction_date: Date of retraction (if available)
+        - retraction_type: Type of notice (Retraction, Expression of Concern, etc.)
+        - error: Error message (if lookup failed)
+    """
+    if not title or len(title) < 10:
+        return {'retracted': False, 'error': None}
+
+    # Search CrossRef for retracted papers matching this title
+    # We search papers that have update-type:retraction (papers that HAVE retractions)
+    encoded_title = urllib.parse.quote(title)
+    url = f"https://api.crossref.org/works?query.title={encoded_title}&filter=has-update:true&rows=5"
+    headers = {
+        "User-Agent": "HallucinatedReferenceChecker/1.0 (mailto:hallucination-checker@example.com)"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=get_timeout())
+
+        if response.status_code == 200:
+            data = response.json()
+            items = data.get('message', {}).get('items', [])
+
+            ref_norm = normalize_title(title)
+
+            for item in items:
+                item_title = item.get('title', [''])[0] if isinstance(item.get('title'), list) else item.get('title', '')
+                if not item_title:
+                    continue
+
+                item_norm = normalize_title(item_title)
+
+                # Check for fuzzy title match (95% threshold)
+                similarity = fuzz.ratio(ref_norm, item_norm)
+                if similarity >= 95:
+                    # Found a matching paper - check if it's retracted
+                    update_to = item.get('update-to', [])
+                    for update in update_to:
+                        update_type = update.get('type', '').lower()
+                        if update_type in ['retraction', 'removal']:
+                            return {
+                                'retracted': True,
+                                'original_doi': item.get('DOI'),
+                                'retraction_doi': update.get('DOI'),
+                                'retraction_date': update.get('updated', {}).get('date-time') if isinstance(update.get('updated'), dict) else None,
+                                'retraction_type': update.get('type', 'Retraction').title(),
+                                'error': None
+                            }
+
+                    # Check relation field
+                    relation = item.get('relation', {})
+                    is_retracted_by = relation.get('is-retracted-by', [])
+                    if is_retracted_by:
+                        retraction = is_retracted_by[0]
+                        return {
+                            'retracted': True,
+                            'original_doi': item.get('DOI'),
+                            'retraction_doi': retraction.get('id'),
+                            'retraction_date': None,
+                            'retraction_type': 'Retraction',
+                            'error': None
+                        }
+
+                    # Check for expression of concern
+                    has_expression_of_concern = relation.get('has-expression-of-concern', [])
+                    if has_expression_of_concern:
+                        concern = has_expression_of_concern[0]
+                        return {
+                            'retracted': True,
+                            'original_doi': item.get('DOI'),
+                            'retraction_doi': concern.get('id'),
+                            'retraction_date': None,
+                            'retraction_type': 'Expression of Concern',
+                            'error': None
+                        }
+
+            return {'retracted': False, 'error': None}
+
+        elif response.status_code == 404:
+            return {'retracted': False, 'error': None}
+        else:
+            return {'retracted': False, 'error': f'CrossRef search failed: HTTP {response.status_code}'}
+
+    except requests.exceptions.Timeout:
+        return {'retracted': False, 'error': 'Retraction search timed out'}
+    except requests.exceptions.RequestException as e:
+        return {'retracted': False, 'error': f'Retraction search failed: {e}'}
+
+
 def check_doi_match(doi_result, ref_title, ref_authors):
     """Check if DOI metadata matches the reference.
 
@@ -1741,6 +1918,42 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
                 }
                 logger.debug(f"  DOI validation: {doi_match['status']} - {doi_match['message']}")
 
+        # Check if paper has been retracted
+        retraction_info = None
+        retraction_result = None
+
+        # First try DOI-based lookup (more reliable)
+        if doi:
+            logger.debug(f"  Checking retraction status for DOI: {doi}")
+            retraction_result = check_retraction(doi)
+            if retraction_result.get('retracted'):
+                retraction_info = {
+                    'retracted': True,
+                    'doi': doi,
+                    'retraction_doi': retraction_result.get('retraction_doi'),
+                    'retraction_date': retraction_result.get('retraction_date'),
+                    'retraction_type': retraction_result.get('retraction_type', 'Retraction'),
+                }
+                logger.info(f"  ⚠️  RETRACTED: {title[:50]}... ({retraction_info['retraction_type']})")
+            elif retraction_result.get('error'):
+                logger.debug(f"  Retraction check error: {retraction_result['error']}")
+
+        # If no DOI or DOI check didn't find retraction, try title-based search
+        if not retraction_info:
+            logger.debug(f"  Checking retraction status by title: {title[:50]}...")
+            retraction_result = check_retraction_by_title(title)
+            if retraction_result.get('retracted'):
+                retraction_info = {
+                    'retracted': True,
+                    'doi': retraction_result.get('original_doi') or doi,
+                    'retraction_doi': retraction_result.get('retraction_doi'),
+                    'retraction_date': retraction_result.get('retraction_date'),
+                    'retraction_type': retraction_result.get('retraction_type', 'Retraction'),
+                }
+                logger.info(f"  ⚠️  RETRACTED (by title): {title[:50]}... ({retraction_info['retraction_type']})")
+            elif retraction_result.get('error'):
+                logger.debug(f"  Retraction title search error: {retraction_result['error']}")
+
         # Validate arXiv ID if present
         arxiv_info = None
         if arxiv_id:
@@ -1792,6 +2005,7 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
             'failed_dbs': result.get('failed_dbs', []),
             'doi_info': doi_info,
             'arxiv_info': arxiv_info,
+            'retraction_info': retraction_info,
         }
 
         # If DOI verified, use that as verification even if DB search failed
@@ -2198,6 +2412,26 @@ def main(pdf_path, sleep_time=1.0, openalex_key=None, s2_api_key=None, dblp_offl
                 print(f"{Colors.RED}Note: Paper also not found in any database{Colors.RESET}")
         print()
 
+    # Print retracted papers warning
+    retracted_papers = [r for r in results if r.get('retraction_info') and r['retraction_info'].get('retracted')]
+    if retracted_papers:
+        print()
+        print(f"{Colors.RED}{Colors.BOLD}{'='*60}{Colors.RESET}")
+        print(f"{Colors.RED}{Colors.BOLD}⚠️  RETRACTED PAPERS{Colors.RESET}")
+        print(f"{Colors.RED}{Colors.BOLD}{'='*60}{Colors.RESET}")
+        for result in retracted_papers:
+            retraction_info = result['retraction_info']
+            print()
+            print(f"{Colors.BOLD}Reference:{Colors.RESET} {result['title'][:70]}{'...' if len(result['title']) > 70 else ''}")
+            print(f"{Colors.RED}{Colors.BOLD}Status:{Colors.RESET} {retraction_info.get('retraction_type', 'Retraction')}")
+            if retraction_info.get('retraction_doi'):
+                print(f"{Colors.BOLD}Retraction notice:{Colors.RESET} https://doi.org/{retraction_info['retraction_doi']}")
+            if retraction_info.get('retraction_date'):
+                print(f"{Colors.BOLD}Date:{Colors.RESET} {retraction_info['retraction_date']}")
+            if result.get('doi_info') and result['doi_info'].get('doi'):
+                print(f"{Colors.BOLD}Original DOI:{Colors.RESET} https://doi.org/{result['doi_info']['doi']}")
+        print()
+
     # Print summary
     print()
     print(f"{Colors.BOLD}{'='*60}{Colors.RESET}")
@@ -2240,6 +2474,10 @@ def main(pdf_path, sleep_time=1.0, openalex_key=None, s2_api_key=None, dblp_offl
             print(f"    {Colors.DIM}- Invalid/unresolved arXiv IDs: {arxivs_invalid}{Colors.RESET}")
         if arxivs_mismatch > 0:
             print(f"    {Colors.DIM}- arXiv mismatches: {arxivs_mismatch}{Colors.RESET}")
+
+    # Retracted papers warning
+    if retracted_papers:
+        print(f"  {Colors.RED}⚠️  Retracted papers:{Colors.RESET} {len(retracted_papers)}")
 
     # Show DOI/arXiv stats if any were found
     id_stats = []

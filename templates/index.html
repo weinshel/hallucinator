@@ -455,6 +455,7 @@
         .stat-notfound .stat-value { color: #dc2626; }
         .stat-doi-issue .stat-value { color: #9333ea; }
         .stat-arxiv-issue .stat-value { color: #0891b2; }
+        .stat-retracted .stat-value { color: #b91c1c; }
         .stat-skipped .stat-value { color: #6b7280; }
         .skipped-details {
             color: var(--text-secondary);
@@ -992,6 +993,10 @@
                     <div class="stat-value" id="arxivIssueCount">0</div>
                     <div class="stat-label">arXiv Issues</div>
                 </div>
+                <div class="stat stat-retracted" id="retractedStat" style="display: none;">
+                    <div class="stat-value" id="retractedCount">0</div>
+                    <div class="stat-label">Retracted</div>
+                </div>
                 <div class="stat stat-skipped">
                     <div class="stat-value" id="skippedCount">0</div>
                     <div class="stat-label">Skipped</div>
@@ -1034,6 +1039,14 @@
                 These references have problematic arXiv IDs - the ID doesn't resolve, or points to a different paper.
             </p>
             <div id="arxivIssuesList"></div>
+        </div>
+
+        <div class="hallucinations retracted-section" id="retractedSection" style="display: none;">
+            <h2 style="color: #b91c1c;">⚠️ Retracted Papers</h2>
+            <p class="retracted-description" style="color: var(--text-secondary); margin-bottom: 1rem; font-size: 0.9rem;">
+                These referenced papers have been retracted or have an expression of concern. Consider removing or replacing these citations.
+            </p>
+            <div id="retractedList"></div>
         </div>
     </div>
     </div><!-- end main-content -->
@@ -2447,6 +2460,17 @@ https://github.com/idramalab/hallucinator
                 arxivIssueStat.style.display = 'none';
             }
 
+            // Update retracted papers stat
+            const retractedPapers = data.results.filter(r => r.retraction_info && r.retraction_info.retracted);
+            const retractedStat = document.getElementById('retractedStat');
+            const retractedCountEl = document.getElementById('retractedCount');
+            if (retractedPapers.length > 0) {
+                retractedCountEl.textContent = retractedPapers.length;
+                retractedStat.style.display = '';
+            } else {
+                retractedStat.style.display = 'none';
+            }
+
             // Show timeout warning separately if there were timeouts
             let timeoutWarning = document.getElementById('timeoutWarning');
             if (!timeoutWarning) {
@@ -2462,9 +2486,9 @@ https://github.com/idramalab/hallucinator
                 timeoutWarning.style.display = 'none';
             }
 
-            // Update problematic percentage (include DOI and arXiv issues)
+            // Update problematic percentage (include DOI, arXiv issues, and retracted papers)
             const problematicPercent = document.getElementById('problematicPercent');
-            const problematic = data.summary.not_found + data.summary.mismatched + doiIssuesTotal + arxivIssuesTotal;
+            const problematic = data.summary.not_found + data.summary.mismatched + doiIssuesTotal + arxivIssuesTotal + retractedPapers.length;
             if (data.summary.total > 0) {
                 const percent = ((problematic / data.summary.total) * 100).toFixed(1);
                 if (problematic === 0) {
@@ -2620,6 +2644,66 @@ https://github.com/idramalab/hallucinator
                 });
             } else {
                 arxivIssuesSection.style.display = 'none';
+            }
+
+            // Render retracted papers section
+            const retractedSection = document.getElementById('retractedSection');
+            const retractedList = document.getElementById('retractedList');
+
+            if (retractedPapers.length > 0) {
+                retractedSection.style.display = 'block';
+                retractedList.innerHTML = '';
+
+                retractedPapers.forEach(ref => {
+                    const div = document.createElement('div');
+                    div.className = 'reference retracted-reference';
+
+                    const retractionInfo = ref.retraction_info;
+                    const retractionType = retractionInfo.retraction_type || 'Retraction';
+                    const retractionDoi = retractionInfo.retraction_doi;
+                    const retractionDate = retractionInfo.retraction_date
+                        ? new Date(retractionInfo.retraction_date).toLocaleDateString()
+                        : null;
+
+                    // Use DOI from doi_info if available, otherwise from retraction_info (found via title search)
+                    const originalDoi = (ref.doi_info && ref.doi_info.doi) || retractionInfo.doi;
+                    const doiLink = originalDoi
+                        ? `<a href="https://doi.org/${escapeHtml(originalDoi)}" target="_blank">${escapeHtml(originalDoi)}</a>`
+                        : 'N/A';
+
+                    const retractionDoiLink = retractionDoi
+                        ? `<a href="https://doi.org/${escapeHtml(retractionDoi)}" target="_blank">View ${retractionType} Notice ↗</a>`
+                        : '';
+
+                    const dbStatus = ref.status === 'verified'
+                        ? `<span style="color: #16a34a;">✓ Found in ${escapeHtml(ref.source)}</span>`
+                        : ref.status === 'not_found'
+                            ? `<span style="color: #dc2626;">✗ Not found in databases</span>`
+                            : `<span style="color: #ca8a04;">⚠ Author mismatch in ${escapeHtml(ref.source)}</span>`;
+
+                    div.innerHTML = `
+                        <div class="reference-title" style="color: #b91c1c;">${escapeHtml(ref.title)}</div>
+                        <div class="retraction-info" style="margin-top: 0.5rem; padding: 0.75rem; background: #fef2f2; border: 1px solid #fecaca; border-radius: 0.375rem;">
+                            <span style="color: #b91c1c; font-weight: 600;">⚠️ ${retractionType}</span>
+                            ${retractionDate ? `<span style="color: #991b1b; margin-left: 0.5rem;">(${retractionDate})</span>` : ''}
+                            <br>
+                            <strong>Original DOI:</strong> ${doiLink}<br>
+                            ${retractionDoiLink ? `<div style="margin-top: 0.25rem;">${retractionDoiLink}</div>` : ''}
+                        </div>
+                        <div style="margin-top: 0.5rem; font-size: 0.9rem;">
+                            Database status: ${dbStatus}
+                        </div>
+                        <div class="reference-actions">
+                            <a href="${createScholarLink(ref.title)}" target="_blank" class="scholar-link">
+                                Search on Google Scholar &rarr;
+                            </a>
+                        </div>
+                    `;
+
+                    retractedList.appendChild(div);
+                });
+            } else {
+                retractedSection.style.display = 'none';
             }
 
             // Show verified references in collapsible section (after arXiv issues)
@@ -2876,6 +2960,52 @@ https://github.com/idramalab/hallucinator
                                         <strong>DOI:</strong> <a href="https://doi.org/${escapeHtml(doiInfo.doi)}" target="_blank">${escapeHtml(doiInfo.doi)}</a><br>
                                         <span style="color: #dc2626;">❌ ${issueType}</span><br>
                                         <span style="color: var(--text-secondary);">${issueDetail}</span>
+                                    </div>
+                                    <div style="margin-top: 0.5rem; font-size: 0.9rem;">
+                                        Database status: ${dbStatus}
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                `;
+            }
+
+            // Add retracted papers section
+            const retractedPapers = file.results.filter(r => r.retraction_info && r.retraction_info.retracted);
+            if (retractedPapers.length > 0) {
+                html += `
+                    <div class="retracted-section" style="margin-top: 1.5rem;">
+                        <h3 style="color: #b91c1c; margin-bottom: 0.75rem;">⚠️ Retracted Papers (${retractedPapers.length})</h3>
+                        ${retractedPapers.map(ref => {
+                            const retractionInfo = ref.retraction_info;
+                            const retractionType = retractionInfo.retraction_type || 'Retraction';
+                            const retractionDoi = retractionInfo.retraction_doi;
+                            const retractionDate = retractionInfo.retraction_date
+                                ? new Date(retractionInfo.retraction_date).toLocaleDateString()
+                                : null;
+                            // Use DOI from doi_info if available, otherwise from retraction_info (found via title search)
+                            const originalDoi = (ref.doi_info && ref.doi_info.doi) || retractionInfo.doi;
+                            const doiLink = originalDoi
+                                ? '<a href="https://doi.org/' + escapeHtml(originalDoi) + '" target="_blank">' + escapeHtml(originalDoi) + '</a>'
+                                : 'N/A';
+                            const retractionDoiLink = retractionDoi
+                                ? '<a href="https://doi.org/' + escapeHtml(retractionDoi) + '" target="_blank">View ' + retractionType + ' Notice ↗</a>'
+                                : '';
+                            const dbStatus = ref.status === 'verified'
+                                ? '<span style="color: #16a34a;">✓ Found in ' + escapeHtml(ref.source) + '</span>'
+                                : ref.status === 'not_found'
+                                    ? '<span style="color: #dc2626;">✗ Not found in databases</span>'
+                                    : '<span style="color: #ca8a04;">⚠ Author mismatch in ' + escapeHtml(ref.source) + '</span>';
+                            return `
+                                <div class="reference retracted-reference" style="margin-bottom: 1rem; padding: 1rem; border: 1px solid #fecaca; border-radius: 0.5rem; background: #fef2f2;">
+                                    <div class="reference-title" style="font-weight: 600; margin-bottom: 0.5rem; color: #b91c1c;">${escapeHtml(ref.title)}</div>
+                                    <div class="retraction-info" style="margin-top: 0.5rem;">
+                                        <span style="color: #b91c1c; font-weight: 600;">⚠️ ${retractionType}</span>
+                                        ${retractionDate ? '<span style="color: #991b1b; margin-left: 0.5rem;">(' + retractionDate + ')</span>' : ''}
+                                        <br>
+                                        <strong>Original DOI:</strong> ${doiLink}<br>
+                                        ${retractionDoiLink ? '<div style="margin-top: 0.25rem;">' + retractionDoiLink + '</div>' : ''}
                                     </div>
                                     <div style="margin-top: 0.5rem; font-size: 0.9rem;">
                                         Database status: ${dbStatus}

@@ -294,6 +294,208 @@ def check_doi_match(doi_result, ref_title, ref_authors):
     }
 
 
+def extract_arxiv_id(text):
+    """Extract arXiv ID from reference text.
+
+    Handles formats like:
+    - arXiv:2301.12345
+    - arXiv:2301.12345v1
+    - arxiv.org/abs/2301.12345
+    - arXiv:hep-th/9901001 (old format)
+    - arXiv preprint arXiv:2301.12345
+
+    Also handles IDs split across lines (common in PDFs).
+
+    Returns the arXiv ID string (e.g., "2301.12345") or None if not found.
+    """
+    # Fix IDs split across lines
+    # e.g., "arXiv:2301.\n12345" -> "arXiv:2301.12345"
+    text_fixed = re.sub(r'(arXiv:\d{4}\.)\s*\n\s*(\d+)', r'\1\2', text, flags=re.IGNORECASE)
+    # e.g., "arxiv.org/abs/2301.\n12345" -> "arxiv.org/abs/2301.12345"
+    text_fixed = re.sub(r'(arxiv\.org/abs/\d{4}\.)\s*\n\s*(\d+)', r'\1\2', text_fixed, flags=re.IGNORECASE)
+
+    # New format: YYMM.NNNNN (with optional version)
+    # e.g., arXiv:2301.12345, arXiv:2301.12345v2
+    new_format = re.search(r'arXiv[:\s]+(\d{4}\.\d{4,5}(?:v\d+)?)', text_fixed, re.IGNORECASE)
+    if new_format:
+        return new_format.group(1)
+
+    # URL format: arxiv.org/abs/YYMM.NNNNN
+    url_format = re.search(r'arxiv\.org/abs/(\d{4}\.\d{4,5}(?:v\d+)?)', text_fixed, re.IGNORECASE)
+    if url_format:
+        return url_format.group(1)
+
+    # Old format: category/YYMMNNN (e.g., hep-th/9901001)
+    old_format = re.search(r'arXiv[:\s]+([a-z-]+/\d{7}(?:v\d+)?)', text_fixed, re.IGNORECASE)
+    if old_format:
+        return old_format.group(1)
+
+    # URL old format
+    url_old_format = re.search(r'arxiv\.org/abs/([a-z-]+/\d{7}(?:v\d+)?)', text_fixed, re.IGNORECASE)
+    if url_old_format:
+        return url_old_format.group(1)
+
+    return None
+
+
+def validate_arxiv(arxiv_id):
+    """Validate an arXiv ID by querying the arXiv API and return metadata.
+
+    Returns a dict with:
+        - valid: True if arXiv ID resolves
+        - title: Paper title from arXiv metadata (if valid)
+        - authors: List of author names (if valid)
+        - error: Error message (if invalid)
+    """
+    if not arxiv_id:
+        return {'valid': False, 'error': 'No arXiv ID provided'}
+
+    url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
+    headers = {
+        "User-Agent": "HallucinatedReferenceChecker/1.0"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=get_timeout())
+
+        if response.status_code == 200:
+            try:
+                # Parse XML response
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(response.content)
+
+                # Define namespace
+                ns = {
+                    'atom': 'http://www.w3.org/2005/Atom',
+                    'arxiv': 'http://arxiv.org/schemas/atom'
+                }
+
+                # Find entry
+                entry = root.find('atom:entry', ns)
+                if entry is None:
+                    return {'valid': False, 'error': 'arXiv ID not found'}
+
+                # Check if it's an error response (no title or "Error" in id)
+                entry_id = entry.find('atom:id', ns)
+                if entry_id is not None and 'Error' in entry_id.text:
+                    return {'valid': False, 'error': 'arXiv ID not found'}
+
+                title_elem = entry.find('atom:title', ns)
+                if title_elem is None or not title_elem.text:
+                    return {'valid': False, 'error': 'arXiv ID not found'}
+
+                title = title_elem.text.strip()
+                # Clean up title (remove newlines, extra spaces)
+                title = ' '.join(title.split())
+
+                authors = []
+                for author in entry.findall('atom:author', ns):
+                    name_elem = author.find('atom:name', ns)
+                    if name_elem is not None and name_elem.text:
+                        authors.append(name_elem.text.strip())
+
+                return {
+                    'valid': True,
+                    'title': title,
+                    'authors': authors,
+                    'error': None
+                }
+            except ET.ParseError as e:
+                return {'valid': False, 'error': f'Failed to parse arXiv response: {e}'}
+        elif response.status_code == 429:
+            return {'valid': False, 'error': 'Rate limited (429)'}
+        else:
+            return {'valid': False, 'error': f'arXiv lookup failed: HTTP {response.status_code}'}
+
+    except requests.exceptions.Timeout:
+        return {'valid': False, 'error': 'arXiv lookup timed out'}
+    except requests.exceptions.RequestException as e:
+        return {'valid': False, 'error': f'arXiv lookup failed: {e}'}
+
+
+def check_arxiv_match(arxiv_result, ref_title, ref_authors):
+    """Check if arXiv metadata matches the reference.
+
+    Returns a dict with:
+        - status: 'verified' | 'title_mismatch' | 'author_mismatch' | 'invalid'
+        - message: Human-readable description
+        - arxiv_title: Title from arXiv (if valid)
+        - arxiv_authors: Authors from arXiv (if valid)
+    """
+    if not arxiv_result['valid']:
+        return {
+            'status': 'invalid',
+            'message': arxiv_result['error'],
+            'arxiv_title': None,
+            'arxiv_authors': []
+        }
+
+    arxiv_title = arxiv_result['title']
+    arxiv_authors = arxiv_result['authors']
+
+    # Check title match using fuzzy matching (same logic as DOI)
+    ref_norm = normalize_title(ref_title)
+    arxiv_norm = normalize_title(arxiv_title)
+
+    title_ratio = fuzz.ratio(ref_norm, arxiv_norm)
+    is_prefix = ref_norm.startswith(arxiv_norm) and len(arxiv_norm) >= 8
+    partial_ratio = fuzz.partial_ratio(ref_norm, arxiv_norm)
+    is_contained_prefix = (
+        partial_ratio == 100 and
+        len(arxiv_norm) >= 8 and
+        ref_norm.startswith(arxiv_norm)
+    )
+
+    # Handle short tool/project names
+    is_tool_name_match = False
+    if len(arxiv_norm) >= 4 and partial_ratio == 100 and ':' in ref_title:
+        ref_before_colon = ref_title.split(':')[0].strip()
+        ref_before_colon_norm = normalize_title(ref_before_colon)
+        if ref_before_colon_norm == arxiv_norm:
+            is_tool_name_match = True
+
+    title_match = (
+        title_ratio >= 95 or
+        is_prefix or
+        is_contained_prefix or
+        (partial_ratio >= 95 and len(arxiv_norm) >= 20) or
+        is_tool_name_match
+    )
+
+    if not title_match:
+        return {
+            'status': 'title_mismatch',
+            'message': f'arXiv ID points to different paper: "{arxiv_title[:60]}..."' if len(arxiv_title) > 60 else f'arXiv ID points to different paper: "{arxiv_title}"',
+            'arxiv_title': arxiv_title,
+            'arxiv_authors': arxiv_authors
+        }
+
+    # Check author match
+    if ref_authors and arxiv_authors:
+        if validate_authors(ref_authors, arxiv_authors):
+            return {
+                'status': 'verified',
+                'message': 'arXiv ID verified',
+                'arxiv_title': arxiv_title,
+                'arxiv_authors': arxiv_authors
+            }
+        else:
+            return {
+                'status': 'author_mismatch',
+                'message': 'arXiv ID title matches but authors differ',
+                'arxiv_title': arxiv_title,
+                'arxiv_authors': arxiv_authors
+            }
+
+    # No authors to compare, but title matches
+    return {
+        'status': 'verified',
+        'message': 'arXiv ID verified (title match)',
+        'arxiv_title': arxiv_title,
+        'arxiv_authors': arxiv_authors
+    }
+
+
 # Common compound-word suffixes that should keep the hyphen
 COMPOUND_SUFFIXES = {
     'centered', 'based', 'driven', 'aware', 'oriented', 'specific', 'related',
@@ -953,8 +1155,9 @@ def extract_references_with_titles_and_authors(pdf_path, return_stats=False):
     previous_authors = []
 
     for ref_text in raw_refs:
-        # Extract DOI BEFORE fixing hyphenation (DOIs can contain hyphens split across lines)
+        # Extract DOI and arXiv ID BEFORE fixing hyphenation (they can contain hyphens/periods split across lines)
         doi = extract_doi(ref_text)
+        arxiv_id = extract_arxiv_id(ref_text)
 
         # Fix hyphenation from PDF line breaks (preserves compound words like "human-centered")
         ref_text = fix_hyphenation(ref_text)
@@ -988,7 +1191,7 @@ def extract_references_with_titles_and_authors(pdf_path, return_stats=False):
         if authors:
             previous_authors = authors
 
-        references.append((title, authors, doi))
+        references.append((title, authors, doi, arxiv_id))
 
     return (references, stats) if return_stats else references
 
@@ -1487,12 +1690,15 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
     # Track DOIs that got 429 errors for retry
     doi_retry_candidates = []
     doi_retry_lock = threading.Lock()
+    # Track arXiv IDs that got 429 errors for retry
+    arxiv_retry_candidates = []
+    arxiv_retry_lock = threading.Lock()
     # Track total timeout/failure count
     total_timeouts = 0
     timeouts_lock = threading.Lock()
     retry_lock = threading.Lock()
 
-    def check_single_ref(i, title, ref_authors, doi=None):
+    def check_single_ref(i, title, ref_authors, doi=None, arxiv_id=None):
         """Check a single reference and return result."""
         nonlocal total_timeouts
 
@@ -1535,6 +1741,36 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
                 }
                 logger.debug(f"  DOI validation: {doi_match['status']} - {doi_match['message']}")
 
+        # Validate arXiv ID if present
+        arxiv_info = None
+        if arxiv_id:
+            logger.debug(f"  Validating arXiv ID: {arxiv_id}")
+            arxiv_result = validate_arxiv(arxiv_id)
+
+            # Check if arXiv got rate limited - track for retry
+            if not arxiv_result['valid'] and '429' in str(arxiv_result.get('error', '')):
+                with arxiv_retry_lock:
+                    arxiv_retry_candidates.append((i, arxiv_id, title, ref_authors))
+                logger.info(f"  arXiv rate limited, will retry: {arxiv_id}")
+                arxiv_info = {
+                    'arxiv_id': arxiv_id,
+                    'status': 'invalid',
+                    'message': 'arXiv lookup rate limited (will retry)',
+                    'arxiv_title': None,
+                    'arxiv_authors': [],
+                    'needs_retry': True,
+                }
+            else:
+                arxiv_match = check_arxiv_match(arxiv_result, title, ref_authors)
+                arxiv_info = {
+                    'arxiv_id': arxiv_id,
+                    'status': arxiv_match['status'],
+                    'message': arxiv_match['message'],
+                    'arxiv_title': arxiv_match.get('arxiv_title'),
+                    'arxiv_authors': arxiv_match.get('arxiv_authors', []),
+                }
+                logger.debug(f"  arXiv validation: {arxiv_match['status']} - {arxiv_match['message']}")
+
         # Query all databases concurrently
         result = query_all_databases_concurrent(
             title, ref_authors,
@@ -1555,6 +1791,7 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
             'error_type': result['error_type'],
             'failed_dbs': result.get('failed_dbs', []),
             'doi_info': doi_info,
+            'arxiv_info': arxiv_info,
         }
 
         # If DOI verified, use that as verification even if DB search failed
@@ -1563,6 +1800,13 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
             full_result['source'] = 'DOI'
             full_result['error_type'] = None
             logger.info(f"  -> VERIFIED via DOI (DB search found nothing)")
+
+        # If arXiv ID verified, use that as verification even if DB search failed
+        if arxiv_info and arxiv_info['status'] == 'verified' and full_result['status'] == 'not_found':
+            full_result['status'] = 'verified'
+            full_result['source'] = 'arXiv ID'
+            full_result['error_type'] = None
+            logger.info(f"  -> VERIFIED via arXiv ID (DB search found nothing)")
 
         results[i] = full_result
 
@@ -1611,13 +1855,17 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
     with ThreadPoolExecutor(max_workers=max_concurrent_refs) as executor:
         futures = []
         for i, ref in enumerate(refs):
-            # Handle both (title, authors, doi) and legacy (title, authors) tuples
-            if len(ref) >= 3:
+            # Handle (title, authors, doi, arxiv_id), (title, authors, doi), and legacy (title, authors) tuples
+            if len(ref) >= 4:
+                title, ref_authors, doi, arxiv_id = ref[0], ref[1], ref[2], ref[3]
+            elif len(ref) >= 3:
                 title, ref_authors, doi = ref[0], ref[1], ref[2]
+                arxiv_id = None
             else:
                 title, ref_authors = ref[0], ref[1]
                 doi = None
-            future = executor.submit(check_single_ref, i, title, ref_authors, doi)
+                arxiv_id = None
+            future = executor.submit(check_single_ref, i, title, ref_authors, doi, arxiv_id)
             futures.append(future)
 
         # Wait for all to complete
@@ -1735,12 +1983,69 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
     if doi_retry_candidates:
         logger.info(f"=== DOI RETRY COMPLETE: {doi_retry_successes}/{len(doi_retry_candidates)} recovered ===")
 
+    # arXiv retry pass for rate-limited arXiv IDs
+    arxiv_retry_successes = 0
+    if arxiv_retry_candidates:
+        logger.info(f"=== arXiv RETRY PASS: {len(arxiv_retry_candidates)} arXiv IDs were rate limited ===")
+        if on_progress:
+            on_progress('arxiv_retry_pass', {
+                'count': len(arxiv_retry_candidates),
+            })
+
+        import time
+        for retry_num, (idx, arxiv_id, title, ref_authors) in enumerate(arxiv_retry_candidates, 1):
+            short_title = title[:50] + '...' if len(title) > 50 else title
+            logger.info(f"[arXiv RETRY {retry_num}/{len(arxiv_retry_candidates)}] {short_title}")
+
+            if on_progress:
+                on_progress('checking', {
+                    'index': idx,
+                    'total': len(refs),
+                    'title': f"[RETRY arXiv] {short_title}",
+                })
+
+            # Brief delay before retry
+            time.sleep(0.5)
+
+            # Retry arXiv validation
+            arxiv_result = validate_arxiv(arxiv_id)
+            if arxiv_result['valid'] or '429' not in str(arxiv_result.get('error', '')):
+                # Either succeeded or got a different error - update the result
+                arxiv_match = check_arxiv_match(arxiv_result, title, ref_authors)
+                new_arxiv_info = {
+                    'arxiv_id': arxiv_id,
+                    'status': arxiv_match['status'],
+                    'message': arxiv_match['message'],
+                    'arxiv_title': arxiv_match.get('arxiv_title'),
+                    'arxiv_authors': arxiv_match.get('arxiv_authors', []),
+                }
+                results[idx]['arxiv_info'] = new_arxiv_info
+
+                # If arXiv now verified and DB search failed, update status
+                if arxiv_match['status'] == 'verified' and results[idx]['status'] == 'not_found':
+                    results[idx]['status'] = 'verified'
+                    results[idx]['source'] = 'arXiv ID'
+                    results[idx]['error_type'] = None
+
+                if arxiv_result['valid']:
+                    arxiv_retry_successes += 1
+                    logger.info(f"  -> arXiv RECOVERED: {arxiv_match['status']}")
+                else:
+                    logger.info(f"  -> arXiv still invalid: {arxiv_result.get('error', 'unknown error')}")
+            else:
+                logger.info(f"  -> arXiv still rate limited")
+
+    if arxiv_retry_candidates:
+        logger.info(f"=== arXiv RETRY COMPLETE: {arxiv_retry_successes}/{len(arxiv_retry_candidates)} recovered ===")
+
     check_stats = {
         'total_timeouts': total_timeouts,
         'retried_count': len(retry_candidates),
         'retry_successes': retry_successes,
         'doi_retried_count': len(doi_retry_candidates),
         'doi_retry_successes': doi_retry_successes,
+        'arxiv_retried_count': len(arxiv_retry_candidates),
+        'arxiv_retry_successes': arxiv_retry_successes,
     }
     return results, check_stats
 
@@ -1823,6 +2128,12 @@ def main(pdf_path, sleep_time=1.0, openalex_key=None, s2_api_key=None, dblp_offl
     dois_invalid = sum(1 for r in results if r.get('doi_info') and r['doi_info']['status'] == 'invalid')
     dois_mismatch = sum(1 for r in results if r.get('doi_info') and r['doi_info']['status'] in ('title_mismatch', 'author_mismatch'))
 
+    # Count arXiv stats
+    arxivs_found = sum(1 for r in results if r.get('arxiv_info'))
+    arxivs_valid = sum(1 for r in results if r.get('arxiv_info') and r['arxiv_info']['status'] == 'verified')
+    arxivs_invalid = sum(1 for r in results if r.get('arxiv_info') and r['arxiv_info']['status'] == 'invalid')
+    arxivs_mismatch = sum(1 for r in results if r.get('arxiv_info') and r['arxiv_info']['status'] in ('title_mismatch', 'author_mismatch'))
+
     # Print detailed hallucination info
     for result in results:
         if result['status'] == 'not_found':
@@ -1861,6 +2172,32 @@ def main(pdf_path, sleep_time=1.0, openalex_key=None, s2_api_key=None, dblp_offl
                 print(f"{Colors.RED}Note: Paper also not found in any database{Colors.RESET}")
         print()
 
+    # Print arXiv issues as potential hallucinations
+    arxiv_issues = [r for r in results if r.get('arxiv_info') and r['arxiv_info']['status'] in ('invalid', 'title_mismatch', 'author_mismatch')]
+    if arxiv_issues:
+        print()
+        print(f"{Colors.RED}{Colors.BOLD}{'='*60}{Colors.RESET}")
+        print(f"{Colors.RED}{Colors.BOLD}arXiv ISSUES - POTENTIAL HALLUCINATIONS{Colors.RESET}")
+        print(f"{Colors.RED}{Colors.BOLD}{'='*60}{Colors.RESET}")
+        for result in arxiv_issues:
+            arxiv_info = result['arxiv_info']
+            print()
+            print(f"{Colors.BOLD}Reference:{Colors.RESET} {result['title'][:70]}{'...' if len(result['title']) > 70 else ''}")
+            print(f"{Colors.BOLD}arXiv ID:{Colors.RESET} {arxiv_info['arxiv_id']}")
+            if arxiv_info['status'] == 'invalid':
+                print(f"{Colors.RED}Issue:{Colors.RESET} arXiv ID does not resolve - {arxiv_info['message']}")
+            elif arxiv_info['status'] == 'title_mismatch':
+                print(f"{Colors.RED}Issue:{Colors.RESET} arXiv ID points to a different paper")
+                print(f"{Colors.BOLD}arXiv resolves to:{Colors.RESET} {arxiv_info['arxiv_title'][:70]}{'...' if arxiv_info.get('arxiv_title') and len(arxiv_info['arxiv_title']) > 70 else ''}")
+            elif arxiv_info['status'] == 'author_mismatch':
+                print(f"{Colors.RED}Issue:{Colors.RESET} arXiv ID title matches but authors differ")
+            # Show database verification status
+            if result['status'] == 'verified':
+                print(f"{Colors.DIM}Note: Paper found in {result['source']} but arXiv ID is problematic{Colors.RESET}")
+            elif result['status'] == 'not_found':
+                print(f"{Colors.RED}Note: Paper also not found in any database{Colors.RESET}")
+        print()
+
     # Print summary
     print()
     print(f"{Colors.BOLD}{'='*60}{Colors.RESET}")
@@ -1877,6 +2214,8 @@ def main(pdf_path, sleep_time=1.0, openalex_key=None, s2_api_key=None, dblp_offl
         print(f"  {Colors.DIM}DB timeouts/errors: {check_stats['total_timeouts']} (retried {check_stats['retried_count']}, {check_stats['retry_successes']} recovered){Colors.RESET}")
     if check_stats.get('doi_retried_count', 0) > 0:
         print(f"  {Colors.DIM}DOI rate limits: {check_stats['doi_retried_count']} (retried, {check_stats['doi_retry_successes']} recovered){Colors.RESET}")
+    if check_stats.get('arxiv_retried_count', 0) > 0:
+        print(f"  {Colors.DIM}arXiv rate limits: {check_stats['arxiv_retried_count']} (retried, {check_stats['arxiv_retry_successes']} recovered){Colors.RESET}")
     print()
     print(f"  {Colors.GREEN}Verified:{Colors.RESET} {found}")
     if mismatched > 0:
@@ -1893,10 +2232,24 @@ def main(pdf_path, sleep_time=1.0, openalex_key=None, s2_api_key=None, dblp_offl
         if dois_mismatch > 0:
             print(f"    {Colors.DIM}- DOI mismatches: {dois_mismatch}{Colors.RESET}")
 
-    # Show DOI stats if any DOIs were found
+    # arXiv issues count as potential hallucinations
+    arxiv_issues_count = arxivs_invalid + arxivs_mismatch
+    if arxiv_issues_count > 0:
+        print(f"  {Colors.RED}arXiv issues (potential hallucinations):{Colors.RESET} {arxiv_issues_count}")
+        if arxivs_invalid > 0:
+            print(f"    {Colors.DIM}- Invalid/unresolved arXiv IDs: {arxivs_invalid}{Colors.RESET}")
+        if arxivs_mismatch > 0:
+            print(f"    {Colors.DIM}- arXiv mismatches: {arxivs_mismatch}{Colors.RESET}")
+
+    # Show DOI/arXiv stats if any were found
+    id_stats = []
     if dois_found > 0 and dois_valid > 0:
+        id_stats.append(f"DOIs: {dois_valid}/{dois_found}")
+    if arxivs_found > 0 and arxivs_valid > 0:
+        id_stats.append(f"arXiv IDs: {arxivs_valid}/{arxivs_found}")
+    if id_stats:
         print()
-        print(f"  {Colors.DIM}DOIs validated: {dois_valid}/{dois_found}{Colors.RESET}")
+        print(f"  {Colors.DIM}IDs validated: {', '.join(id_stats)}{Colors.RESET}")
     print()
 
 if __name__ == "__main__":

@@ -454,6 +454,7 @@
         .stat-mismatch .stat-value { color: #ca8a04; }
         .stat-notfound .stat-value { color: #dc2626; }
         .stat-doi-issue .stat-value { color: #9333ea; }
+        .stat-arxiv-issue .stat-value { color: #0891b2; }
         .stat-skipped .stat-value { color: #6b7280; }
         .skipped-details {
             color: var(--text-secondary);
@@ -987,6 +988,10 @@
                     <div class="stat-value" id="doiIssueCount">0</div>
                     <div class="stat-label">DOI Issues</div>
                 </div>
+                <div class="stat stat-arxiv-issue" id="arxivIssueStat" style="display: none;">
+                    <div class="stat-value" id="arxivIssueCount">0</div>
+                    <div class="stat-label">arXiv Issues</div>
+                </div>
                 <div class="stat stat-skipped">
                     <div class="stat-value" id="skippedCount">0</div>
                     <div class="stat-label">Skipped</div>
@@ -1021,6 +1026,14 @@
                 These references have problematic DOIs - the DOI doesn't resolve, or points to a different paper.
             </p>
             <div id="doiIssuesList"></div>
+        </div>
+
+        <div class="hallucinations arxiv-issues-section" id="arxivIssuesSection" style="display: none;">
+            <h2 style="color: #0891b2;">arXiv Issues</h2>
+            <p class="arxiv-issues-description" style="color: var(--text-secondary); margin-bottom: 1rem; font-size: 0.9rem;">
+                These references have problematic arXiv IDs - the ID doesn't resolve, or points to a different paper.
+            </p>
+            <div id="arxivIssuesList"></div>
         </div>
     </div>
     </div><!-- end main-content -->
@@ -1847,6 +1860,72 @@
             updateProblematicPercent();
         }
 
+        function markArxivIssueSafe(button, title) {
+            const referenceDiv = button.closest('.reference');
+            if (!referenceDiv) return;
+
+            // Get the arXiv issues section and list
+            const arxivIssuesSection = document.getElementById('arxivIssuesSection');
+            const arxivIssuesList = document.getElementById('arxivIssuesList');
+
+            // Find or create verified section (after arXiv issues section)
+            let verifiedSection = arxivIssuesSection.parentNode.querySelector('.verified-section');
+            if (!verifiedSection) {
+                verifiedSection = document.createElement('div');
+                verifiedSection.className = 'verified-section';
+                verifiedSection.innerHTML = `
+                    <div class="verified-header" onclick="this.parentElement.classList.toggle('expanded')">
+                        <span class="verified-count-text">Verified References (0)</span>
+                        <span class="verified-toggle">▼</span>
+                    </div>
+                    <div class="verified-list"></div>
+                `;
+                arxivIssuesSection.parentNode.insertBefore(verifiedSection, arxivIssuesSection.nextSibling);
+            }
+
+            // Add to verified list
+            const verifiedList = verifiedSection.querySelector('.verified-list');
+            const item = document.createElement('div');
+            item.className = 'verified-item';
+            item.innerHTML = `
+                <span class="verified-title">${escapeHtml(title)}</span>
+                <span class="verified-source" style="color: #16a34a;">Marked as safe</span>
+            `;
+            verifiedList.appendChild(item);
+
+            // Update verified count in the section header
+            const verifiedCount = verifiedList.querySelectorAll('.verified-item').length;
+            const countText = verifiedSection.querySelector('.verified-count-text');
+            if (countText) {
+                countText.textContent = `Verified References (${verifiedCount})`;
+            }
+
+            // Update arXiv issues stat
+            const arxivIssueCountEl = document.getElementById('arxivIssueCount');
+            if (arxivIssueCountEl) {
+                const currentCount = parseInt(arxivIssueCountEl.textContent) || 0;
+                arxivIssueCountEl.textContent = Math.max(0, currentCount - 1);
+            }
+
+            // Update verified count stat
+            const verifiedCountEl = document.getElementById('verifiedCount');
+            if (verifiedCountEl) {
+                verifiedCountEl.textContent = parseInt(verifiedCountEl.textContent) + 1;
+            }
+
+            // Remove from arXiv issues list
+            referenceDiv.remove();
+
+            // Hide arXiv issues section if empty
+            const remainingArxivIssues = arxivIssuesList.querySelectorAll('.reference').length;
+            if (remainingArxivIssues === 0) {
+                arxivIssuesSection.style.display = 'none';
+            }
+
+            // Update problematic percentage
+            updateProblematicPercent();
+        }
+
         function updateFileProblematicPercent(fileSection) {
             const statsContainer = fileSection.querySelector('.file-summary .stats');
             const percentEl = fileSection.querySelector('.file-summary .problematic-percent');
@@ -2352,6 +2431,22 @@ https://github.com/idramalab/hallucinator
                 doiIssueStat.style.display = 'none';
             }
 
+            // Update arXiv issues stat
+            const arxivsFound = data.results.filter(r => r.arxiv_info).length;
+            const arxivsValid = data.results.filter(r => r.arxiv_info && r.arxiv_info.status === 'verified').length;
+            const arxivsInvalid = data.results.filter(r => r.arxiv_info && r.arxiv_info.status === 'invalid').length;
+            const arxivsMismatch = data.results.filter(r => r.arxiv_info && (r.arxiv_info.status === 'title_mismatch' || r.arxiv_info.status === 'author_mismatch')).length;
+            const arxivIssuesTotal = arxivsInvalid + arxivsMismatch;
+
+            const arxivIssueStat = document.getElementById('arxivIssueStat');
+            const arxivIssueCount = document.getElementById('arxivIssueCount');
+            if (arxivIssuesTotal > 0) {
+                arxivIssueCount.textContent = arxivIssuesTotal;
+                arxivIssueStat.style.display = '';
+            } else {
+                arxivIssueStat.style.display = 'none';
+            }
+
             // Show timeout warning separately if there were timeouts
             let timeoutWarning = document.getElementById('timeoutWarning');
             if (!timeoutWarning) {
@@ -2367,9 +2462,9 @@ https://github.com/idramalab/hallucinator
                 timeoutWarning.style.display = 'none';
             }
 
-            // Update problematic percentage (include DOI issues)
+            // Update problematic percentage (include DOI and arXiv issues)
             const problematicPercent = document.getElementById('problematicPercent');
-            const problematic = data.summary.not_found + data.summary.mismatched + doiIssuesTotal;
+            const problematic = data.summary.not_found + data.summary.mismatched + doiIssuesTotal + arxivIssuesTotal;
             if (data.summary.total > 0) {
                 const percent = ((problematic / data.summary.total) * 100).toFixed(1);
                 if (problematic === 0) {
@@ -2390,6 +2485,10 @@ https://github.com/idramalab/hallucinator
             // Render all results
             const list = document.getElementById('hallucinationList');
             list.innerHTML = '';
+
+            // Remove ALL existing verified sections from previous analyses
+            const mainContainer = document.getElementById('hallucinations').parentNode;
+            mainContainer.querySelectorAll('.verified-section').forEach(section => section.remove());
 
             const hallucinations = data.results.filter(r => r.status !== 'verified');
             const verified = data.results.filter(r => r.status === 'verified');
@@ -2463,18 +2562,86 @@ https://github.com/idramalab/hallucinator
                 doiIssuesSection.style.display = 'none';
             }
 
-            // Show verified references in collapsible section (after DOI issues)
+            // Render arXiv issues section
+            const arxivIssues = data.results.filter(r => r.arxiv_info && r.arxiv_info.status !== 'verified');
+            const arxivIssuesSection = document.getElementById('arxivIssuesSection');
+            const arxivIssuesList = document.getElementById('arxivIssuesList');
+
+            if (arxivIssues.length > 0) {
+                arxivIssuesSection.style.display = 'block';
+                arxivIssuesList.innerHTML = '';
+
+                arxivIssues.forEach(ref => {
+                    const div = document.createElement('div');
+                    div.className = 'reference arxiv-issue-reference';
+
+                    const arxivInfo = ref.arxiv_info;
+                    let issueType = '';
+                    let issueDetail = '';
+
+                    if (arxivInfo.status === 'invalid') {
+                        issueType = 'arXiv ID does not resolve';
+                        issueDetail = arxivInfo.message || 'Invalid or non-existent arXiv ID';
+                    } else if (arxivInfo.status === 'title_mismatch') {
+                        issueType = 'arXiv ID points to different paper';
+                        issueDetail = `Resolves to: "${escapeHtml(arxivInfo.arxiv_title || 'Unknown')}"`;
+                    } else if (arxivInfo.status === 'author_mismatch') {
+                        issueType = 'arXiv ID authors do not match';
+                        issueDetail = 'Title matches but authors differ';
+                    }
+
+                    const dbStatus = ref.status === 'verified'
+                        ? `<span style="color: #16a34a;">✓ Found in ${escapeHtml(ref.source)}</span>`
+                        : ref.status === 'not_found'
+                            ? `<span style="color: #dc2626;">✗ Not found in databases</span>`
+                            : `<span style="color: #ca8a04;">⚠ Author mismatch in ${escapeHtml(ref.source)}</span>`;
+
+                    div.innerHTML = `
+                        <div class="reference-title">${escapeHtml(ref.title)}</div>
+                        <div class="arxiv-issue" style="margin-top: 0.5rem;">
+                            <strong>arXiv ID:</strong> <a href="https://arxiv.org/abs/${escapeHtml(arxivInfo.arxiv_id)}" target="_blank">${escapeHtml(arxivInfo.arxiv_id)}</a><br>
+                            <span style="color: #dc2626;">❌ ${issueType}</span><br>
+                            <span style="color: var(--text-secondary);">${issueDetail}</span>
+                        </div>
+                        <div style="margin-top: 0.5rem; font-size: 0.9rem;">
+                            Database status: ${dbStatus}
+                        </div>
+                        <div class="reference-actions">
+                            <a href="${createScholarLink(ref.title)}" target="_blank" class="scholar-link">
+                                Search on Google Scholar &rarr;
+                            </a>
+                            <button class="mark-safe-btn" onclick="markArxivIssueSafe(this, '${escapeHtml(ref.title).replace(/'/g, "\\'")}')">
+                                ✓ Mark as Safe
+                            </button>
+                        </div>
+                    `;
+
+                    arxivIssuesList.appendChild(div);
+                });
+            } else {
+                arxivIssuesSection.style.display = 'none';
+            }
+
+            // Show verified references in collapsible section (after arXiv issues)
+            // First check if a verified section already exists (from streaming)
+            let verifiedSection = arxivIssuesSection.parentNode.querySelector('.verified-section');
             if (verified.length > 0) {
-                const verifiedSection = document.createElement('div');
-                verifiedSection.className = 'verified-section';
-                verifiedSection.innerHTML = `
-                    <div class="verified-header" onclick="this.parentElement.classList.toggle('expanded')">
-                        <span class="verified-count-text">Verified References (${verified.length})</span>
-                        <span class="verified-toggle">▼</span>
-                    </div>
-                    <div class="verified-list"></div>
-                `;
+                if (!verifiedSection) {
+                    verifiedSection = document.createElement('div');
+                    verifiedSection.className = 'verified-section';
+                    verifiedSection.innerHTML = `
+                        <div class="verified-header" onclick="this.parentElement.classList.toggle('expanded')">
+                            <span class="verified-count-text">Verified References (0)</span>
+                            <span class="verified-toggle">▼</span>
+                        </div>
+                        <div class="verified-list"></div>
+                    `;
+                    // Insert after arXiv issues section in the DOM
+                    arxivIssuesSection.parentNode.insertBefore(verifiedSection, arxivIssuesSection.nextSibling);
+                }
                 const verifiedList = verifiedSection.querySelector('.verified-list');
+                // Clear existing items and repopulate
+                verifiedList.innerHTML = '';
                 verified.forEach(ref => {
                     const item = document.createElement('div');
                     item.className = 'verified-item';
@@ -2491,8 +2658,14 @@ https://github.com/idramalab/hallucinator
                     `;
                     verifiedList.appendChild(item);
                 });
-                // Insert after DOI issues section in the DOM
-                doiIssuesSection.parentNode.insertBefore(verifiedSection, doiIssuesSection.nextSibling);
+                // Update the count in the header
+                const countText = verifiedSection.querySelector('.verified-count-text');
+                if (countText) {
+                    countText.textContent = `Verified References (${verified.length})`;
+                }
+            } else if (verifiedSection) {
+                // No verified refs but section exists from streaming - remove it
+                verifiedSection.remove();
             }
         }
 
@@ -2520,6 +2693,10 @@ https://github.com/idramalab/hallucinator
             // Hide standard single-file sections
             document.querySelector('.summary').style.display = 'none';
             document.getElementById('hallucinations').style.display = 'none';
+
+            // Remove ALL existing verified sections from previous analyses
+            const mainContainer = document.getElementById('hallucinations').parentNode;
+            mainContainer.querySelectorAll('.verified-section').forEach(section => section.remove());
 
             const container = document.getElementById('hallucinationList');
             container.innerHTML = '';

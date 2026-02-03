@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Hallucinated Reference Detector** - Detects potentially fabricated references in academic PDF papers by validating against multiple academic databases (CrossRef, arXiv, DBLP, Semantic Scholar, ACL Anthology, NeurIPS, and optionally OpenAlex).
+**Hallucinated Reference Detector** - Detects potentially fabricated references in academic PDF papers by validating against multiple academic databases (CrossRef, arXiv, DBLP, Semantic Scholar, ACL Anthology, NeurIPS, Europe PMC, PubMed, and optionally OpenAlex). Also checks for retracted papers via CrossRef.
 
 **Read [MANIFESTO.md](MANIFESTO.md)** for the mission statement and context on why this tool exists, including documentation of the November 2025 OpenReview incident and a note on human-AI collaboration written by Claude during development.
 
@@ -51,7 +51,7 @@ docker run -p 5001:5001 hallucinator
 
 ### Concurrency Model
 - **4 references checked in parallel** (configurable via `max_concurrent_refs`)
-- **8 databases queried concurrently** per reference (all at once)
+- **10 databases queried concurrently** per reference (all at once)
 - **Early exit** - Returns immediately when verified match found
 - **Request timeouts** - 10s default (`DB_TIMEOUT`), 5s short timeout (`DB_TIMEOUT_SHORT`)
 - **Configurable timeouts** - Set `DB_TIMEOUT` and `DB_TIMEOUT_SHORT` env vars for testing
@@ -65,6 +65,8 @@ docker run -p 5001:5001 hallucinator
 - Semantic Scholar
 - ACL Anthology
 - NeurIPS
+- Europe PMC (life science/biomedical literature)
+- PubMed (biomedical literature via NCBI)
 
 ### Offline DBLP Database
 - Downloads from https://dblp.org/rdf/dblp.nt.gz (~4.6GB compressed)
@@ -84,6 +86,7 @@ docker run -p 5001:5001 hallucinator
 - **Verified** - Found in database with matching authors
 - **Author Mismatch** - Title found but different authors
 - **Not Found** - Potential hallucination (not in any database)
+- **Retracted** - Paper found but has been retracted (checked via CrossRef)
 
 ### Skipped References
 - Non-academic URLs (GitHub, documentation sites)
@@ -102,3 +105,4 @@ docker run -p 5001:5001 hallucinator
   - Events: `checking`, `result`, `warning`, `retry_pass`
 - **Retry mechanism**: Tracks failed DBs and retries "not found" references at the end
 - **Timeout tracking**: Per-reference tracking of which DBs timed out, displayed in final results
+- **Retraction checking**: `check_retraction(doi)` and `check_retraction_by_title(title)` query CrossRef for retraction notices

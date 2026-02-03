@@ -41,6 +41,8 @@ The tool queries these databases simultaneously:
 | **Semantic Scholar** | Aggregates Academia.edu, SSRN, PubMed, and more |
 | **ACL Anthology** | Computational linguistics papers |
 | **NeurIPS** | NeurIPS conference proceedings |
+| **Europe PMC** | Life science literature (42M+ abstracts, mirrors PubMed/PMC) |
+| **PubMed** | Biomedical literature via NCBI E-utilities |
 | **OpenAlex** | 250M+ works (optional, needs free API key) |
 
 ~~**OpenReview**~~ - Disabled. API unreachable after the Nov 2025 incident.
@@ -186,6 +188,15 @@ The reference wasn't found in any database. This could mean:
 - **Database timeout** - Check if timeouts were reported
 
 The tool tells you which databases timed out so you can assess confidence.
+
+### Retracted Papers
+The tool automatically checks if verified papers have been retracted using CrossRef's retraction metadata (which includes the Retraction Watch database). Retracted papers are flagged with a warning and shown in a dedicated "Retracted Papers" section in the web interface.
+
+Retraction checks work via:
+- **DOI lookup** - If the reference has a DOI, checks CrossRef for retraction notices
+- **Title search** - Falls back to title-based search if no DOI is available
+
+This helps identify cases where a paper cites work that has since been withdrawn due to errors, fraud, or other issues.
 
 ---
 

@@ -853,19 +853,23 @@ def segment_references(ref_text):
     # Match after: lowercase letter, digit, closing paren, or 2+ uppercase letters (venue abbrevs like CSCW, CHI)
     # Single uppercase letter excluded to avoid matching author initials like "A."
     # (?!In\s) negative lookahead excludes "In Surname, I." which indicates editors, not new reference
-    aaai_pattern = r'(?:[a-z0-9)]|[A-Z]{2})\.\n(?!In\s)([A-Z][a-zA-Z]+(?:[ -][A-Za-z]+)?,\s+[A-Z]\.)'
+    # Group 1 captures the prefix char(s) so we can include them in the previous reference
+    # (?:\d{1,4}\n)? handles page/reference numbers on their own line between references
+    # \s* after optional page number handles extra whitespace/newlines (e.g., column breaks)
+    aaai_pattern = r'([a-z0-9)]|[A-Z]{2})\.\n(?:\d{1,4}\n)?\s*(?!In\s)([A-Z][a-zA-Z]+(?:[ -][A-Za-z]+)?,\s+[A-Z]\.)'
     aaai_matches = list(re.finditer(aaai_pattern, ref_text))
 
     if len(aaai_matches) >= 3:
         refs = []
         # Handle first reference (before first match) - starts at beginning of ref_text
-        first_ref = ref_text[:aaai_matches[0].start()].strip()
+        # end(1) includes the consumed prefix char(s) in the previous reference
+        first_ref = ref_text[:aaai_matches[0].end(1)].strip()
         if first_ref and len(first_ref) > 20:
             refs.append(first_ref)
         # Handle remaining references
         for i, match in enumerate(aaai_matches):
-            start = match.start() + 3  # +3 to skip the "[a-z0-9].\n"
-            end = aaai_matches[i + 1].start() if i + 1 < len(aaai_matches) else len(ref_text)
+            start = match.start(2)  # Start at the author name (group 2)
+            end = aaai_matches[i + 1].end(1) if i + 1 < len(aaai_matches) else len(ref_text)
             ref_content = ref_text[start:end].strip()
             if ref_content:
                 refs.append(ref_content)
@@ -1051,7 +1055,9 @@ def clean_title(title, from_quotes=False):
             segment_start = max(last_period + 1, last_space + 1, 0)
             segment = title[segment_start:pos]
             # If segment > 2 chars, it's likely a real sentence end, not an abbreviation
-            if len(segment) > 2:
+            # Also treat 2-char ALL-CAPS segments as sentence ends (acronyms like "AI.", "ML.")
+            # but not mixed-case abbreviations like "vs.", "al.", "Jr."
+            if len(segment) > 2 or (len(segment) == 2 and segment.isupper()):
                 # But skip if period is immediately followed by a letter (no space) - product names like "big.LITTLE", "Node.js"
                 if pos + 1 < len(title) and title[pos + 1].isalpha():
                     continue
@@ -1067,7 +1073,7 @@ def clean_title(title, from_quotes=False):
     cutoff_patterns = [
         r'\.\s*[Ii]n:\s+[A-Z].*$',  # Elsevier ". In: Proceedings" or ". In: IFIP"
         r'\.\s*[Ii]n\s+[A-Z].*$',  # Standard ". In Proceedings"
-        r'[.?!]\s*(?:Proceedings|Conference|Workshop|Symposium|IEEE|ACM|USENIX|AAAI|EMNLP|NAACL|arXiv|Available|CoRR).*$',
+        r'[.?!]\s*(?:Proceedings|Conference|Workshop|Symposium|IEEE|ACM|USENIX|AAAI|EMNLP|NAACL|arXiv|Available|CoRR|PACM[- ]\w+).*$',
         r'[.?!]\s*(?:Advances\s+in|Journal\s+of|Transactions\s+of|Transactions\s+on|Communications\s+of).*$',
         r'[.?!]\s+International\s+Journal\b.*$',  # "? International Journal" or ". International Journal"
         r'\.\s*[A-Z][a-z]+\s+(?:Journal|Review|Transactions|Letters|advances|Processing|medica|Intelligenz)\b.*$',
@@ -1302,10 +1308,11 @@ def extract_title_from_reference(ref_text):
         if len(title.split()) >= 2:
             return title, False
 
-    # === Format 2a: Springer/Nature - "Authors (Year) Title. Journal/Venue" ===
+    # === Format 2a: Springer/Nature/Harvard - "Authors (Year) Title" or "Authors (Year). Title" ===
     # Pattern: "Surname I, ... (YYYY) Title text. Journal Name Vol(Issue):Pages"
-    # Year is in parentheses, followed by title, then venue info
-    springer_year_match = re.search(r'\((\d{4}[a-z]?)\)\s+', ref_text)
+    # Also handles Harvard/APA: "Surname, I. (YYYY). Title. Venue."
+    # Year is in parentheses, optionally followed by period, then title
+    springer_year_match = re.search(r'\((\d{4}[a-z]?)\)\.?\s+', ref_text)
     if springer_year_match:
         after_year = ref_text[springer_year_match.end():]
         # Find where title ends - at journal/venue patterns
@@ -1315,6 +1322,7 @@ def extract_title_from_reference(ref_text):
             r'\.\s*(?:Proceedings|IEEE|ACM|USENIX|arXiv)',
             r'\.\s*[A-Z][a-zA-Z\s]+\d+\s*\(\d+\)',  # ". Journal Name 34(5)" - journal with volume
             r'\.\s*[A-Z][a-zA-Z\s&]+\d+:\d+',  # ". Journal Name 34:123" - journal with pages
+            r'\.\s*[A-Z][a-zA-Z\s&-]+,\s*\d+',  # ". Journal Name, 11" or ". PACM-HCI, 4"
             r'\.\s*https?://',  # URL follows title
             r'\.\s*URL\s+',  # URL follows title
             r'\.\s*Tech\.\s*rep\.',  # Technical report
@@ -1528,6 +1536,9 @@ def extract_references_with_titles_and_authors(pdf_path, return_stats=False):
         # Extract DOI and arXiv ID BEFORE fixing hyphenation (they can contain hyphens/periods split across lines)
         doi = extract_doi(ref_text)
         arxiv_id = extract_arxiv_id(ref_text)
+
+        # Remove standalone page/column numbers on their own lines (PDF layout artifacts)
+        ref_text = re.sub(r'\n\d{1,4}\n', '\n', ref_text)
 
         # Fix hyphenation from PDF line breaks (preserves compound words like "human-centered")
         ref_text = fix_hyphenation(ref_text)
@@ -2153,11 +2164,15 @@ def query_all_databases_concurrent(title, ref_authors, openalex_key=None, s2_api
 def validate_authors(ref_authors, found_authors):
     # Common surname prefixes (case-insensitive)
     SURNAME_PREFIXES = {'van', 'von', 'de', 'del', 'della', 'di', 'da', 'al', 'el', 'la', 'le', 'ben', 'ibn', 'mac', 'mc', 'o'}
+    NAME_SUFFIXES = {'jr', 'sr', 'ii', 'iii', 'iv', 'v'}
 
     def get_surname_from_parts(parts):
-        """Extract surname from name parts, handling multi-word surnames."""
+        """Extract surname from name parts, handling multi-word surnames and suffixes."""
         if not parts:
             return ""
+        # Strip name suffixes (Jr, Sr, III, etc.)
+        while len(parts) >= 2 and parts[-1].lower().rstrip('.') in NAME_SUFFIXES:
+            parts = parts[:-1]
         # Check if second-to-last part is a surname prefix
         # e.g., ['Jay', 'J.', 'Van', 'Bavel'] -> surname is 'Van Bavel'
         if len(parts) >= 2 and parts[-2].lower().rstrip('.') in SURNAME_PREFIXES:
@@ -2215,31 +2230,37 @@ def validate_authors(ref_authors, found_authors):
             parts = name.split(',')
             return len(parts) > 1 and parts[1].strip()
         parts = name.split()
-        if len(parts) == 1:
-            # Single word - could be just a surname
+        # Strip name suffixes (Jr, Sr, etc.) before analysis
+        core_parts = [p for p in parts if p.lower().rstrip('.') not in NAME_SUFFIXES]
+        if len(core_parts) <= 1:
+            # Single word (+ optional suffix) - just a surname
             return False
         # Check if any part looks like an initial (single letter, possibly with period)
-        for part in parts[:-1]:  # Exclude last part (likely surname)
+        for part in core_parts[:-1]:  # Exclude last part (likely surname)
             if len(part.rstrip('.')) == 1:
                 return True  # Found an initial
         # Check for Elsevier/Springer "Surname Initial" format where initial is at the END
         # e.g., "Narouei M", "Cranor LF" - last part is 1-2 uppercase letters
-        last = parts[-1]
+        last = core_parts[-1]
         if len(last) <= 2 and last.isupper():
             return True  # Found initial at end (Elsevier format)
         # Check if first part looks like a first name (capitalized, 2+ chars, not a surname prefix)
-        first = parts[0].rstrip('.')
+        first = core_parts[0].rstrip('.')
         if len(first) >= 2 and first[0].isupper() and first.lower() not in SURNAME_PREFIXES:
             # Could be a first name like "John" or a surname prefix like "Van"
             # If second part is also capitalized and not a prefix, first is likely a first name
-            if len(parts) >= 2:
-                second = parts[1].rstrip('.')
+            if len(core_parts) >= 2:
+                second = core_parts[1].rstrip('.')
                 if len(second) >= 2 and second[0].isupper():
                     return True  # Likely "FirstName LastName"
         return False
 
     # Check if PDF-extracted authors are last-name-only (no first names or initials)
-    ref_authors_are_last_name_only = not any(has_first_name_or_initial(a) for a in ref_authors if a.strip())
+    # Use majority threshold: if most authors are single surnames, treat as last-name-only
+    # (handles malformed fragments like "F. d" from broken author extraction)
+    ref_authors_clean = [a for a in ref_authors if a.strip()]
+    last_name_only_count = sum(1 for a in ref_authors_clean if not has_first_name_or_initial(a))
+    ref_authors_are_last_name_only = last_name_only_count > len(ref_authors_clean) / 2
 
     if ref_authors_are_last_name_only:
         # Only compare last names

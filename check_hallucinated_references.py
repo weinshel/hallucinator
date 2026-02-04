@@ -1026,36 +1026,36 @@ def clean_title(title, from_quotes=False):
     # Fix hyphenation from PDF line breaks (preserves compound words like "human-centered")
     title = fix_hyphenation(title)
 
-    # If title came from quotes, strip trailing punctuation (IEEE style puts comma inside quotes)
-    if from_quotes:
-        title = title.strip()
-        title = re.sub(r'[.,;:]+$', '', title)
-        return title.strip()
+    # If title came from quotes, still apply venue cutoff patterns (quotes may include venue info)
+    # but skip the sentence-truncation logic (which doesn't apply to quoted titles)
 
     # For non-quoted titles, truncate at first sentence-ending period
     # Skip periods that are part of abbreviations (e.g., "U.S." has short segments)
-    for match in re.finditer(r'\.', title):
-        pos = match.start()
-        # Find start of segment (after last period or space, whichever is later)
-        last_period = title.rfind('.', 0, pos)
-        last_space = title.rfind(' ', 0, pos)
-        segment_start = max(last_period + 1, last_space + 1, 0)
-        segment = title[segment_start:pos]
-        # If segment > 2 chars, it's likely a real sentence end, not an abbreviation
-        if len(segment) > 2:
-            # But skip if period is immediately followed by a letter (no space) - product names like "big.LITTLE", "Node.js"
-            if pos + 1 < len(title) and title[pos + 1].isalpha():
-                continue
-            title = title[:pos]
-            break
+    if not from_quotes:
+        for match in re.finditer(r'\.', title):
+            pos = match.start()
+            # Find start of segment (after last period or space, whichever is later)
+            last_period = title.rfind('.', 0, pos)
+            last_space = title.rfind(' ', 0, pos)
+            segment_start = max(last_period + 1, last_space + 1, 0)
+            segment = title[segment_start:pos]
+            # If segment > 2 chars, it's likely a real sentence end, not an abbreviation
+            if len(segment) > 2:
+                # But skip if period is immediately followed by a letter (no space) - product names like "big.LITTLE", "Node.js"
+                if pos + 1 < len(title) and title[pos + 1].isalpha():
+                    continue
+                title = title[:pos]
+                break
 
-    # Also handle "? In" pattern for question-ending titles
-    in_venue_match = re.search(r'\?\s*[Ii]n\s+(?:[A-Z]|[12]\d{3}\s)', title)
+    # Also handle "? In" and "? In:" patterns for question-ending titles (Elsevier uses "In:")
+    in_venue_match = re.search(r'\?\s*[Ii]n:?\s+(?:[A-Z]|[12]\d{3}\s)', title)
     if in_venue_match:
         title = title[:in_venue_match.start() + 1]  # Keep the question mark
 
     # Remove trailing journal/venue info that might have been included
     cutoff_patterns = [
+        r'\.\s*[Ii]n:\s+[A-Z].*$',  # Elsevier ". In: Proceedings" or ". In: IFIP"
+        r'\.\s*[Ii]n\s+[A-Z].*$',  # Standard ". In Proceedings"
         r'[.?!]\s*(?:Proceedings|Conference|Workshop|Symposium|IEEE|ACM|USENIX|AAAI|EMNLP|NAACL|arXiv|Available|CoRR).*$',
         r'[.?!]\s*(?:Advances\s+in|Journal\s+of|Transactions\s+of|Transactions\s+on|Communications\s+of).*$',
         r'[.?!]\s+International\s+Journal\b.*$',  # "? International Journal" or ". International Journal"
@@ -1109,9 +1109,34 @@ def split_sentences_skip_initials(text):
         # Check if this period follows a single capital letter (author initial)
         if pos > 0:
             char_before = text[pos-1]
-            # If char before is a single capital (and char before that is space/start), it's an initial
+            # If char before is a single capital (and char before that is space/start), it might be an initial
             if char_before.isupper() and (pos == 1 or not text[pos-2].isalpha()):
-                continue  # Skip this period - it's an initial
+                # Check what comes AFTER this period to determine if it's really an initial
+                # If followed by "Capitalized lowercase" (title pattern), it's a sentence boundary
+                # If followed by "Capitalized," or "Capitalized Capitalized," (author pattern), it's an initial
+                after_period = text[match.end():]
+                # Look at the pattern after the period
+                # Author pattern: Capitalized word followed by comma or another capitalized word then comma
+                # Surnames can be hyphenated (Aldana-Iuit), have accents (Sánchez), or apostrophes (O'Brien)
+                # Also match Elsevier author pattern: "Surname Initial," like "Smith J," or "Smith JK,"
+                # Also match "and Surname" pattern for author lists like "J. and Jones, M."
+                # Also match another initial "X." or "X.-Y." for IEEE format like "H. W. Chung"
+                surname_char = r"[a-zA-Z\u00A0-\u017F''`´\-]"  # Letters, accents (including diacritics like ¨), apostrophes, backticks, hyphens
+                author_pattern = re.match(rf'^([A-Z]{surname_char}+)\s*,', after_period) or \
+                                 re.match(rf'^([A-Z]{surname_char}+)\s+([A-Z][A-Z]?)\s*,', after_period) or \
+                                 re.match(rf'^([A-Z]{surname_char}+)\s+[A-Z]{{1,2}},', after_period) or \
+                                 re.match(r'^and\s+[A-Z]', after_period, re.IGNORECASE) or \
+                                 re.match(r'^[A-Z]\.', after_period) or \
+                                 re.match(r'^[A-Z]\.-[A-Z]\.', after_period) or \
+                                 re.match(rf'^([A-Z]{surname_char}+)\.\s+[A-Z]', after_period) or \
+                                 re.match(rf'^([A-Z]{surname_char}+)\s+and\s+[A-Z]', after_period, re.IGNORECASE) or \
+                                 re.match(rf'^([A-Z]{surname_char}+)\s+([A-Z]{surname_char}+)\s*,', after_period)  # Multi-part surname: "Van Goethem,"
+
+                if author_pattern:
+                    # This clearly looks like another author - skip this period
+                    continue
+                # Otherwise (title-like or uncertain pattern), treat as sentence boundary
+                # This handles titles starting with proper nouns like "Facebook FAIR's..."
 
             # Check if this period follows a common abbreviation
             # Find the word before the period
@@ -1318,10 +1343,12 @@ def extract_title_from_reference(ref_text):
         if len(title.split()) >= 3:
             return title, False  # from_quotes=False
 
-    # === Format 3: USENIX/ICML/NeurIPS - "Authors. Title. In Venue, Year" or "Authors. Title. Venue, Year" ===
+    # === Format 3: USENIX/ICML/NeurIPS/Elsevier - "Authors. Title. In Venue" or "Authors. Title. In: Venue" ===
     # Find venue markers and extract title before them
     # Order matters: more specific patterns first, generic patterns last
     venue_patterns = [
+        r'\.\s*[Ii]n:\s+(?:Proceedings|Workshop|Conference|Symposium|IFIP|IEEE|ACM)',  # Elsevier "In:" format
+        r'\.\s*[Ii]n:\s+[A-Z]',  # Elsevier generic "In:" format
         r'\.\s*[Ii]n\s+(?:Proceedings|Workshop|Conference|Symposium|AAAI|IEEE|ACM|USENIX)',
         r'\.\s*[Ii]n\s+[A-Z][a-z]+\s+(?:Conference|Workshop|Symposium)',
         r'\.\s*[Ii]n\s+(?:The\s+)?(?:\w+\s+)+(?:International\s+)?(?:Conference|Workshop|Symposium)',  # ICML/NeurIPS style
@@ -1381,6 +1408,20 @@ def extract_title_from_reference(ref_text):
             title = parts[1].strip()
             if len(title.split()) >= 3:
                 return title, False  # from_quotes=False
+
+    # === Format 4b: Elsevier journal - "Authors. Title. Journal Year;Vol(Issue):Pages" ===
+    # Example: "Narouei M, Takabi H. Title here. IEEE Trans Dependable Secure Comput 2018;17(3):506–17"
+    # Also handles: "Yang L, Chen X. Title here. Secur Commun Netw 2021;2021." (year-only volume)
+    # Pattern: Journal name followed by Year;Volume (with optional Issue and Pages)
+    elsevier_journal_match = re.search(r'\.\s*([A-Z][A-Za-z\s]+)\s+(?:19|20)\d{2};\d+(?:\(\d+\))?', ref_text)
+    if elsevier_journal_match:
+        before_journal = ref_text[:elsevier_journal_match.start()].strip()
+        parts = split_sentences_skip_initials(before_journal)
+        if len(parts) >= 2:
+            title = parts[-1].strip()  # Last sentence before journal is likely title
+            title = re.sub(r'\.\s*$', '', title)
+            if len(title.split()) >= 3:
+                return title, False
 
     # === Format 5: ALL CAPS authors (e.g., "SURNAME, F., AND SURNAME, G. Title here.") ===
     # Only triggers if text starts with a multi-char ALL CAPS surname (not just initials like "H. W.")
@@ -2170,6 +2211,11 @@ def validate_authors(ref_authors, found_authors):
         for part in parts[:-1]:  # Exclude last part (likely surname)
             if len(part.rstrip('.')) == 1:
                 return True  # Found an initial
+        # Check for Elsevier/Springer "Surname Initial" format where initial is at the END
+        # e.g., "Narouei M", "Cranor LF" - last part is 1-2 uppercase letters
+        last = parts[-1]
+        if len(last) <= 2 and last.isupper():
+            return True  # Found initial at end (Elsevier format)
         # Check if first part looks like a first name (capitalized, 2+ chars, not a surname prefix)
         first = parts[0].rstrip('.')
         if len(first) >= 2 and first[0].isupper() and first.lower() not in SURNAME_PREFIXES:

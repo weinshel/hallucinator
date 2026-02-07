@@ -2325,17 +2325,66 @@
         }
 
         function generateHtmlReport(data) {
-            const hallucinations = data.results.filter(r => r.status !== 'verified');
+            const notFound = data.results.filter(r => r.status === 'not_found');
+            const mismatched = data.results.filter(r => r.status === 'author_mismatch');
+            const verified = data.results.filter(r => r.status === 'verified');
+            const retracted = data.results.filter(r => r.retraction_info && r.retraction_info.retracted);
             const timestamp = new Date().toLocaleString();
+
+            function refHtml(ref, idx, label) {
+                const fileInfo = ref.filename ? `<div style="color:#666;font-size:0.85rem;margin-bottom:0.25rem">📄 ${escapeHtml(ref.filename)}</div>` : '';
+                const citation = ref.raw_citation
+                    ? `<div class="citation">${escapeHtml(ref.raw_citation)}</div>`
+                    : '';
+                const authors = (ref.ref_authors || []).length > 0
+                    ? `<div class="authors">Extracted authors: ${(ref.ref_authors || []).map(a => escapeHtml(a)).join(', ')}</div>`
+                    : '';
+                const sourceInfo = ref.source
+                    ? (ref.paper_url
+                        ? `<div class="source">Source: <a href="${escapeHtml(ref.paper_url)}">${escapeHtml(ref.source)}</a></div>`
+                        : `<div class="source">Source: ${escapeHtml(ref.source)}</div>`)
+                    : '';
+                const doiInfo = ref.doi_info && ref.doi_info.doi
+                    ? `<div class="doi">DOI: <a href="https://doi.org/${escapeHtml(ref.doi_info.doi)}">${escapeHtml(ref.doi_info.doi)}</a></div>`
+                    : '';
+                const arxivInfo = ref.arxiv_info && ref.arxiv_info.arxiv_id
+                    ? `<div class="arxiv">arXiv: <a href="https://arxiv.org/abs/${escapeHtml(ref.arxiv_info.arxiv_id)}">${escapeHtml(ref.arxiv_info.arxiv_id)}</a></div>`
+                    : '';
+                const retractionInfo = ref.retraction_info && ref.retraction_info.retracted
+                    ? `<div class="retracted">⚠ RETRACTED: ${escapeHtml(ref.retraction_info.reason || 'No reason given')}</div>`
+                    : '';
+                const failedDbs = (ref.failed_dbs || []).length > 0
+                    ? `<div class="failed-dbs">Databases that failed/timed out: ${ref.failed_dbs.join(', ')}</div>`
+                    : '';
+
+                let mismatchDetail = '';
+                if (ref.status === 'author_mismatch') {
+                    mismatchDetail = `
+        <div class="author-comparison">
+            <h4>Authors in PDF:</h4>
+            <ul>${(ref.ref_authors || []).map(a => `<li>${escapeHtml(a)}</li>`).join('')}</ul>
+            <h4>Authors in ${escapeHtml(ref.source)}:</h4>
+            <ul>${(ref.found_authors || []).map(a => `<li>${escapeHtml(a)}</li>`).join('')}</ul>
+        </div>`;
+                }
+
+                return `
+    <div class="reference ${ref.status}">
+        ${fileInfo}
+        <div class="reference-title">${idx + 1}. ${escapeHtml(ref.title)}</div>
+        ${citation}${authors}${sourceInfo}${doiInfo}${arxivInfo}${retractionInfo}${failedDbs}${mismatchDetail}
+    </div>`;
+            }
 
             let html = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Hallucination Report - ${escapeHtml(uploadedFilename)}</title>
+    <title>Reference Analysis Report - ${escapeHtml(uploadedFilename)}</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; }
-        h1 { color: #dc2626; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 900px; margin: 0 auto; padding: 2rem; color: #1f2937; }
+        h1 { color: #1f2937; }
+        h2 { margin-top: 2rem; border-bottom: 2px solid #e5e7eb; padding-bottom: 0.5rem; }
         .file-info { background: #e5e7eb; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
         .summary { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin-bottom: 2rem; }
         .stats { display: flex; gap: 2rem; flex-wrap: wrap; }
@@ -2343,60 +2392,66 @@
         .stat-value { font-size: 1.5rem; font-weight: bold; }
         .stat-label { color: #666; font-size: 0.9rem; }
         .reference { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
-        .reference-title { font-weight: 500; margin-bottom: 0.5rem; }
-        .status-not-found { color: #dc2626; }
-        .status-mismatch { color: #ca8a04; }
+        .reference.not_found { border-left: 4px solid #dc2626; }
+        .reference.author_mismatch { border-left: 4px solid #ca8a04; }
+        .reference.verified { border-left: 4px solid #16a34a; }
+        .reference-title { font-weight: 600; margin-bottom: 0.5rem; }
+        .citation { color: #374151; font-size: 0.9rem; margin-bottom: 0.5rem; padding: 0.5rem; background: #f3f4f6; border-radius: 4px; font-style: italic; }
+        .authors { color: #4b5563; font-size: 0.9rem; margin-bottom: 0.25rem; }
+        .source { color: #4b5563; font-size: 0.9rem; margin-bottom: 0.25rem; }
+        .source a { color: #2563eb; }
+        .doi, .arxiv { font-size: 0.85rem; color: #6b7280; margin-bottom: 0.25rem; }
+        .doi a, .arxiv a { color: #2563eb; }
+        .retracted { color: #dc2626; font-weight: 600; margin-top: 0.5rem; }
+        .failed-dbs { color: #92400e; font-size: 0.85rem; margin-top: 0.25rem; }
         .author-comparison { background: #f9fafb; padding: 1rem; border-radius: 4px; margin-top: 0.5rem; }
         .author-comparison h4 { margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #666; }
         .footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; color: #666; font-size: 0.85rem; }
     </style>
 </head>
 <body>
-    <h1>🔍 Potential Hallucinations Report</h1>
+    <h1>Reference Analysis Report</h1>
     <div class="file-info">📄 <strong>File:</strong> ${escapeHtml(uploadedFilename)}</div>
     <p>Generated: ${timestamp}</p>
 
     <div class="summary">
-        <h2>Summary</h2>
+        <h2 style="margin-top:0;border:none;padding:0;">Summary</h2>
         <div class="stats">
             <div class="stat"><div class="stat-value">${data.summary.total}</div><div class="stat-label">Analyzed</div></div>
             <div class="stat"><div class="stat-value" style="color:#16a34a">${data.summary.verified}</div><div class="stat-label">Verified</div></div>
             <div class="stat"><div class="stat-value" style="color:#ca8a04">${data.summary.mismatched}</div><div class="stat-label">Author Mismatches</div></div>
             <div class="stat"><div class="stat-value" style="color:#dc2626">${data.summary.not_found}</div><div class="stat-label">Not Found</div></div>
+            <div class="stat"><div class="stat-value">${data.summary.skipped}</div><div class="stat-label">Skipped</div></div>
         </div>
     </div>
-
-    <h2>Problematic References (${hallucinations.length})</h2>
 `;
 
-            if (hallucinations.length === 0) {
-                html += '<p style="color:#16a34a">All references verified!</p>';
+            // Not Found
+            if (notFound.length > 0) {
+                html += `<h2 style="color:#dc2626;">Not Found (${notFound.length})</h2>\n`;
+                notFound.forEach((ref, idx) => { html += refHtml(ref, idx, 'not_found'); });
+            }
+
+            // Author Mismatches
+            if (mismatched.length > 0) {
+                html += `<h2 style="color:#ca8a04;">Author Mismatches (${mismatched.length})</h2>\n`;
+                mismatched.forEach((ref, idx) => { html += refHtml(ref, idx, 'author_mismatch'); });
+            }
+
+            // Retracted (only if not already shown above)
+            const retractedVerified = retracted.filter(r => r.status === 'verified');
+            if (retractedVerified.length > 0) {
+                html += `<h2 style="color:#dc2626;">Retracted Papers (${retractedVerified.length})</h2>\n`;
+                retractedVerified.forEach((ref, idx) => { html += refHtml(ref, idx, 'retracted'); });
+            }
+
+            // Verified
+            html += `<h2 style="color:#16a34a;">Verified References (${verified.length})</h2>\n`;
+            if (verified.length === 0) {
+                html += '<p>No references were verified.</p>';
             } else {
-                hallucinations.forEach((ref, idx) => {
-                    const statusClass = ref.status === 'not_found' ? 'status-not-found' : 'status-mismatch';
-                    const statusText = ref.status === 'not_found'
-                        ? 'Not found in any database'
-                        : `Author mismatch (found on ${ref.source})`;
-                    const fileInfo = ref.filename ? `<div style="color:#666;font-size:0.85rem;margin-bottom:0.25rem">📄 ${escapeHtml(ref.filename)}</div>` : '';
-
-                    html += `
-    <div class="reference">
-        ${fileInfo}
-        <div class="reference-title">${idx + 1}. ${escapeHtml(ref.title)}</div>
-        <div class="${statusClass}">${statusText}</div>`;
-
-                    if (ref.status === 'author_mismatch') {
-                        html += `
-        <div class="author-comparison">
-            <h4>Authors in PDF:</h4>
-            <ul>${(ref.ref_authors || []).map(a => `<li>${escapeHtml(a)}</li>`).join('')}</ul>
-            <h4>Authors in ${escapeHtml(ref.source)}:</h4>
-            <ul>${(ref.found_authors || []).map(a => `<li>${escapeHtml(a)}</li>`).join('')}</ul>
-        </div>`;
-                    }
-
-                    html += `
-    </div>`;
+                verified.filter(r => !(r.retraction_info && r.retraction_info.retracted)).forEach((ref, idx) => {
+                    html += refHtml(ref, idx, 'verified');
                 });
             }
 
@@ -2411,50 +2466,72 @@
         }
 
         function generateTxtReport(data) {
-            const hallucinations = data.results.filter(r => r.status !== 'verified');
+            const notFound = data.results.filter(r => r.status === 'not_found');
+            const mismatched = data.results.filter(r => r.status === 'author_mismatch');
+            const verified = data.results.filter(r => r.status === 'verified');
+            const retracted = data.results.filter(r => r.retraction_info && r.retraction_info.retracted);
             const timestamp = new Date().toLocaleString();
 
-            let txt = `POTENTIAL HALLUCINATIONS REPORT
+            function refTxt(ref, idx) {
+                let entry = `\n${idx + 1}. ${ref.title}`;
+                if (ref.raw_citation) entry += `\n   Full citation: ${ref.raw_citation}`;
+                if (ref.filename) entry += `\n   File: ${ref.filename}`;
+                if ((ref.ref_authors || []).length > 0) entry += `\n   Extracted authors: ${ref.ref_authors.join(', ')}`;
+                if (ref.source) {
+                    entry += `\n   Source: ${ref.source}`;
+                    if (ref.paper_url) entry += ` (${ref.paper_url})`;
+                }
+                if (ref.doi_info && ref.doi_info.doi) entry += `\n   DOI: https://doi.org/${ref.doi_info.doi}`;
+                if (ref.arxiv_info && ref.arxiv_info.arxiv_id) entry += `\n   arXiv: https://arxiv.org/abs/${ref.arxiv_info.arxiv_id}`;
+                if (ref.retraction_info && ref.retraction_info.retracted) entry += `\n   ⚠ RETRACTED: ${ref.retraction_info.reason || 'No reason given'}`;
+                if ((ref.failed_dbs || []).length > 0) entry += `\n   Databases failed/timed out: ${ref.failed_dbs.join(', ')}`;
+                if (ref.status === 'author_mismatch') {
+                    entry += `\n   Authors in PDF: ${(ref.ref_authors || []).join(', ')}`;
+                    entry += `\n   Authors in ${ref.source}: ${(ref.found_authors || []).join(', ')}`;
+                }
+                return entry + '\n';
+            }
+
+            let txt = `REFERENCE ANALYSIS REPORT
 ${'='.repeat(50)}
 File: ${uploadedFilename}
 Generated: ${timestamp}
 
 SUMMARY
 ${'─'.repeat(50)}
-Analyzed:         ${data.summary.total}
-Verified:         ${data.summary.verified}
+Analyzed:          ${data.summary.total}
+Verified:          ${data.summary.verified}
 Author Mismatches: ${data.summary.mismatched}
-Not Found:        ${data.summary.not_found}
-
-PROBLEMATIC REFERENCES (${hallucinations.length})
-${'─'.repeat(50)}
+Not Found:         ${data.summary.not_found}
+Skipped:           ${data.summary.skipped}
 `;
 
-            if (hallucinations.length === 0) {
-                txt += '\nAll references verified!\n';
+            if (notFound.length > 0) {
+                txt += `\nNOT FOUND (${notFound.length})\n${'─'.repeat(50)}`;
+                notFound.forEach((ref, idx) => { txt += refTxt(ref, idx); });
+            }
+
+            if (mismatched.length > 0) {
+                txt += `\nAUTHOR MISMATCHES (${mismatched.length})\n${'─'.repeat(50)}`;
+                mismatched.forEach((ref, idx) => { txt += refTxt(ref, idx); });
+            }
+
+            const retractedVerified = retracted.filter(r => r.status === 'verified');
+            if (retractedVerified.length > 0) {
+                txt += `\nRETRACTED PAPERS (${retractedVerified.length})\n${'─'.repeat(50)}`;
+                retractedVerified.forEach((ref, idx) => { txt += refTxt(ref, idx); });
+            }
+
+            txt += `\nVERIFIED REFERENCES (${verified.length})\n${'─'.repeat(50)}`;
+            if (verified.length === 0) {
+                txt += '\nNo references were verified.\n';
             } else {
-                hallucinations.forEach((ref, idx) => {
-                    const statusText = ref.status === 'not_found'
-                        ? 'NOT FOUND in any database'
-                        : `AUTHOR MISMATCH (found on ${ref.source})`;
-                    const fileInfo = ref.filename ? `\n   File: ${ref.filename}` : '';
-
-                    txt += `
-${idx + 1}. ${ref.title}${fileInfo}
-   Status: ${statusText}`;
-
-                    if (ref.status === 'author_mismatch') {
-                        txt += `
-   Authors in PDF: ${(ref.ref_authors || []).join(', ')}
-   Authors in ${ref.source}: ${(ref.found_authors || []).join(', ')}`;
-                    }
-
-                    txt += '\n';
+                verified.filter(r => !(r.retraction_info && r.retraction_info.retracted)).forEach((ref, idx) => {
+                    txt += refTxt(ref, idx);
                 });
             }
 
-            txt += `
-${'─'.repeat(50)}
+            txt += `\n${'─'.repeat(50)}
 Report generated by Hallucinated Reference Detector
 https://github.com/idramalab/hallucinator
 `;
@@ -2465,11 +2542,8 @@ https://github.com/idramalab/hallucinator
         function showDownloadButton(hasProblems) {
             const downloadSection = document.getElementById('downloadReportSection');
             if (downloadSection) {
-                if (hasProblems) {
-                    downloadSection.classList.add('visible');
-                } else {
-                    downloadSection.classList.remove('visible');
-                }
+                // Always show download button — reports now include all references
+                downloadSection.classList.add('visible');
             }
         }
 

@@ -1593,7 +1593,12 @@ def extract_references_with_titles_and_authors(pdf_path, return_stats=False):
         if authors:
             previous_authors = authors
 
-        references.append((title, authors, doi, arxiv_id))
+        # Clean up ref_text for display: collapse whitespace, strip numbering prefix
+        raw_citation = re.sub(r'\s+', ' ', ref_text).strip()
+        raw_citation = re.sub(r'^\[\d+\]\s*', '', raw_citation)
+        raw_citation = re.sub(r'^\d+\.\s*', '', raw_citation)
+
+        references.append((title, authors, doi, arxiv_id, raw_citation))
 
     return (references, stats) if return_stats else references
 
@@ -2345,7 +2350,7 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
     timeouts_lock = threading.Lock()
     retry_lock = threading.Lock()
 
-    def check_single_ref(i, title, ref_authors, doi=None, arxiv_id=None):
+    def check_single_ref(i, title, ref_authors, doi=None, arxiv_id=None, raw_citation=None):
         """Check a single reference and return result."""
         nonlocal total_timeouts
 
@@ -2471,6 +2476,7 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
         # Build full result record
         full_result = {
             'title': title,
+            'raw_citation': raw_citation,
             'ref_authors': ref_authors,
             'status': result['status'],
             'source': result['source'],
@@ -2547,17 +2553,22 @@ def check_references(refs, sleep_time=1.0, openalex_key=None, s2_api_key=None, o
             # Check for cancellation before submitting more work
             if cancel_event and cancel_event.is_set():
                 break
-            # Handle (title, authors, doi, arxiv_id), (title, authors, doi), and legacy (title, authors) tuples
-            if len(ref) >= 4:
+            # Handle (title, authors, doi, arxiv_id, raw_citation), and legacy tuples
+            if len(ref) >= 5:
+                title, ref_authors, doi, arxiv_id, raw_citation = ref[0], ref[1], ref[2], ref[3], ref[4]
+            elif len(ref) >= 4:
                 title, ref_authors, doi, arxiv_id = ref[0], ref[1], ref[2], ref[3]
+                raw_citation = None
             elif len(ref) >= 3:
                 title, ref_authors, doi = ref[0], ref[1], ref[2]
                 arxiv_id = None
+                raw_citation = None
             else:
                 title, ref_authors = ref[0], ref[1]
                 doi = None
                 arxiv_id = None
-            future = executor.submit(check_single_ref, i, title, ref_authors, doi, arxiv_id)
+                raw_citation = None
+            future = executor.submit(check_single_ref, i, title, ref_authors, doi, arxiv_id, raw_citation)
             futures.append(future)
 
         # Wait for all to complete (or cancel if requested)

@@ -44,7 +44,7 @@ should communicate something useful.
 
 ## Screens
 
-There are three screens. You're always on exactly one.
+There are four screens. You're always on exactly one.
 
 ### Screen 1: Queue
 
@@ -252,6 +252,108 @@ out" — very different confidence levels.
 
 ---
 
+### Screen 4: Config
+
+Accessible from any screen via `,` (comma). Not a modal — a full screen
+you navigate to and back from, same as the others. Esc returns to
+wherever you were.
+
+The point: you're mid-run, you realize you forgot to set your Semantic
+Scholar API key, or you want to bump concurrency, or you want to disable
+a database that's down. You shouldn't have to quit and relaunch. That's
+hostile UX when someone has 30 papers already processed.
+
+```
+ HALLUCINATOR > Config
+─────────────────────────────────────────────────────────────────────────
+
+ API Keys
+─────────────────────────────────────────────────────────────────────────
+  Semantic Scholar    sk-••••••••••••7f2a               [enter] edit
+  OpenAlex            (not set)                         [enter] set
+─────────────────────────────────────────────────────────────────────────
+
+ Databases
+─────────────────────────────────────────────────────────────────────────
+  CrossRef            ✓ enabled
+  arXiv               ✓ enabled
+  DBLP                ✓ enabled  (offline: ~/dblp.db)
+  Sem. Scholar        ✓ enabled
+  OpenAlex            ○ disabled  (no API key)
+  ACL                 ✓ enabled
+  NeurIPS             ✓ enabled
+  Europe PMC          ✓ enabled
+  PubMed              ✓ enabled
+─────────────────────────────────────────────────────────────────────────
+
+ Concurrency & Timeouts
+─────────────────────────────────────────────────────────────────────────
+  Parallel references         4          [enter] edit
+  DB query timeout           10s         [enter] edit
+  Retry timeout              45s         [enter] edit
+  Request delay              1.0s        [enter] edit
+─────────────────────────────────────────────────────────────────────────
+
+ Display
+─────────────────────────────────────────────────────────────────────────
+  Theme                      green       [enter] toggle
+  Notifications              bell        [enter] cycle
+─────────────────────────────────────────────────────────────────────────
+
+ [enter] edit  [space] toggle  [esc] back
+```
+
+**Sections:**
+
+**API Keys.** Shows masked keys (last 4 chars visible) for any keys
+already set. Press Enter to edit — opens an inline text input. Keys
+entered here take effect immediately for subsequent queries. They
+override env vars / CLI flags for this session.
+
+**Databases.** Toggle individual databases on/off with Space. If a
+database requires an API key that isn't set, it shows as `○ disabled`
+with the reason. If DBLP is in offline mode, show the DB path. Toggling
+a database off mid-run means it won't be queried for remaining
+references (already-completed results are unaffected). Useful when a
+database is down and you don't want to waste timeout budget on it.
+
+**Concurrency & Timeouts.** Edit numeric values inline. Changing
+parallel references mid-run adjusts the worker pool for subsequent
+references. Changing timeouts affects subsequent queries. These are the
+knobs you reach for when the tool is going too slow (bump concurrency)
+or when a database is flaky (bump timeout).
+
+**Display.** Theme toggle (green/modern) applies immediately — the
+screen redraws in the new palette. Notification mode cycles through
+off → bell → desktop → bell+desktop.
+
+**Behavior notes:**
+
+- Changes take effect immediately for new work. They don't retroactively
+  affect completed results or in-flight queries.
+- Changes are session-scoped by default. They don't persist to disk
+  unless the user explicitly saves.
+- `S` (shift-s) on the config screen saves current settings to
+  `~/.config/hallucinator/config.toml`. This becomes the new default
+  for future runs. A small confirmation appears: "Saved to
+  ~/.config/hallucinator/config.toml".
+- The config file is also loaded on startup if it exists, so CLI flags
+  and env vars override the config file, and the TUI config screen
+  overrides everything. Precedence: TUI edits > CLI flags > env vars >
+  config file > defaults.
+
+**Why `,` as the keybind:** It's unused, easy to reach, and has
+precedent in tools like Neovim/Helix where `,` is a common leader key
+for settings. It doesn't conflict with any navigation or action key.
+
+**Why a full screen and not a modal:** The config has too many sections
+and options to fit comfortably in a modal overlay. A full screen gives
+room for the settings to breathe and be scannable. Also, settings aren't
+something you adjust while simultaneously reading results — you go in,
+tweak, go back. Full screen matches that flow.
+
+---
+
 ## Adaptive layout
 
 ### Narrow terminals (< 100 columns)
@@ -344,6 +446,7 @@ browsing results. It's context, not content.
 | Key        | Action                                      |
 |------------|---------------------------------------------|
 | `q`        | Quit (confirms if analysis still running)   |
+| `,`        | Open config screen                          |
 | `Tab`      | Toggle activity panel                       |
 | `?`        | Toggle keybind help overlay                 |
 | `Ctrl+C`   | Cancel current analysis / force quit        |
@@ -375,6 +478,8 @@ browsing results. It's context, not content.
 | `a`        | Queue          | Add more files                      |
 | `d`        | Queue          | Remove paper from queue             |
 | `y`        | Detail         | Copy reference text to clipboard    |
+| `S`        | Config         | Save settings to config file        |
+| `Space`    | Config         | Toggle selected setting              |
 
 ### Mouse
 
@@ -487,9 +592,6 @@ for the first 30 seconds but the actual utility is in triage speed.
 
 ## Non-goals for TUI
 
-- **Configuration editing.** Don't build a settings screen. API keys, DB
-  toggles, timeouts — these are CLI flags and env vars. The TUI is for
-  analysis, not setup.
 - **PDF viewing.** Don't try to render the paper. Users have their own
   PDF viewer open alongside.
 - **Editing results.** The TUI is read-only for results. No "mark as
@@ -829,7 +931,8 @@ Pressing `?` on any screen:
  │                                  y    copy to clipboard       │
  │  Global                                                       │
  │  Tab        toggle activity      ?    this help               │
- │  q          quit                 Ctrl+C  cancel/force quit    │
+ │  ,          config               Ctrl+C  cancel/force quit    │
+ │  q          quit                                              │
  │                                                               │
  │                                             [?/Esc] close     │
  └───────────────────────────────────────────────────────────────┘

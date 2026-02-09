@@ -205,3 +205,17 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Claude Code
+.claude/
+
+# DBLP offline databases
+dblp.db
+dblp.db-shm
+dblp.db-wal
+
+# Test data (local PDFs)
+test-data/
+
+# Windows artifacts
+nul

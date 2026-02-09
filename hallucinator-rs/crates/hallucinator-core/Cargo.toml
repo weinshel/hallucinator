@@ -1,0 +1,24 @@
+[package]
+name = "hallucinator-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Validation engine and database query backends for hallucinated reference detection"
+
+[dependencies]
+hallucinator-pdf.workspace = true
+hallucinator-dblp.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+reqwest.workspace = true
+scraper.workspace = true
+quick-xml.workspace = true
+rapidfuzz.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+thiserror.workspace = true
+unicode-normalization = "0.1"
+urlencoding = "2"
+log = "0.4"

@@ -442,10 +442,8 @@ impl App {
                     match tempfile::tempdir() {
                         Ok(td) => self.temp_dir = Some(td),
                         Err(e) => {
-                            self.activity.log(format!(
-                                "Failed to create temp dir: {}",
-                                e
-                            ));
+                            self.activity
+                                .log(format!("Failed to create temp dir: {}", e));
                             continue;
                         }
                     }
@@ -460,8 +458,7 @@ impl App {
                             .unwrap_or_default();
                         let count = extracted.len();
                         for pdf in extracted {
-                            let display_name =
-                                format!("{}/{}", archive_name, pdf.filename);
+                            let display_name = format!("{}/{}", archive_name, pdf.filename);
                             self.papers.push(PaperState::new(display_name));
                             self.ref_states.push(Vec::new());
                             self.paper_refs.push(Vec::new());
@@ -1014,7 +1011,9 @@ impl App {
                     self.recompute_sorted_indices();
                 }
                 // Throughput tracking: push a bucket every ~1 second
-                if self.tick.wrapping_sub(self.last_throughput_tick) >= self.config_state.fps as usize {
+                if self.tick.wrapping_sub(self.last_throughput_tick)
+                    >= self.config_state.fps as usize
+                {
                     self.activity.push_throughput(self.throughput_since_last);
                     self.throughput_since_last = 0;
                     self.last_throughput_tick = self.tick;
@@ -1110,7 +1109,7 @@ impl App {
                     self.input_mode = InputMode::TextInput;
                 }
                 _ => {}
-            }
+            },
             ConfigSection::Databases => {
                 if self.config_state.item_cursor == 0 {
                     // Item 0: edit DBLP offline path
@@ -1416,7 +1415,13 @@ impl App {
         }
 
         // Persistent logo bar at top of every content screen
-        let content_area = crate::view::banner::render_logo_bar(f, area, &self.theme, self.tick, self.config_state.fps);
+        let content_area = crate::view::banner::render_logo_bar(
+            f,
+            area,
+            &self.theme,
+            self.tick,
+            self.config_state.fps,
+        );
 
         // Activity panel split
         let main_area = if self.activity_panel_visible {

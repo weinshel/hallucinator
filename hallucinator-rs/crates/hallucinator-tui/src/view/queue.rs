@@ -300,4 +300,3 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let footer = Line::from(spans);
     f.render_widget(Paragraph::new(footer), area);
 }
-

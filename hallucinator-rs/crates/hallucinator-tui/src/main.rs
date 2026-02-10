@@ -160,11 +160,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Mark disabled DBs from CLI args
     for (name, enabled) in &mut config_state.disabled_dbs {
-        if cli
-            .disable_dbs
-            .iter()
-            .any(|d| d.eq_ignore_ascii_case(name))
-        {
+        if cli.disable_dbs.iter().any(|d| d.eq_ignore_ascii_case(name)) {
             *enabled = false;
         }
     }
@@ -433,10 +429,7 @@ async fn update_dblp(db_path: &PathBuf) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    println!(
-        "Building offline DBLP database at: {}",
-        db_path.display()
-    );
+    println!("Building offline DBLP database at: {}", db_path.display());
 
     let multi = MultiProgress::new();
 

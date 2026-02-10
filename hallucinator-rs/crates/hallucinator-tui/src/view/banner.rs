@@ -62,7 +62,9 @@ pub(crate) fn shuffled_tips() -> &'static [&'static str] {
         let mut rng = seed;
         for i in (1..tips.len()).rev() {
             // LCG: rng = rng * 6364136223846793005 + 1442695040888963407
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let j = (rng >> 33) as usize % (i + 1);
             tips.swap(i, j);
         }
@@ -110,8 +112,8 @@ pub fn render(f: &mut Frame, theme: &Theme, tick: usize) {
     } else {
         area.width.min(66)
     };
-    // logo(3) + blank + tagline + blank + tip + borders(2) + top padding
-    let box_h: u16 = if show_logo { 10 } else { 7 };
+    // logo(3) + blank + tagline + borders(2) + top padding
+    let box_h: u16 = if show_logo { 8 } else { 5 };
 
     let popup = centered_rect(box_w, box_h, area);
 
@@ -131,19 +133,6 @@ pub fn render(f: &mut Frame, theme: &Theme, tick: usize) {
         Line::from(Span::styled(
             "Finding hallucinated references in academic papers",
             Style::default().fg(theme.text),
-        ))
-        .alignment(Alignment::Center),
-    );
-
-    lines.push(Line::from(""));
-
-    // Rotating tip
-    let tips = shuffled_tips();
-    let tip_idx = (tick / 40) % tips.len();
-    lines.push(
-        Line::from(Span::styled(
-            tips[tip_idx].to_string(),
-            Style::default().fg(theme.dim),
         ))
         .alignment(Alignment::Center),
     );

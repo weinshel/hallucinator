@@ -147,6 +147,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         format!(" Total completed: {}", activity.total_completed),
         Style::default().fg(theme.text),
     )));
+    lines.push(Line::from(Span::styled(
+        format!(" FPS: {:.0}", app.measured_fps),
+        Style::default().fg(theme.dim),
+    )));
 
     // Log messages (archive extraction, errors)
     if !activity.messages.is_empty() {
@@ -157,10 +161,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 .fg(theme.active)
                 .add_modifier(Modifier::BOLD),
         )));
-        for msg in activity.messages.iter().rev().take(5) {
+        for (msg, is_warning) in activity.messages.iter().rev().take(5) {
+            let color = if *is_warning {
+                ratatui::style::Color::Yellow
+            } else {
+                theme.dim
+            };
             lines.push(Line::from(Span::styled(
                 format!(" {}", msg),
-                Style::default().fg(theme.dim),
+                Style::default().fg(color),
             )));
         }
     }

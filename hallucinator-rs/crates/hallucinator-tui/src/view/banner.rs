@@ -163,15 +163,15 @@ pub fn render(f: &mut Frame, theme: &Theme, tick: usize) {
 /// Right side: bordered "Pro-tips" pane with rotating, word-wrapped tip text.
 ///
 /// Returns the remaining `Rect` below the bar for content.
-pub fn render_logo_bar(f: &mut Frame, area: Rect, theme: &Theme, tick: usize) -> Rect {
+pub fn render_logo_bar(f: &mut Frame, area: Rect, theme: &Theme, tick: usize, fps: u32) -> Rect {
     // For very small terminals, skip entirely
     if area.height < 8 {
         return area;
     }
 
-    // Rotate tips every ~10 seconds (100 ticks at 10 ticks/sec)
+    // Rotate tips every ~10 seconds
     let tips = shuffled_tips();
-    let tip_idx = (tick / 100) % tips.len();
+    let tip_idx = (tick / (fps as usize * 10).max(1)) % tips.len();
     let tip_text = tips[tip_idx];
     // Strip prefix for the pane (header already says "Pro-tips")
     let tip_content = tip_text.strip_prefix("Pro-tip: ").unwrap_or(tip_text);

@@ -67,8 +67,10 @@ pub struct ActivityState {
     pub active_queries: Vec<ActiveQuery>,
     /// Total refs completed (for throughput tracking).
     pub total_completed: usize,
-    /// Recent log messages (archive extraction, errors, etc.).
-    pub messages: VecDeque<String>,
+    /// Recent log messages: (text, is_warning).
+    pub messages: VecDeque<(String, bool)>,
+    /// Whether the DBLP timeout warning has already been shown.
+    pub dblp_timeout_warned: bool,
 }
 
 impl Default for ActivityState {
@@ -79,6 +81,7 @@ impl Default for ActivityState {
             active_queries: Vec::new(),
             total_completed: 0,
             messages: VecDeque::new(),
+            dblp_timeout_warned: false,
         }
     }
 }
@@ -88,7 +91,14 @@ impl ActivityState {
         if self.messages.len() >= 50 {
             self.messages.pop_front();
         }
-        self.messages.push_back(msg);
+        self.messages.push_back((msg, false));
+    }
+
+    pub fn log_warn(&mut self, msg: String) {
+        if self.messages.len() >= 50 {
+            self.messages.pop_front();
+        }
+        self.messages.push_back((msg, true));
     }
 
     pub fn record_db_complete(&mut self, db_name: &str, success: bool, elapsed_ms: f64) {

@@ -207,8 +207,8 @@ pub struct App {
     pub config_state: ConfigState,
     pub export_state: ExportState,
 
-    /// Tick at which the banner should auto-transition (10 ticks = ~1 second).
-    banner_dismiss_tick: Option<usize>,
+    /// Tick at which the banner should auto-transition.
+    pub banner_dismiss_tick: Option<usize>,
     /// Whether to emit terminal bell (set on batch complete, consumed on next view).
     pub pending_bell: bool,
 
@@ -229,6 +229,12 @@ pub struct App {
     pub file_picker: FilePickerState,
     /// Temp directory for extracted archive PDFs (auto-cleanup on drop).
     pub temp_dir: Option<tempfile::TempDir>,
+    /// Frame counter for FPS measurement.
+    frame_count: u32,
+    /// Last time FPS was sampled.
+    last_fps_instant: Instant,
+    /// Measured FPS for display.
+    pub measured_fps: f32,
 }
 
 impl App {
@@ -267,7 +273,7 @@ impl App {
             activity: ActivityState::default(),
             config_state: ConfigState::default(),
             export_state: ExportState::default(),
-            banner_dismiss_tick: Some(30),
+            banner_dismiss_tick: None, // set after config_state is applied
             pending_bell: false,
             processing_started: false,
             backend_cmd_tx: None,
@@ -277,6 +283,9 @@ impl App {
             last_throughput_tick: 0,
             file_picker: FilePickerState::new(),
             temp_dir: None,
+            frame_count: 0,
+            last_fps_instant: Instant::now(),
+            measured_fps: 0.0,
         }
     }
 
@@ -974,19 +983,38 @@ impl App {
                     self.activity.log("Copied to clipboard".to_string());
                 }
             }
-            Action::Retry
-            | Action::RetryAll
-            | Action::RemovePaper
-            | Action::SaveConfig => {
+            Action::SaveConfig => {
+                let file_cfg = crate::config_file::from_config_state(&self.config_state);
+                match crate::config_file::save_config(&file_cfg) {
+                    Ok(path) => {
+                        self.activity
+                            .log(format!("Config saved to {}", path.display()));
+                    }
+                    Err(e) => {
+                        self.activity.log(format!("Config save failed: {}", e));
+                    }
+                }
+            }
+            Action::Retry | Action::RetryAll | Action::RemovePaper => {
                 // Placeholder for future implementation
             }
             Action::Tick => {
                 self.tick = self.tick.wrapping_add(1);
+                self.frame_count += 1;
+
+                // Measure FPS every second
+                let elapsed = self.last_fps_instant.elapsed();
+                if elapsed.as_secs_f32() >= 1.0 {
+                    self.measured_fps = self.frame_count as f32 / elapsed.as_secs_f32();
+                    self.frame_count = 0;
+                    self.last_fps_instant = Instant::now();
+                }
+
                 if self.screen == Screen::Queue {
                     self.recompute_sorted_indices();
                 }
-                // Throughput tracking: push a bucket every 10 ticks (~1 second)
-                if self.tick.wrapping_sub(self.last_throughput_tick) >= 10 {
+                // Throughput tracking: push a bucket every ~1 second
+                if self.tick.wrapping_sub(self.last_throughput_tick) >= self.config_state.fps as usize {
                     self.activity.push_throughput(self.throughput_since_last);
                     self.throughput_since_last = 0;
                     self.last_throughput_tick = self.tick;
@@ -1034,7 +1062,7 @@ impl App {
             ConfigSection::ApiKeys => 2,
             ConfigSection::Databases => 1 + self.config_state.disabled_dbs.len(),
             ConfigSection::Concurrency => 4,
-            ConfigSection::Display => 1,
+            ConfigSection::Display => 2, // theme + fps
         }
     }
 
@@ -1064,15 +1092,24 @@ impl App {
                 self.config_state.edit_buffer = value;
                 self.input_mode = InputMode::TextInput;
             }
-            ConfigSection::Display => {
-                // Cycle theme — update both the name and the live theme struct
-                if self.config_state.theme_name == "hacker" {
-                    self.config_state.theme_name = "modern".to_string();
-                    self.theme = Theme::modern();
-                } else {
-                    self.config_state.theme_name = "hacker".to_string();
-                    self.theme = Theme::hacker();
+            ConfigSection::Display => match self.config_state.item_cursor {
+                0 => {
+                    // Cycle theme — update both the name and the live theme struct
+                    if self.config_state.theme_name == "hacker" {
+                        self.config_state.theme_name = "modern".to_string();
+                        self.theme = Theme::modern();
+                    } else {
+                        self.config_state.theme_name = "hacker".to_string();
+                        self.theme = Theme::hacker();
+                    }
                 }
+                1 => {
+                    // Edit FPS
+                    self.config_state.editing = true;
+                    self.config_state.edit_buffer = self.config_state.fps.to_string();
+                    self.input_mode = InputMode::TextInput;
+                }
+                _ => {}
             }
             ConfigSection::Databases => {
                 if self.config_state.item_cursor == 0 {
@@ -1102,13 +1139,15 @@ impl App {
                 }
             }
             ConfigSection::Display => {
-                // Space on Display also cycles theme (same as Enter)
-                if self.config_state.theme_name == "hacker" {
-                    self.config_state.theme_name = "modern".to_string();
-                    self.theme = Theme::modern();
-                } else {
-                    self.config_state.theme_name = "hacker".to_string();
-                    self.theme = Theme::hacker();
+                if self.config_state.item_cursor == 0 {
+                    // Space on theme cycles it
+                    if self.config_state.theme_name == "hacker" {
+                        self.config_state.theme_name = "modern".to_string();
+                        self.theme = Theme::modern();
+                    } else {
+                        self.config_state.theme_name = "hacker".to_string();
+                        self.theme = Theme::hacker();
+                    }
                 }
             }
             _ => {}
@@ -1153,7 +1192,13 @@ impl App {
                     self.config_state.dblp_offline_path = buf;
                 }
             }
-            _ => {}
+            ConfigSection::Display => {
+                if self.config_state.item_cursor == 1 {
+                    if let Ok(v) = buf.parse::<u32>() {
+                        self.config_state.fps = v.clamp(1, 120);
+                    }
+                }
+            }
         }
         self.config_state.editing = false;
         self.config_state.edit_buffer.clear();
@@ -1281,6 +1326,22 @@ impl App {
                         success,
                         elapsed.as_secs_f64() * 1000.0,
                     );
+
+                    // Warn when DBLP online is repeatedly timing out and no offline DB is configured
+                    if db_name == "DBLP"
+                        && !success
+                        && !self.activity.dblp_timeout_warned
+                        && self.config_state.dblp_offline_path.is_empty()
+                    {
+                        if let Some(health) = self.activity.db_health.get("DBLP") {
+                            if health.failed >= 3 {
+                                self.activity.log_warn(
+                                    "DBLP online timing out repeatedly. Build an offline database: hallucinator-tui update-dblp".to_string()
+                                );
+                                self.activity.dblp_timeout_warned = true;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1355,7 +1416,7 @@ impl App {
         }
 
         // Persistent logo bar at top of every content screen
-        let content_area = crate::view::banner::render_logo_bar(f, area, &self.theme, self.tick);
+        let content_area = crate::view::banner::render_logo_bar(f, area, &self.theme, self.tick, self.config_state.fps);
 
         // Activity panel split
         let main_area = if self.activity_panel_visible {

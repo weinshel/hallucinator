@@ -6,7 +6,7 @@
 # === Config & Usage ===
 Pro-tip: Press , to open config -- set API keys, concurrency, timeouts
 Pro-tip: Set an OpenAlex key for broader coverage (--openalex-key or config)
-Pro-tip: Build an offline DBLP database for instant local lookups (--update-dblp)
+Pro-tip: Build an offline DBLP database for instant local lookups (hallucinator-tui update-dblp)
 Pro-tip: Increase concurrent papers in config to process batches faster
 Pro-tip: Press Space on a reference to mark false positives as safe
 Pro-tip: Use s to cycle sort order, f to filter by status on queue/paper views
@@ -15,7 +15,7 @@ Pro-tip: Press e to export results as Markdown, JSON, or CSV
 Pro-tip: References with < 5 words are auto-skipped (too short for reliable matching)
 Pro-tip: Press ? anywhere for a full keybinding reference
 Pro-tip: You can set API keys via environment variables or a .env file
-Pro-tip: `hallucinator-cli` allows you to get a persistant dblp download (~1 GB compressed XML)
+Pro-tip: Run 'hallucinator-tui update-dblp' to build a local DBLP database (~1 GB compressed XML)
 Pro-tip: Press o to add more PDFs to the queue without restarting
 
 # === How It Works ===

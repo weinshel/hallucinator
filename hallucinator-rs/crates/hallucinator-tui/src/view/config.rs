@@ -15,6 +15,7 @@ pub fn render_in(f: &mut Frame, app: &App, area: Rect) {
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
+        Constraint::Length(1), // config file path
         Constraint::Min(5),    // content
         Constraint::Length(1), // footer
     ])
@@ -49,6 +50,18 @@ pub fn render_in(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(Paragraph::new(Line::from(header_spans)), chunks[0]);
 
+    // Config file path hint
+    let path_text = crate::config_file::config_path()
+        .map(|p| format!("  Config: {}", p.display()))
+        .unwrap_or_else(|| "  Config: (no config directory)".to_string());
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            path_text,
+            Style::default().fg(theme.dim),
+        ))),
+        chunks[1],
+    );
+
     // Content: only show the current section
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
@@ -76,7 +89,7 @@ pub fn render_in(f: &mut Frame, app: &App, area: Rect) {
         )
         .wrap(Wrap { trim: false });
 
-    f.render_widget(content, chunks[1]);
+    f.render_widget(content, chunks[2]);
 
     // Footer — context-aware per section
     let footer_text = if config.editing {
@@ -94,12 +107,12 @@ pub fn render_in(f: &mut Frame, app: &App, area: Rect) {
             ""
         };
         format!(
-            " j/k:navigate  Tab:section  {}  Esc:back{}",
+            " j/k:navigate  Tab:section  {}  Ctrl+S:save  Esc:back{}",
             section_hint, active_note
         )
     };
     let footer = Line::from(Span::styled(&footer_text, theme.footer_style()));
-    f.render_widget(Paragraph::new(footer), chunks[2]);
+    f.render_widget(Paragraph::new(footer), chunks[3]);
 }
 
 fn render_api_keys(lines: &mut Vec<Line>, config: &ConfigState, theme: &Theme) {
@@ -213,13 +226,34 @@ fn render_concurrency(lines: &mut Vec<Line>, config: &ConfigState, theme: &Theme
 }
 
 fn render_display(lines: &mut Vec<Line>, config: &ConfigState, theme: &Theme) {
+    // Item 0: Theme
     let cursor = if config.item_cursor == 0 { "> " } else { "  " };
     lines.push(Line::from(vec![
         Span::styled(
-            format!("  {}Theme: ", cursor),
+            format!("  {}{:<22}", cursor, "Theme"),
             Style::default().fg(theme.text),
         ),
         Span::styled(config.theme_name.clone(), Style::default().fg(theme.active)),
         Span::styled("  (Enter to cycle)", Style::default().fg(theme.dim)),
+    ]));
+
+    // Item 1: FPS
+    let cursor = if config.item_cursor == 1 { "> " } else { "  " };
+    let display_val = if config.editing && config.item_cursor == 1 {
+        format!("{}\u{2588}", config.edit_buffer)
+    } else {
+        config.fps.to_string()
+    };
+    let val_style = if config.editing && config.item_cursor == 1 {
+        Style::default().fg(theme.active)
+    } else {
+        Style::default().fg(theme.dim)
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  {}{:<22}", cursor, "FPS"),
+            Style::default().fg(theme.text),
+        ),
+        Span::styled(display_val, val_style),
     ]));
 }

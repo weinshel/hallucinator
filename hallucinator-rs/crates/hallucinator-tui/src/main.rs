@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use ratatui::crossterm::event;
 use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use ratatui::crossterm::execute;
@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 mod action;
 mod app;
 mod backend;
+mod config_file;
 mod export;
 mod input;
 mod model;
@@ -31,7 +32,10 @@ use app::{App, Screen};
 /// Hallucinator TUI — batch academic reference validation with a terminal interface.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// PDF files to check
     pdf_paths: Vec<PathBuf>,
 
@@ -58,37 +62,119 @@ struct Args {
     /// Color theme: hacker (default) or modern
     #[arg(long, default_value = "hacker")]
     theme: String,
+
+    /// Enable mouse support (click to select rows, scroll)
+    #[arg(long)]
+    mouse: bool,
+
+    /// Target frames per second (default: 30)
+    #[arg(long, default_value = "30")]
+    fps: u32,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Download and build the offline DBLP database
+    UpdateDblp {
+        /// Path to store the DBLP SQLite database
+        /// (default: <data_dir>/hallucinator/dblp.db)
+        path: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    let args = Args::parse();
+    let cli = Cli::parse();
+
+    // Handle subcommands
+    if let Some(command) = cli.command {
+        return match command {
+            Command::UpdateDblp { path } => {
+                let db_path = path.unwrap_or_else(|| {
+                    dirs::data_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join("hallucinator")
+                        .join("dblp.db")
+                });
+                update_dblp(&db_path).await
+            }
+        };
+    }
+
+    // --- TUI mode (default, no subcommand) ---
 
     // Validate any PDF paths provided on the command line
-    for path in &args.pdf_paths {
+    for path in &cli.pdf_paths {
         if !path.exists() {
             anyhow::bail!("PDF file not found: {}", path.display());
         }
     }
 
-    // Resolve config from CLI flags > env vars > defaults
-    let openalex_key = args
-        .openalex_key
-        .or_else(|| std::env::var("OPENALEX_KEY").ok());
-    let s2_api_key = args.s2_api_key.or_else(|| std::env::var("S2_API_KEY").ok());
-    let dblp_offline_path = args
-        .dblp_offline
-        .or_else(|| std::env::var("DBLP_OFFLINE_PATH").ok().map(PathBuf::from));
+    // Load config file (CWD .hallucinator.toml > platform config dir)
+    let file_config = config_file::load_config();
 
-    let db_timeout_secs: u64 = std::env::var("DB_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(10);
-    let db_timeout_short_secs: u64 = std::env::var("DB_TIMEOUT_SHORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5);
+    // Start with defaults, apply file config
+    let mut config_state = model::config::ConfigState::default();
+    config_file::apply_to_config_state(&file_config, &mut config_state);
+
+    // Apply env vars (override file config)
+    if let Ok(key) = std::env::var("OPENALEX_KEY") {
+        if !key.is_empty() {
+            config_state.openalex_key = key;
+        }
+    }
+    if let Ok(key) = std::env::var("S2_API_KEY") {
+        if !key.is_empty() {
+            config_state.s2_api_key = key;
+        }
+    }
+    if let Ok(path) = std::env::var("DBLP_OFFLINE_PATH") {
+        if !path.is_empty() {
+            config_state.dblp_offline_path = path;
+        }
+    }
+    if let Ok(v) = std::env::var("DB_TIMEOUT") {
+        if let Ok(secs) = v.parse::<u64>() {
+            config_state.db_timeout_secs = secs;
+        }
+    }
+    if let Ok(v) = std::env::var("DB_TIMEOUT_SHORT") {
+        if let Ok(secs) = v.parse::<u64>() {
+            config_state.db_timeout_short_secs = secs;
+        }
+    }
+
+    // Apply CLI args (highest priority)
+    if let Some(key) = cli.openalex_key {
+        config_state.openalex_key = key;
+    }
+    if let Some(key) = cli.s2_api_key {
+        config_state.s2_api_key = key;
+    }
+    if let Some(ref path) = cli.dblp_offline {
+        config_state.dblp_offline_path = path.display().to_string();
+    }
+    config_state.theme_name = cli.theme.clone();
+    config_state.fps = cli.fps.clamp(1, 120);
+
+    // Mark disabled DBs from CLI args
+    for (name, enabled) in &mut config_state.disabled_dbs {
+        if cli
+            .disable_dbs
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(name))
+        {
+            *enabled = false;
+        }
+    }
+
+    // Resolve DBLP offline path from config state
+    let dblp_offline_path: Option<PathBuf> = if config_state.dblp_offline_path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(&config_state.dblp_offline_path))
+    };
 
     // Open DBLP database if configured
     let dblp_offline_db: Option<Arc<Mutex<hallucinator_dblp::DblpDatabase>>> =
@@ -99,13 +185,13 @@ async fn main() -> anyhow::Result<()> {
         };
 
     // Select theme
-    let theme = match args.theme.as_str() {
+    let theme = match config_state.theme_name.as_str() {
         "modern" => theme::Theme::modern(),
         _ => theme::Theme::hacker(),
     };
 
     // Build filenames for display
-    let filenames: Vec<String> = args
+    let filenames: Vec<String> = cli
         .pdf_paths
         .iter()
         .map(|p| {
@@ -116,15 +202,24 @@ async fn main() -> anyhow::Result<()> {
         .collect();
 
     // Initialize terminal
+    let mouse_enabled = cli.mouse;
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    if mouse_enabled {
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    } else {
+        execute!(stdout, EnterAlternateScreen)?;
+    }
 
     // Install panic hook that restores terminal before printing panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        if mouse_enabled {
+            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        } else {
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        }
         original_hook(panic_info);
     }));
 
@@ -139,36 +234,35 @@ async fn main() -> anyhow::Result<()> {
     let mut app = App::new(filenames, theme);
 
     // Store PDF paths for deferred processing
-    app.pdf_paths = args.pdf_paths.clone();
+    app.pdf_paths = cli.pdf_paths.clone();
 
-    // Populate config state from resolved CLI/env values
-    app.config_state.openalex_key = openalex_key.clone().unwrap_or_default();
-    app.config_state.s2_api_key = s2_api_key.clone().unwrap_or_default();
-    app.config_state.max_concurrent_refs = 4;
-    app.config_state.db_timeout_secs = db_timeout_secs;
-    app.config_state.db_timeout_short_secs = db_timeout_short_secs;
-    app.config_state.dblp_offline_path = dblp_offline_path
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    app.config_state.theme_name = args.theme.clone();
+    // Apply the fully-resolved config state
+    app.config_state = config_state;
 
-    // Mark disabled DBs from CLI args
-    for (name, enabled) in &mut app.config_state.disabled_dbs {
-        if args
-            .disable_dbs
-            .iter()
-            .any(|d| d.eq_ignore_ascii_case(name))
-        {
-            *enabled = false;
+    // Set banner dismiss after FPS is known (~3 seconds)
+    app.banner_dismiss_tick = Some(app.config_state.fps as usize * 3);
+
+    // Show config file path if one was loaded
+    if let Some(path) = config_file::config_path() {
+        if path.exists() {
+            app.activity
+                .log(format!("Config loaded from {}", path.display()));
         }
+    }
+
+    // Startup hint if no offline DBLP configured (logged last so it shows first)
+    if app.config_state.dblp_offline_path.is_empty() {
+        app.activity.log_warn(
+            "No offline DBLP DB. Run 'hallucinator-tui update-dblp' for faster lookups."
+                .to_string(),
+        );
     }
 
     // Initialize results persistence directory
     let run_dir = persistence::run_dir();
 
     // Single-paper mode: if exactly one PDF, skip the queue and go directly to paper view
-    if args.pdf_paths.len() == 1 {
+    if cli.pdf_paths.len() == 1 {
         app.screen = Screen::Paper(0);
         app.single_paper_mode = true;
     }
@@ -184,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
     let event_tx_for_backend = event_tx.clone();
     let mut cached_dblp_path = dblp_offline_path.clone();
     let mut cached_dblp_db = dblp_offline_db.clone();
-    let check_openalex_authors = args.check_openalex_authors;
+    let check_openalex_authors = cli.check_openalex_authors;
     tokio::spawn(async move {
         // Per-batch cancel token — cancelled when user requests stop
         let mut batch_cancel = CancellationToken::new();
@@ -245,17 +339,36 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Main event loop
-    let tick_rate = Duration::from_millis(100);
+    let tick_rate = Duration::from_millis(1000 / app.config_state.fps.max(1) as u64);
 
     loop {
         // Draw
         terminal.draw(|f| app.view(f))?;
 
-        // Poll for events with timeout for tick
-        let timeout = tick_rate;
+        // Always process terminal input first (non-blocking) so user actions
+        // like cancel are never starved by backend event floods.
+        while event::poll(Duration::ZERO).unwrap_or(false) {
+            if let Ok(evt) = event::read() {
+                let action = if app.screen == Screen::Config {
+                    match &evt {
+                        ratatui::crossterm::event::Event::Key(key)
+                            if key.kind == ratatui::crossterm::event::KeyEventKind::Press
+                                && key.code == ratatui::crossterm::event::KeyCode::Tab
+                                && !app.config_state.editing =>
+                        {
+                            action::Action::CycleConfigSection
+                        }
+                        _ => input::map_event(&evt, &app.input_mode),
+                    }
+                } else {
+                    input::map_event(&evt, &app.input_mode)
+                };
+                app.update(action);
+            }
+        }
 
+        // Then wait for backend events or tick timeout
         tokio::select! {
-            // Backend events (non-blocking drain)
             maybe_event = event_rx.recv() => {
                 match maybe_event {
                     Some(backend_event) => {
@@ -280,35 +393,11 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     None => {
-                        // Backend channel closed — processing done
+                        // Backend channel closed
                     }
                 }
             }
-            // Terminal input events
-            _ = async {
-                if event::poll(timeout).unwrap_or(false) {
-                    if let Ok(evt) = event::read() {
-                        // Map Tab differently on Config screen
-                        let action = if app.screen == Screen::Config {
-                            match &evt {
-                                ratatui::crossterm::event::Event::Key(key)
-                                    if key.kind == ratatui::crossterm::event::KeyEventKind::Press
-                                    && key.code == ratatui::crossterm::event::KeyCode::Tab
-                                    && !app.config_state.editing =>
-                                {
-                                    action::Action::CycleConfigSection
-                                }
-                                _ => input::map_event(&evt, &app.input_mode),
-                            }
-                        } else {
-                            input::map_event(&evt, &app.input_mode)
-                        };
-                        if app.update(action) {
-                            // Quit requested
-                        }
-                    }
-                }
-            } => {}
+            _ = tokio::time::sleep(tick_rate) => {}
         }
 
         // Process tick
@@ -322,11 +411,159 @@ async fn main() -> anyhow::Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    if mouse_enabled {
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+    } else {
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    }
+
+    Ok(())
+}
+
+async fn update_dblp(db_path: &PathBuf) -> anyhow::Result<()> {
+    use indicatif::{HumanBytes, HumanCount, MultiProgress, ProgressBar, ProgressStyle};
+    use std::time::Instant;
+
+    // Ensure parent directory exists
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    println!(
+        "Building offline DBLP database at: {}",
+        db_path.display()
+    );
+
+    let multi = MultiProgress::new();
+
+    let dl_bar_style = ProgressStyle::with_template(
+        "{spinner:.cyan} {msg} [{bar:40.cyan/dim}] {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta})",
+    )
+    .unwrap()
+    .progress_chars("=> ");
+
+    let dl_unknown_style =
+        ProgressStyle::with_template("{spinner:.cyan} {msg} {bytes} ({bytes_per_sec})").unwrap();
+
+    let parse_bar_style = ProgressStyle::with_template(
+        "{spinner:.green} {msg} [{bar:40.green/dim}] {percent}% (eta {eta})",
+    )
+    .unwrap()
+    .progress_chars("=> ");
+
+    let parse_spinner_style = ProgressStyle::with_template("{spinner:.green} {msg}").unwrap();
+
+    let dl_bar = multi.add(ProgressBar::new(0));
+    dl_bar.set_style(dl_unknown_style.clone());
+    dl_bar.set_message("Connecting to dblp.org...");
+    dl_bar.enable_steady_tick(Duration::from_millis(120));
+
+    let parse_bar = multi.add(ProgressBar::new(0));
+    parse_bar.set_style(parse_spinner_style.clone());
+    parse_bar.enable_steady_tick(Duration::from_millis(120));
+
+    let parse_start = std::cell::Cell::new(None::<Instant>);
+
+    let updated = hallucinator_dblp::build_database(db_path, |event| match event {
+        hallucinator_dblp::BuildProgress::Downloading {
+            bytes_downloaded,
+            total_bytes,
+            ..
+        } => {
+            if let Some(total) = total_bytes {
+                if dl_bar.length() == Some(0) {
+                    dl_bar.set_length(total);
+                    dl_bar.set_style(dl_bar_style.clone());
+                }
+                dl_bar.set_position(bytes_downloaded);
+                dl_bar.set_message("dblp.xml.gz");
+                if bytes_downloaded >= total && !dl_bar.is_finished() {
+                    dl_bar.finish_with_message(format!(
+                        "Downloaded {} in {:.0?}",
+                        HumanBytes(total),
+                        dl_bar.elapsed()
+                    ));
+                }
+            } else {
+                dl_bar.set_position(bytes_downloaded);
+                dl_bar.set_message("dblp.xml.gz");
+            }
+        }
+        hallucinator_dblp::BuildProgress::Parsing {
+            records_parsed,
+            records_inserted,
+            bytes_read,
+            bytes_total,
+        } => {
+            if !dl_bar.is_finished() {
+                dl_bar.finish_with_message(format!(
+                    "Downloaded {} in {:.0?}",
+                    HumanBytes(dl_bar.position()),
+                    dl_bar.elapsed()
+                ));
+            }
+            if parse_start.get().is_none() {
+                parse_start.set(Some(Instant::now()));
+            }
+            if bytes_total > 0 && parse_bar.length() == Some(0) {
+                parse_bar.set_length(bytes_total);
+                parse_bar.set_style(parse_bar_style.clone());
+            }
+            parse_bar.set_position(bytes_read);
+            let elapsed = parse_start.get().unwrap().elapsed().as_secs_f64();
+            let inserted_per_sec = if elapsed > 0.0 {
+                records_inserted as f64 / elapsed
+            } else {
+                0.0
+            };
+            parse_bar.set_message(format!(
+                "{} parsed, {} inserted ({}/s)",
+                HumanCount(records_parsed),
+                HumanCount(records_inserted),
+                HumanCount(inserted_per_sec as u64),
+            ));
+        }
+        hallucinator_dblp::BuildProgress::RebuildingIndex => {
+            if !dl_bar.is_finished() {
+                dl_bar.finish_with_message(format!(
+                    "Downloaded {} in {:.0?}",
+                    HumanBytes(dl_bar.position()),
+                    dl_bar.elapsed()
+                ));
+            }
+            parse_bar.set_style(parse_spinner_style.clone());
+            parse_bar.set_message("Rebuilding FTS search index...");
+        }
+        hallucinator_dblp::BuildProgress::Complete {
+            publications,
+            authors,
+            skipped,
+        } => {
+            let total_elapsed = parse_start
+                .get()
+                .map(|s| format!(" in {:.0?}", s.elapsed()))
+                .unwrap_or_default();
+            if skipped {
+                parse_bar.finish_with_message("Database is already up to date (304 Not Modified)");
+            } else {
+                parse_bar.finish_with_message(format!(
+                    "Indexed {} publications, {} authors{}",
+                    HumanCount(publications),
+                    HumanCount(authors),
+                    total_elapsed
+                ));
+            }
+        }
+    })
+    .await?;
+
+    if !updated {
+        println!("Database is already up to date.");
+    }
 
     Ok(())
 }

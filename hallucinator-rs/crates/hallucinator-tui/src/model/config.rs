@@ -47,6 +47,7 @@ pub struct ConfigState {
     pub db_timeout_secs: u64,
     pub db_timeout_short_secs: u64,
     pub theme_name: String,
+    pub fps: u32,
 }
 
 impl Default for ConfigState {
@@ -80,6 +81,7 @@ impl Default for ConfigState {
             db_timeout_secs: 10,
             db_timeout_short_secs: 5,
             theme_name: "hacker".to_string(),
+            fps: 30,
         }
     }
 }

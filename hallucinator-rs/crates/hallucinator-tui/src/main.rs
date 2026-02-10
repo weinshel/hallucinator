@@ -1,9 +1,11 @@
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::Parser;
 use ratatui::crossterm::event;
+use ratatui::crossterm::event::{EnableMouseCapture, DisableMouseCapture};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -16,13 +18,15 @@ use tokio_util::sync::CancellationToken;
 mod action;
 mod app;
 mod backend;
+mod export;
+mod persistence;
 mod tui_event;
 mod input;
 mod model;
 mod theme;
 mod view;
 
-use app::App;
+use app::{App, Screen};
 
 /// Hallucinator TUI — batch academic reference validation with a terminal interface.
 #[derive(Parser, Debug)]
@@ -50,6 +54,10 @@ struct Args {
     /// Flag author mismatches from OpenAlex (default: skipped)
     #[arg(long)]
     check_openalex_authors: bool,
+
+    /// Color theme: hacker (default) or modern
+    #[arg(long, default_value = "hacker")]
+    theme: String,
 }
 
 #[tokio::main]
@@ -85,22 +93,17 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(5);
 
     // Open DBLP database if configured
-    let dblp_offline_db = if let Some(ref path) = dblp_offline_path {
-        Some(backend::open_dblp_db(path)?)
-    } else {
-        None
-    };
+    let dblp_offline_db: Option<Arc<Mutex<hallucinator_dblp::DblpDatabase>>> =
+        if let Some(ref path) = dblp_offline_path {
+            Some(backend::open_dblp_db(path)?)
+        } else {
+            None
+        };
 
-    let config = hallucinator_core::Config {
-        openalex_key,
-        s2_api_key,
-        dblp_offline_path: dblp_offline_path.clone(),
-        dblp_offline_db,
-        max_concurrent_refs: 4,
-        db_timeout_secs,
-        db_timeout_short_secs,
-        disabled_dbs: args.disable_dbs,
-        check_openalex_authors: args.check_openalex_authors,
+    // Select theme
+    let theme = match args.theme.as_str() {
+        "modern" => theme::Theme::modern(),
+        _ => theme::Theme::hacker(),
     };
 
     // Build filenames for display
@@ -117,37 +120,105 @@ async fn main() -> anyhow::Result<()> {
     // Initialize terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
     // Install panic hook that restores terminal before printing panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         original_hook(panic_info);
     }));
 
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let backend_terminal = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend_terminal)?;
 
     // Drain any stray input events (e.g. Enter keypress from launching the command)
     while event::poll(Duration::from_millis(50)).unwrap_or(false) {
         let _ = event::read();
     }
 
-    let mut app = App::new(filenames);
+    let mut app = App::new(filenames, theme);
 
-    // Launch backend processing (only if PDFs were provided)
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    // Store PDF paths for deferred processing
+    app.pdf_paths = args.pdf_paths.clone();
+
+    // Populate config state from resolved CLI/env values
+    app.config_state.openalex_key = openalex_key.clone().unwrap_or_default();
+    app.config_state.s2_api_key = s2_api_key.clone().unwrap_or_default();
+    app.config_state.max_concurrent_refs = 4;
+    app.config_state.db_timeout_secs = db_timeout_secs;
+    app.config_state.db_timeout_short_secs = db_timeout_short_secs;
+    app.config_state.dblp_offline_path = dblp_offline_path.as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    app.config_state.theme_name = args.theme.clone();
+
+    // Mark disabled DBs from CLI args
+    for (name, enabled) in &mut app.config_state.disabled_dbs {
+        if args.disable_dbs.iter().any(|d| d.eq_ignore_ascii_case(name)) {
+            *enabled = false;
+        }
+    }
+
+    // Initialize results persistence directory
+    let run_dir = persistence::run_dir();
+
+    // Single-paper mode: if exactly one PDF, skip the queue and go directly to paper view
+    if args.pdf_paths.len() == 1 {
+        app.screen = Screen::Paper(0);
+        app.single_paper_mode = true;
+    }
+
+    // Set up backend command channel for deferred processing
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<tui_event::BackendCommand>();
     let cancel = CancellationToken::new();
 
-    if !args.pdf_paths.is_empty() {
-        let cancel_clone = cancel.clone();
-        let pdfs = args.pdf_paths.clone();
-        tokio::spawn(async move {
-            backend::run_batch(pdfs, config, tx, cancel_clone).await;
-        });
-    }
+    app.backend_cmd_tx = Some(cmd_tx);
+
+    // Spawn backend command listener
+    let event_tx_for_backend = event_tx.clone();
+    let mut cached_dblp_path = dblp_offline_path.clone();
+    let mut cached_dblp_db = dblp_offline_db.clone();
+    let check_openalex_authors = args.check_openalex_authors;
+    tokio::spawn(async move {
+        // Per-batch cancel token — cancelled when user requests stop
+        let mut batch_cancel = CancellationToken::new();
+
+        while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                tui_event::BackendCommand::ProcessFiles { files, starting_index, max_concurrent_papers, mut config } => {
+                    // Fresh token for this batch
+                    batch_cancel = CancellationToken::new();
+
+                    // If user changed the DBLP path in config, try to open the new DB
+                    if config.dblp_offline_path != cached_dblp_path {
+                        cached_dblp_path = config.dblp_offline_path.clone();
+                        cached_dblp_db = if let Some(ref path) = cached_dblp_path {
+                            backend::open_dblp_db(path).ok()
+                        } else {
+                            None
+                        };
+                    }
+
+                    config.dblp_offline_path = cached_dblp_path.clone();
+                    config.dblp_offline_db = cached_dblp_db.clone();
+                    config.check_openalex_authors = check_openalex_authors;
+
+                    let tx = event_tx_for_backend.clone();
+                    let cancel = batch_cancel.clone();
+                    // Spawn batch as a separate task so we can still receive commands
+                    tokio::spawn(async move {
+                        backend::run_batch_with_offset(files, config, tx, cancel, starting_index, max_concurrent_papers).await;
+                    });
+                }
+                tui_event::BackendCommand::CancelProcessing => {
+                    batch_cancel.cancel();
+                }
+            }
+        }
+    });
 
     // Also handle Ctrl+C at the OS level for clean shutdown
     let cancel_for_signal = cancel.clone();
@@ -169,12 +240,26 @@ async fn main() -> anyhow::Result<()> {
 
         tokio::select! {
             // Backend events (non-blocking drain)
-            maybe_event = rx.recv() => {
+            maybe_event = event_rx.recv() => {
                 match maybe_event {
                     Some(backend_event) => {
+                        // Persist paper results on completion
+                        if let tui_event::BackendEvent::PaperComplete { paper_index, .. } = &backend_event {
+                            if let Some(ref dir) = run_dir {
+                                let pi = *paper_index;
+                                if let Some(paper) = app.papers.get(pi) {
+                                    persistence::save_paper_results(
+                                        dir,
+                                        pi,
+                                        &paper.filename,
+                                        &paper.results,
+                                    );
+                                }
+                            }
+                        }
                         app.handle_backend_event(backend_event);
                         // Drain any additional queued backend events
-                        while let Ok(evt) = rx.try_recv() {
+                        while let Ok(evt) = event_rx.try_recv() {
                             app.handle_backend_event(evt);
                         }
                     }
@@ -187,7 +272,21 @@ async fn main() -> anyhow::Result<()> {
             _ = async {
                 if event::poll(timeout).unwrap_or(false) {
                     if let Ok(evt) = event::read() {
-                        let action = input::map_event(&evt);
+                        // Map Tab differently on Config screen
+                        let action = if app.screen == Screen::Config {
+                            match &evt {
+                                ratatui::crossterm::event::Event::Key(key)
+                                    if key.kind == ratatui::crossterm::event::KeyEventKind::Press
+                                    && key.code == ratatui::crossterm::event::KeyCode::Tab
+                                    && !app.config_state.editing =>
+                                {
+                                    action::Action::CycleConfigSection
+                                }
+                                _ => input::map_event(&evt, &app.input_mode),
+                            }
+                        } else {
+                            input::map_event(&evt, &app.input_mode)
+                        };
                         if app.update(action) {
                             // Quit requested
                         }
@@ -207,7 +306,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
 
     Ok(())
 }

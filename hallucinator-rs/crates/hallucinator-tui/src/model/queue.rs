@@ -1,4 +1,4 @@
-use hallucinator_core::{CheckStats, ValidationResult, Status};
+use hallucinator_core::{CheckStats, Status, ValidationResult};
 
 /// Processing phase of a paper in the queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,4 +130,68 @@ impl SortOrder {
             Self::Name => "name",
         }
     }
+}
+
+/// Filter for the queue table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueFilter {
+    All,
+    HasProblems,
+    Done,
+    Running,
+    Queued,
+}
+
+impl QueueFilter {
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::HasProblems,
+            Self::HasProblems => Self::Done,
+            Self::Done => Self::Running,
+            Self::Running => Self::Queued,
+            Self::Queued => Self::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::HasProblems => "problems",
+            Self::Done => "done",
+            Self::Running => "running",
+            Self::Queued => "queued",
+        }
+    }
+
+    pub fn matches(self, paper: &PaperState) -> bool {
+        match self {
+            Self::All => true,
+            Self::HasProblems => paper.problems() > 0,
+            Self::Done => paper.phase.is_terminal(),
+            Self::Running => matches!(
+                paper.phase,
+                PaperPhase::Extracting | PaperPhase::Checking | PaperPhase::Retrying
+            ),
+            Self::Queued => paper.phase == PaperPhase::Queued,
+        }
+    }
+}
+
+/// Compute filtered indices from the papers list, applying filter and optional search.
+pub fn filtered_indices(
+    papers: &[PaperState],
+    filter: QueueFilter,
+    search_query: &str,
+) -> Vec<usize> {
+    let query_lower = search_query.to_lowercase();
+    papers
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            filter.matches(p)
+                && (search_query.is_empty()
+                    || p.filename.to_lowercase().contains(&query_lower))
+        })
+        .map(|(i, _)| i)
+        .collect()
 }

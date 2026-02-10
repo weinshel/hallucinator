@@ -124,6 +124,9 @@ pub fn print_progress(w: &mut dyn Write, event: &ProgressEvent, color: ColorMode
                 count
             )?;
         }
+        ProgressEvent::DatabaseQueryComplete { .. } => {
+            // Not displayed in CLI output
+        }
     }
     Ok(())
 }

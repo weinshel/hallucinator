@@ -1036,3 +1036,47 @@ different animation to distinguish retry from first pass.
 When the retry completes, the cell snaps to the new verdict. No
 transition animation — just the immediate update. The change in color
 (from cyan retrying to green/red/yellow result) is transition enough.
+
+### 6. Phase 4 decisions
+
+**File picker screen.** When launched with no PDF arguments, the banner
+dismisses into an interactive file picker instead of an empty queue.
+The file picker is a custom implementation using `std::fs::read_dir` —
+no external dependency (ratatui-explorer was considered but rejected to
+keep the dependency tree small). Directories are navigable, `.pdf`
+files are togglable with Space, Enter confirms selection and returns to
+the queue. The `a` key on the queue screen reopens the picker to add
+more files.
+
+**Manual start.** PDFs load into the queue in `Queued` state but do
+not begin processing automatically. The user reviews the queue, adjusts
+configuration, then presses Space to start. A prominent `[Space] Start`
+indicator in the footer makes this discoverable. Processing is deferred
+via a `BackendCommand` channel — the backend listener receives a
+`ProcessFiles` command containing the file list, starting index, and a
+`Config` struct rebuilt from the current `ConfigState`. This means
+config edits made before pressing Space take effect.
+
+**Concurrency configurable from config screen.** The config screen
+(`,` key) is now fully interactive. Tab cycles between sections (API
+Keys, Databases, Concurrency, Display). j/k navigates items within a
+section. Enter opens a text-editing mode for numeric and string fields.
+Space toggles database checkboxes. Cursor is clamped to valid bounds
+per section. Config values are populated from CLI flags, environment
+variables, and defaults — not hardcoded.
+
+**Activity panel shown by default.** The activity panel (right sidebar)
+is now visible on launch instead of hidden. It shows database health
+with query counts and average response times, a throughput sparkline
+with refs/sec rate, active query list (which references are currently
+being checked), and a summary of total completed references. Throughput
+data is fed by a tick-based bucketing system (every ~1 second).
+
+**Mouse click support.** Clicking a row in the queue or paper table
+selects it. The rendered table area is stored after each draw, and
+click coordinates are mapped to table rows accounting for borders and
+headers. Double-click (same row within 500ms) drills in.
+
+**False positive marking remains a non-goal.** Per the original design
+(section "Explicit non-goals"), false-positive toggling is deferred.
+The TUI is an analysis tool, not an annotation tool.

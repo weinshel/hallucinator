@@ -47,6 +47,28 @@ impl Theme {
         }
     }
 
+    /// Modern theme: white text, electric blue accents, dark blue header.
+    pub fn modern() -> Self {
+        Self {
+            verified: Color::Rgb(0, 200, 80),
+            not_found: Color::Rgb(255, 80, 80),
+            author_mismatch: Color::Rgb(255, 200, 0),
+            retracted: Color::Rgb(200, 50, 200),
+
+            header_fg: Color::White,
+            header_bg: Color::Rgb(30, 60, 120),
+            border: Color::Rgb(60, 60, 80),
+            text: Color::White,
+            dim: Color::Rgb(120, 120, 140),
+            highlight_bg: Color::Rgb(30, 40, 80),
+            active: Color::Rgb(60, 140, 255),
+            queued: Color::Rgb(80, 80, 100),
+            spinner: Color::Rgb(60, 140, 255),
+            footer_fg: Color::Rgb(120, 120, 140),
+            footer_bg: Color::Reset,
+        }
+    }
+
     pub fn status_color(&self, status: &Status) -> Color {
         match status {
             Status::Verified => self.verified,
@@ -70,6 +92,7 @@ impl Theme {
         match phase {
             RefPhase::Pending => Style::default().fg(self.dim),
             RefPhase::Checking => Style::default().fg(self.spinner).add_modifier(Modifier::BOLD),
+            RefPhase::Retrying => Style::default().fg(self.author_mismatch).add_modifier(Modifier::BOLD),
             RefPhase::Done => Style::default().fg(self.text),
         }
     }

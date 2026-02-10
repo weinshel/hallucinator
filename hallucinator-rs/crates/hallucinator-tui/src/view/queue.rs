@@ -4,34 +4,101 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, InputMode};
 use crate::model::queue::PaperPhase;
 use crate::theme::Theme;
 use crate::view::{spinner_char, truncate};
 
-/// Render the Queue screen.
-pub fn render(f: &mut Frame, app: &App) {
+/// Render the Queue screen into the given area.
+pub fn render_in(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = &app.theme;
-    let area = f.area();
 
-    let chunks = Layout::vertical([
+    let has_search = app.input_mode == InputMode::Search || !app.search_query.is_empty();
+    let mut constraints = vec![
         Constraint::Length(1), // header
-        Constraint::Min(5),   // table
-        Constraint::Length(1), // footer / stats
-    ])
-    .split(area);
+        Constraint::Length(1), // progress bar
+    ];
+    if has_search {
+        constraints.push(Constraint::Length(1)); // search bar
+    }
+    constraints.push(Constraint::Min(5)); // table
+    constraints.push(Constraint::Length(1)); // footer / stats
 
-    render_header(f, chunks[0], theme);
-    render_table(f, chunks[1], app);
-    render_footer(f, chunks[2], app);
+    let chunks = Layout::vertical(constraints).split(area);
+    let mut chunk_idx = 0;
+
+    render_header(f, chunks[chunk_idx], app, theme);
+    chunk_idx += 1;
+
+    render_progress_bar(f, chunks[chunk_idx], app, theme);
+    chunk_idx += 1;
+
+    if has_search {
+        render_search_bar(f, chunks[chunk_idx], app, theme);
+        chunk_idx += 1;
+    }
+
+    let table_area = chunks[chunk_idx];
+    render_table(f, table_area, app);
+    app.last_table_area = Some(table_area);
+    chunk_idx += 1;
+
+    render_footer(f, chunks[chunk_idx], app);
 }
 
-fn render_header(f: &mut Frame, area: Rect, theme: &Theme) {
-    let header = Paragraph::new(Line::from(vec![
+fn render_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let mut spans = vec![
         Span::styled(" HALLUCINATOR ", theme.header_style()),
         Span::styled(" Queue", Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
-    ]));
+    ];
+
+    // Filter indicator
+    if app.queue_filter != crate::model::queue::QueueFilter::All {
+        spans.push(Span::styled(
+            format!(" [filter: {}]", app.queue_filter.label()),
+            Style::default().fg(theme.active),
+        ));
+    }
+
+    let header = Paragraph::new(Line::from(spans));
     f.render_widget(header, area);
+}
+
+fn render_progress_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let total = app.papers.len();
+    let done = app.papers.iter().filter(|p| p.phase.is_terminal()).count();
+    let ratio = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+
+    // Build a text progress bar: ██████░░░░ 12/50
+    let bar_width = (area.width as usize).saturating_sub(12);
+    let filled = (ratio * bar_width as f64) as usize;
+    let empty = bar_width.saturating_sub(filled);
+
+    let bar: String = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(empty);
+    let elapsed = app.elapsed();
+    let elapsed_str = format!("{}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
+
+    let line = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(&bar, Style::default().fg(theme.active)),
+        Span::styled(
+            format!(" {}/{} ", done, total),
+            Style::default().fg(theme.text),
+        ),
+        Span::styled(elapsed_str, Style::default().fg(theme.dim)),
+    ]);
+
+    f.render_widget(Paragraph::new(line), area);
+}
+
+fn render_search_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let cursor = if app.input_mode == InputMode::Search { "\u{2588}" } else { "" };
+    let line = Line::from(vec![
+        Span::styled(" /", Style::default().fg(theme.active).add_modifier(Modifier::BOLD)),
+        Span::styled(&app.search_query, Style::default().fg(theme.text)),
+        Span::styled(cursor, Style::default().fg(theme.active)),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
 }
 
 fn render_table(f: &mut Frame, area: Rect, app: &App) {
@@ -51,7 +118,7 @@ fn render_table(f: &mut Frame, area: Rect, app: &App) {
     )
     .height(1);
 
-    // Use the pre-computed sorted indices
+    // Use the pre-computed sorted/filtered indices
     let indices = &app.queue_sorted;
 
     // Build data rows
@@ -76,7 +143,7 @@ fn render_table(f: &mut Frame, area: Rect, app: &App) {
                 let refs = if paper.total_refs > 0 {
                     format!("{}", paper.total_refs)
                 } else {
-                    "—".to_string()
+                    "\u{2014}".to_string()
                 };
                 Row::new(vec![
                     Cell::from(num),
@@ -105,7 +172,7 @@ fn render_table(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(if paper.total_refs > 0 {
                         format!("{}", paper.total_refs)
                     } else {
-                        "—".to_string()
+                        "\u{2014}".to_string()
                     }),
                     Cell::from(format!("{}", problems)).style(prob_style),
                     Cell::from(status_text).style(phase_style),
@@ -164,7 +231,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let total_mismatch: usize = app.papers.iter().map(|p| p.stats.author_mismatch).sum();
     let total_retracted: usize = app.papers.iter().map(|p| p.stats.retracted).sum();
 
-    let footer = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!(" {}/{} papers ", done, total),
             Style::default().fg(theme.text),
@@ -185,12 +252,40 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             format!("R:{} ", total_retracted),
             Style::default().fg(theme.retracted),
         ),
-        Span::styled(
-            " | j/k:nav  Enter:details  s:sort  ?:help  q:quit",
-            theme.footer_style(),
-        ),
-    ]);
+    ];
 
+    // Show [Space] Start/Stop indicator
+    if !app.processing_started && !app.pdf_paths.is_empty() {
+        spans.push(Span::styled(
+            " [Space] Start ",
+            Style::default()
+                .fg(theme.header_fg)
+                .bg(theme.active)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            " j/k:nav  Enter:open  o:add  ,:config  ?:help  q:quit",
+            theme.footer_style(),
+        ));
+    } else if app.processing_started && !app.batch_complete {
+        spans.push(Span::styled(
+            " [Space] Stop ",
+            Style::default()
+                .fg(theme.header_fg)
+                .bg(theme.not_found)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            " j/k:nav  Enter:open  s:sort  f:filter  /:search  ?:help",
+            theme.footer_style(),
+        ));
+    } else {
+        spans.push(Span::styled(
+            " | j/k:nav  Enter:open  s:sort  f:filter  /:search  o:add  ?:help  q:quit",
+            theme.footer_style(),
+        ));
+    }
+
+    let footer = Line::from(spans);
     f.render_widget(Paragraph::new(footer), area);
 }
-

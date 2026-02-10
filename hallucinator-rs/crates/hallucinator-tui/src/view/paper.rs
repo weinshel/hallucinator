@@ -4,43 +4,56 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
-use crate::app::App;
-use crate::model::paper::RefPhase;
+use crate::app::{App, InputMode};
+use crate::model::paper::{PaperFilter, RefPhase};
 use crate::theme::Theme;
 use crate::view::{spinner_char, truncate};
 
-/// Render the Paper detail screen.
-pub fn render(f: &mut Frame, app: &App, paper_index: usize) {
+/// Render the Paper detail screen into the given area.
+pub fn render_in(f: &mut Frame, app: &mut App, paper_index: usize, area: Rect) {
     let theme = &app.theme;
-    let area = f.area();
     let paper = &app.papers[paper_index];
     let show_preview = area.height >= 40;
+    let has_search = app.input_mode == InputMode::Search || !app.search_query.is_empty();
 
     let mut constraints = vec![
         Constraint::Length(1), // breadcrumb
         Constraint::Length(3), // progress bar
-        Constraint::Min(8),   // ref table
     ];
+    if has_search {
+        constraints.push(Constraint::Length(1)); // search bar
+    }
+    constraints.push(Constraint::Min(8)); // ref table
     if show_preview {
         constraints.push(Constraint::Length(6)); // raw citation preview
     }
     constraints.push(Constraint::Length(1)); // footer
 
     let chunks = Layout::vertical(constraints).split(area);
+    let mut ci = 0;
 
-    render_breadcrumb(f, chunks[0], &paper.filename, theme);
-    render_progress(f, chunks[1], paper, app.tick, theme);
-    render_ref_table(f, chunks[2], app, paper_index);
+    render_breadcrumb(f, chunks[ci], &paper.filename, theme);
+    ci += 1;
+    render_progress(f, chunks[ci], paper, app.tick, theme);
+    ci += 1;
 
-    let footer_chunk = if show_preview {
-        // Render preview of the selected reference's raw citation
-        render_preview(f, chunks[3], app, paper_index);
-        chunks[4]
-    } else {
-        chunks[3]
-    };
+    if has_search {
+        render_search_bar(f, chunks[ci], app, theme);
+        ci += 1;
+    }
 
-    render_footer(f, footer_chunk, paper, theme);
+    let table_area = chunks[ci];
+    render_ref_table(f, table_area, app, paper_index);
+    app.last_table_area = Some(table_area);
+    ci += 1;
+
+    if show_preview {
+        render_preview(f, chunks[ci], app, paper_index);
+        ci += 1;
+    }
+
+    let paper = &app.papers[paper_index];
+    render_footer(f, chunks[ci], app, paper, theme);
 }
 
 fn render_breadcrumb(f: &mut Frame, area: Rect, filename: &str, theme: &Theme) {
@@ -87,6 +100,16 @@ fn render_progress(
     f.render_widget(gauge, area);
 }
 
+fn render_search_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let cursor = if app.input_mode == InputMode::Search { "\u{2588}" } else { "" };
+    let line = Line::from(vec![
+        Span::styled(" /", Style::default().fg(theme.active).add_modifier(Modifier::BOLD)),
+        Span::styled(&app.search_query, Style::default().fg(theme.text)),
+        Span::styled(cursor, Style::default().fg(theme.active)),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
+}
+
 fn render_ref_table(f: &mut Frame, area: Rect, app: &App, paper_index: usize) {
     let theme = &app.theme;
     let wide = area.width >= 80;
@@ -104,12 +127,15 @@ fn render_ref_table(f: &mut Frame, area: Rect, app: &App, paper_index: usize) {
     .height(1);
 
     let refs = &app.ref_states[paper_index];
-    let rows: Vec<Row> = refs
+    let indices = app.paper_ref_indices(paper_index);
+
+    let rows: Vec<Row> = indices
         .iter()
-        .map(|rs| {
+        .map(|&ri| {
+            let rs = &refs[ri];
             let num = format!("{}", rs.index + 1);
             let title_display = match rs.phase {
-                RefPhase::Checking => {
+                RefPhase::Checking | RefPhase::Retrying => {
                     format!("{} {}", spinner_char(app.tick), rs.title)
                 }
                 _ => rs.title.clone(),
@@ -118,16 +144,20 @@ fn render_ref_table(f: &mut Frame, area: Rect, app: &App, paper_index: usize) {
             let phase_style = theme.ref_phase_style(&rs.phase);
 
             let verdict = rs.verdict_label();
-            let verdict_style = match &rs.result {
-                Some(r) => {
-                    let color = if r.retraction_info.as_ref().map_or(false, |ri| ri.is_retracted) {
-                        theme.retracted
-                    } else {
-                        theme.status_color(&r.status)
-                    };
-                    Style::default().fg(color).add_modifier(Modifier::BOLD)
+            let verdict_style = if rs.marked_safe {
+                Style::default().fg(theme.verified).add_modifier(Modifier::DIM)
+            } else {
+                match &rs.result {
+                    Some(r) => {
+                        let color = if r.retraction_info.as_ref().map_or(false, |ri| ri.is_retracted) {
+                            theme.retracted
+                        } else {
+                            theme.status_color(&r.status)
+                        };
+                        Style::default().fg(color).add_modifier(Modifier::BOLD)
+                    }
+                    None => phase_style,
                 }
-                None => phase_style,
             };
 
             let mut cells = vec![
@@ -148,16 +178,21 @@ fn render_ref_table(f: &mut Frame, area: Rect, app: &App, paper_index: usize) {
         vec![
             Constraint::Length(4),
             Constraint::Min(20),
-            Constraint::Length(12),
+            Constraint::Length(14),
             Constraint::Length(18),
         ]
     } else {
         vec![
             Constraint::Length(4),
             Constraint::Min(15),
-            Constraint::Length(12),
+            Constraint::Length(14),
         ]
     };
+
+    let block_title = format!(
+        " References | sort: {} (s) ",
+        app.paper_sort.label()
+    );
 
     let table = Table::new(rows, &widths)
         .header(header)
@@ -165,7 +200,7 @@ fn render_ref_table(f: &mut Frame, area: Rect, app: &App, paper_index: usize) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(theme.border_style())
-                .title(" References "),
+                .title(block_title),
         )
         .row_highlight_style(theme.highlight_style());
 
@@ -177,9 +212,11 @@ fn render_ref_table(f: &mut Frame, area: Rect, app: &App, paper_index: usize) {
 fn render_preview(f: &mut Frame, area: Rect, app: &App, paper_index: usize) {
     let theme = &app.theme;
     let refs = &app.ref_states[paper_index];
+    let indices = app.paper_ref_indices(paper_index);
 
-    let text = if app.paper_cursor < refs.len() {
-        let rs = &refs[app.paper_cursor];
+    let text = if app.paper_cursor < indices.len() {
+        let ri = indices[app.paper_cursor];
+        let rs = &refs[ri];
         match &rs.result {
             Some(r) => r.raw_citation.clone(),
             None => "Pending...".to_string(),
@@ -204,10 +241,11 @@ fn render_preview(f: &mut Frame, area: Rect, app: &App, paper_index: usize) {
 fn render_footer(
     f: &mut Frame,
     area: Rect,
+    app: &App,
     paper: &crate::model::queue::PaperState,
     theme: &Theme,
 ) {
-    let footer = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!(
                 " V:{} M:{} NF:{} R:{} ",
@@ -218,11 +256,21 @@ fn render_footer(
             ),
             Style::default().fg(theme.text),
         ),
-        Span::styled(
-            " | j/k:nav  Enter:detail  Esc:back  ?:help  q:quit",
-            theme.footer_style(),
-        ),
-    ]);
+    ];
 
+    // Filter indicator
+    if app.paper_filter != PaperFilter::All {
+        spans.push(Span::styled(
+            format!("[filter: {}] ", app.paper_filter.label()),
+            Style::default().fg(theme.active),
+        ));
+    }
+
+    spans.push(Span::styled(
+        " | j/k:nav  Space:safe  Enter:detail  s:sort  f:filter  /:search  Esc:back",
+        theme.footer_style(),
+    ));
+
+    let footer = Line::from(spans);
     f.render_widget(Paragraph::new(footer), area);
 }

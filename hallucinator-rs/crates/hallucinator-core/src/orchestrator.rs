@@ -1,8 +1,9 @@
 use crate::authors::validate_authors;
 use crate::db::DatabaseBackend;
-use crate::{Config, Status};
+use crate::{Config, DbResult, DbStatus, Status};
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Result of querying all databases for a single reference.
 #[derive(Debug, Clone)]
@@ -12,9 +13,12 @@ pub struct DbSearchResult {
     pub found_authors: Vec<String>,
     pub paper_url: Option<String>,
     pub failed_dbs: Vec<String>,
+    pub db_results: Vec<DbResult>,
 }
 
 /// Query all databases concurrently for a single reference, with early exit on match.
+///
+/// If `on_db_complete` is provided, it is called for each database as it finishes.
 pub async fn query_all_databases(
     title: &str,
     ref_authors: &[String],
@@ -22,6 +26,7 @@ pub async fn query_all_databases(
     client: &reqwest::Client,
     longer_timeout: bool,
     only_dbs: Option<&[String]>,
+    on_db_complete: Option<&(dyn Fn(DbResult) + Send + Sync)>,
 ) -> DbSearchResult {
     let check_openalex_authors = config.check_openalex_authors;
     let timeout = if longer_timeout {
@@ -43,8 +48,12 @@ pub async fn query_all_databases(
             found_authors: vec![],
             paper_url: None,
             failed_dbs: vec![],
+            db_results: vec![],
         };
     }
+
+    // Collect all DB names upfront for tracking skipped on early exit
+    let all_db_names: HashSet<String> = databases.iter().map(|db| db.name().to_string()).collect();
 
     // Use tokio::select! pattern with JoinSet for early exit
     let mut join_set = tokio::task::JoinSet::new();
@@ -57,52 +66,128 @@ pub async fn query_all_databases(
 
         join_set.spawn(async move {
             let name = db.name().to_string();
+            let start = Instant::now();
             let result = db.query(&title, &client, timeout).await;
-            (name, result, ref_authors)
+            let elapsed = start.elapsed();
+            (name, result, ref_authors, elapsed)
         });
     }
 
     let mut first_mismatch: Option<DbSearchResult> = None;
     let mut failed_dbs = Vec::new();
+    let mut db_results: Vec<DbResult> = Vec::new();
+    let mut completed_db_names: HashSet<String> = HashSet::new();
 
     while let Some(result) = join_set.join_next().await {
-        let (name, query_result, ref_authors) = match result {
+        let (name, query_result, ref_authors, elapsed) = match result {
             Ok(r) => r,
             Err(_) => continue,
         };
 
+        completed_db_names.insert(name.clone());
+
         match query_result {
             Ok((Some(_found_title), found_authors, paper_url)) => {
                 if ref_authors.is_empty() || validate_authors(&ref_authors, &found_authors) {
-                    // Found and verified — abort remaining tasks
+                    // Found and verified — record this DB, mark remaining as Skipped
+                    let db_result = DbResult {
+                        db_name: name.clone(),
+                        status: DbStatus::Match,
+                        elapsed: Some(elapsed),
+                        found_authors: found_authors.clone(),
+                        paper_url: paper_url.clone(),
+                    };
+                    if let Some(cb) = on_db_complete {
+                        cb(db_result.clone());
+                    }
+                    db_results.push(db_result);
+
+                    // Abort remaining tasks
                     join_set.abort_all();
+
+                    // Mark unfinished DBs as Skipped
+                    for db_name in &all_db_names {
+                        if !completed_db_names.contains(db_name) {
+                            let skipped = DbResult {
+                                db_name: db_name.clone(),
+                                status: DbStatus::Skipped,
+                                elapsed: None,
+                                found_authors: vec![],
+                                paper_url: None,
+                            };
+                            if let Some(cb) = on_db_complete {
+                                cb(skipped.clone());
+                            }
+                            db_results.push(skipped);
+                        }
+                    }
+
                     return DbSearchResult {
                         status: Status::Verified,
                         source: Some(name),
                         found_authors,
                         paper_url,
                         failed_dbs: vec![],
+                        db_results,
                     };
-                } else if first_mismatch.is_none() && (name != "OpenAlex" || check_openalex_authors) {
-                    first_mismatch = Some(DbSearchResult {
-                        status: Status::AuthorMismatch,
-                        source: Some(name),
-                        found_authors,
-                        paper_url,
-                        failed_dbs: vec![],
-                    });
+                } else {
+                    let db_result = DbResult {
+                        db_name: name.clone(),
+                        status: DbStatus::AuthorMismatch,
+                        elapsed: Some(elapsed),
+                        found_authors: found_authors.clone(),
+                        paper_url: paper_url.clone(),
+                    };
+                    if let Some(cb) = on_db_complete {
+                        cb(db_result.clone());
+                    }
+                    db_results.push(db_result);
+
+                    if first_mismatch.is_none() && (name != "OpenAlex" || check_openalex_authors) {
+                        first_mismatch = Some(DbSearchResult {
+                            status: Status::AuthorMismatch,
+                            source: Some(name),
+                            found_authors,
+                            paper_url,
+                            failed_dbs: vec![],
+                            db_results: vec![], // filled in at return
+                        });
+                    }
                 }
             }
             Ok((None, _, _)) => {
                 // Not found in this DB
+                let db_result = DbResult {
+                    db_name: name.clone(),
+                    status: DbStatus::NoMatch,
+                    elapsed: Some(elapsed),
+                    found_authors: vec![],
+                    paper_url: None,
+                };
+                if let Some(cb) = on_db_complete {
+                    cb(db_result.clone());
+                }
+                db_results.push(db_result);
             }
             Err(_e) => {
+                let db_result = DbResult {
+                    db_name: name.clone(),
+                    status: DbStatus::Error,
+                    elapsed: Some(elapsed),
+                    found_authors: vec![],
+                    paper_url: None,
+                };
+                if let Some(cb) = on_db_complete {
+                    cb(db_result.clone());
+                }
+                db_results.push(db_result);
                 failed_dbs.push(name);
             }
         }
     }
 
-    if let Some(mismatch) = first_mismatch {
+    if let Some(mut mismatch) = first_mismatch {
+        mismatch.db_results = db_results;
         return mismatch;
     }
 
@@ -111,7 +196,8 @@ pub async fn query_all_databases(
         source: None,
         found_authors: vec![],
         paper_url: None,
-        failed_dbs: failed_dbs,
+        failed_dbs,
+        db_results,
     }
 }
 

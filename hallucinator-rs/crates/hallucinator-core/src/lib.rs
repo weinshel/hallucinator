@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -14,6 +15,27 @@ pub mod retraction;
 // Re-export for convenience
 pub use hallucinator_pdf::{ExtractionResult, Reference, SkipStats};
 pub use orchestrator::{query_all_databases, DbSearchResult};
+
+/// Status of a single database query within an orchestrator run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DbStatus {
+    Match,
+    NoMatch,
+    AuthorMismatch,
+    Timeout,
+    Error,
+    Skipped,
+}
+
+/// Result from querying a single database backend.
+#[derive(Debug, Clone)]
+pub struct DbResult {
+    pub db_name: String,
+    pub status: DbStatus,
+    pub elapsed: Option<Duration>,
+    pub found_authors: Vec<String>,
+    pub paper_url: Option<String>,
+}
 
 #[derive(Error, Debug)]
 pub enum CoreError {
@@ -70,6 +92,7 @@ pub struct ValidationResult {
     pub found_authors: Vec<String>,
     pub paper_url: Option<String>,
     pub failed_dbs: Vec<String>,
+    pub db_results: Vec<DbResult>,
     pub doi_info: Option<DoiInfo>,
     pub arxiv_info: Option<ArxivInfo>,
     pub retraction_info: Option<RetractionInfo>,
@@ -97,6 +120,13 @@ pub enum ProgressEvent {
     },
     RetryPass {
         count: usize,
+    },
+    DatabaseQueryComplete {
+        paper_index: usize,
+        ref_index: usize,
+        db_name: String,
+        status: DbStatus,
+        elapsed: Duration,
     },
 }
 

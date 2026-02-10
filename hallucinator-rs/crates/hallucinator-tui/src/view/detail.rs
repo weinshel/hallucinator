@@ -4,16 +4,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use hallucinator_core::Status;
+use hallucinator_core::{DbStatus, Status};
 
 use crate::app::App;
 use crate::theme::Theme;
 use crate::view::truncate;
 
-/// Render the Reference Detail screen.
-pub fn render(f: &mut Frame, app: &App, paper_index: usize, ref_index: usize) {
+/// Render the Reference Detail screen into the given area.
+pub fn render_in(f: &mut Frame, app: &App, paper_index: usize, ref_index: usize, area: Rect) {
     let theme = &app.theme;
-    let area = f.area();
     let paper = &app.papers[paper_index];
     let refs = &app.ref_states[paper_index];
     let rs = &refs[ref_index];
@@ -45,6 +44,15 @@ pub fn render(f: &mut Frame, app: &App, paper_index: usize, ref_index: usize) {
     // --- Content ---
     let mut lines: Vec<Line> = Vec::new();
 
+    // Safe marker
+    if rs.marked_safe {
+        lines.push(Line::from(Span::styled(
+            "  \u{2713} Marked as SAFE (false positive)",
+            Style::default().fg(theme.verified).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+    }
+
     // CITATION section
     section_header(&mut lines, "CITATION", theme);
     labeled_line(&mut lines, "Title", &rs.title, theme);
@@ -69,12 +77,12 @@ pub fn render(f: &mut Frame, app: &App, paper_index: usize, ref_index: usize) {
 
         let (status_text, status_color) =
             if result.retraction_info.as_ref().map_or(false, |ri| ri.is_retracted) {
-                ("RETRACTED", theme.retracted)
+                ("\u{2620} RETRACTED", theme.retracted)
             } else {
                 match result.status {
-                    Status::Verified => ("Verified", theme.verified),
-                    Status::NotFound => ("Not Found", theme.not_found),
-                    Status::AuthorMismatch => ("Author Mismatch", theme.author_mismatch),
+                    Status::Verified => ("\u{2713} Verified", theme.verified),
+                    Status::NotFound => ("\u{2717} Not Found", theme.not_found),
+                    Status::AuthorMismatch => ("\u{26A0} Author Mismatch", theme.author_mismatch),
                 }
             };
 
@@ -92,12 +100,95 @@ pub fn render(f: &mut Frame, app: &App, paper_index: usize, ref_index: usize) {
             labeled_line(&mut lines, "Source", source, theme);
         }
         if !result.found_authors.is_empty() {
+            // Show overlap count if ref_authors are available
+            let overlap = if !result.ref_authors.is_empty() {
+                let ref_set: std::collections::HashSet<_> = result.ref_authors.iter()
+                    .map(|a| a.to_lowercase())
+                    .collect();
+                let found_set: std::collections::HashSet<_> = result.found_authors.iter()
+                    .map(|a| a.to_lowercase())
+                    .collect();
+                let overlap_count = ref_set.intersection(&found_set).count();
+                format!(" ({}/{})", overlap_count, result.ref_authors.len())
+            } else {
+                String::new()
+            };
             labeled_line(
                 &mut lines,
                 "Found Authors",
-                &result.found_authors.join(", "),
+                &format!("{}{}", result.found_authors.join(", "), overlap),
                 theme,
             );
+        }
+
+        // Author mismatch detail
+        if result.status == Status::AuthorMismatch && !result.ref_authors.is_empty() {
+            labeled_line(
+                &mut lines,
+                "Expected",
+                &result.ref_authors.join(", "),
+                theme,
+            );
+        }
+
+        // DATABASE RESULTS section (per-DB table)
+        if !result.db_results.is_empty() {
+            lines.push(Line::from(""));
+            section_header(&mut lines, "DATABASE RESULTS", theme);
+
+            // Header
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:<20}{:<16}{:<8}{}", "Database", "Result", "Time", "Notes"),
+                    Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+                Style::default().fg(theme.dim),
+            )));
+
+            for db_result in &result.db_results {
+                let (result_text, result_color) = match db_result.status {
+                    DbStatus::Match => ("\u{2713} match", theme.verified),
+                    DbStatus::NoMatch => ("no match", theme.dim),
+                    DbStatus::AuthorMismatch => ("\u{26A0} mismatch", theme.author_mismatch),
+                    DbStatus::Timeout => ("timeout", theme.not_found),
+                    DbStatus::Error => ("error", theme.not_found),
+                    DbStatus::Skipped => ("(skipped)", theme.dim),
+                };
+
+                let time_str = match db_result.elapsed {
+                    Some(d) => format!("{:.1}s", d.as_secs_f64()),
+                    None => "\u{2014}".to_string(),
+                };
+
+                let mut notes = String::new();
+                if db_result.status == DbStatus::Match && result.source.as_deref() == Some(&db_result.db_name) {
+                    notes = "\u{2190} verified (early exit)".to_string();
+                } else if db_result.status == DbStatus::Skipped {
+                    notes = "early exit".to_string();
+                }
+
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {:<20}", db_result.db_name),
+                        Style::default().fg(theme.text),
+                    ),
+                    Span::styled(
+                        format!("{:<16}", result_text),
+                        Style::default().fg(result_color),
+                    ),
+                    Span::styled(
+                        format!("{:<8}", time_str),
+                        Style::default().fg(theme.dim),
+                    ),
+                    Span::styled(
+                        notes,
+                        Style::default().fg(theme.dim),
+                    ),
+                ]));
+            }
         }
 
         // IDENTIFIERS section
@@ -131,23 +222,50 @@ pub fn render(f: &mut Frame, app: &App, paper_index: usize, ref_index: usize) {
             }
         }
 
+        // LINKS section — show URLs on their own lines for terminal auto-detection
+        lines.push(Line::from(""));
+        section_header(&mut lines, "LINKS", theme);
+        let scholar_query = encode_url_param(&rs.title);
+        let scholar_url = format!("https://scholar.google.com/scholar?q={}", scholar_query);
+        url_line(&mut lines, "Google Scholar", &scholar_url, theme);
+        if let Some(doi) = &result.doi_info {
+            url_line(&mut lines, "DOI", &format!("https://doi.org/{}", doi.doi), theme);
+        }
+        if let Some(arxiv) = &result.arxiv_info {
+            url_line(&mut lines, "arXiv", &format!("https://arxiv.org/abs/{}", arxiv.arxiv_id), theme);
+        }
+
         // RETRACTION section
         if let Some(retraction) = &result.retraction_info {
             if retraction.is_retracted {
                 lines.push(Line::from(""));
-                section_header(&mut lines, "RETRACTION", theme);
+                // Heavy box border for retraction
                 lines.push(Line::from(Span::styled(
-                    "  ⚠ This paper has been retracted!",
+                    "  \u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2557}",
+                    Style::default().fg(theme.retracted),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "  \u{2551} \u{26A0} WARNING: This paper has been retracted!  \u{2551}",
                     Style::default()
                         .fg(theme.retracted)
                         .add_modifier(Modifier::BOLD),
                 )));
                 if let Some(rdoi) = &retraction.retraction_doi {
-                    labeled_line(&mut lines, "Retraction DOI", rdoi, theme);
+                    lines.push(Line::from(Span::styled(
+                        format!("  \u{2551} DOI: {:<38}\u{2551}", rdoi),
+                        Style::default().fg(theme.retracted),
+                    )));
                 }
                 if let Some(rsrc) = &retraction.retraction_source {
-                    labeled_line(&mut lines, "Source", rsrc, theme);
+                    lines.push(Line::from(Span::styled(
+                        format!("  \u{2551} Source: {:<35}\u{2551}", rsrc),
+                        Style::default().fg(theme.retracted),
+                    )));
                 }
+                lines.push(Line::from(Span::styled(
+                    "  \u{255A}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255D}",
+                    Style::default().fg(theme.retracted),
+                )));
             }
         }
 
@@ -204,10 +322,45 @@ fn labeled_line<'a>(lines: &mut Vec<Line<'a>>, label: &'a str, value: &str, them
     ]));
 }
 
+/// Render a link: label on one line, URL on the next (for terminal click detection).
+fn url_line(lines: &mut Vec<Line<'_>>, label: &str, url: &str, theme: &Theme) {
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  {label:<16}"),
+            Style::default().fg(theme.dim),
+        ),
+    ]));
+    lines.push(Line::from(Span::styled(
+        format!("    {url}"),
+        Style::default().fg(theme.active).add_modifier(Modifier::UNDERLINED),
+    )));
+}
+
 fn render_footer(f: &mut Frame, area: Rect, theme: &Theme) {
     let footer = Line::from(Span::styled(
-        " j/k:scroll  Esc:back  ?:help  q:quit",
+        " j/k:scroll  Space:toggle safe  r:retry  y:copy ref  Esc:back  ?:help",
         theme.footer_style(),
     ));
     f.render_widget(Paragraph::new(footer), area);
 }
+
+/// Percent-encode a string for use in a URL query parameter.
+fn encode_url_param(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                out.push('%');
+                out.push(char::from(HEX[(b >> 4) as usize]));
+                out.push(char::from(HEX[(b & 0xf) as usize]));
+            }
+        }
+    }
+    out
+}
+
+const HEX: &[u8; 16] = b"0123456789ABCDEF";

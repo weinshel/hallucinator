@@ -1,5 +1,20 @@
-use hallucinator_core::{ProgressEvent, ValidationResult};
+use std::path::PathBuf;
+
+use hallucinator_core::{ProgressEvent, Reference, ValidationResult};
 use hallucinator_pdf::SkipStats;
+
+/// Commands sent from the TUI to the backend.
+pub enum BackendCommand {
+    /// Start processing files. `starting_index` is the offset into the app's paper list.
+    ProcessFiles {
+        files: Vec<PathBuf>,
+        starting_index: usize,
+        max_concurrent_papers: usize,
+        config: hallucinator_core::Config,
+    },
+    /// Cancel the current batch.
+    CancelProcessing,
+}
 
 /// Events flowing from the backend processing task to the TUI.
 #[derive(Debug, Clone)]
@@ -14,6 +29,7 @@ pub enum BackendEvent {
         paper_index: usize,
         ref_count: usize,
         ref_titles: Vec<String>,
+        references: Vec<Reference>,
         skip_stats: SkipStats,
     },
     /// PDF extraction failed.

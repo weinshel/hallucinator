@@ -2,8 +2,8 @@ use crate::doi::{check_doi_match, validate_doi, DoiMatchResult};
 use crate::orchestrator::query_all_databases;
 use crate::retraction::{check_retraction, check_retraction_by_title};
 use crate::{
-    ArxivInfo, Config, DoiInfo, ProgressEvent, Reference, RetractionInfo, Status,
-    ValidationResult,
+    ArxivInfo, Config, DbResult, DbStatus, DoiInfo, ProgressEvent, Reference, RetractionInfo,
+    Status, ValidationResult,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,22 +59,46 @@ pub async fn check_references(
                 title: title.to_string(),
             });
 
+            // Build DB-complete callback that emits ProgressEvent::DatabaseQueryComplete
+            let progress_for_db = Arc::clone(&progress);
+            let ref_index = i;
+            let on_db_complete = move |db_result: DbResult| {
+                progress_for_db(ProgressEvent::DatabaseQueryComplete {
+                    paper_index: 0, // filled in by the TUI layer via BackendEvent
+                    ref_index,
+                    db_name: db_result.db_name.clone(),
+                    status: db_result.status.clone(),
+                    elapsed: db_result.elapsed.unwrap_or_default(),
+                });
+            };
+
             let result =
-                check_single_reference(&reference, &config, &client, false).await;
+                check_single_reference(&reference, &config, &client, false, Some(&on_db_complete))
+                    .await;
 
             // Emit warning if some databases failed/timed out
             if !result.failed_dbs.is_empty() {
                 let context = match result.status {
                     Status::NotFound => "not found in other DBs (will retry)".to_string(),
-                    Status::Verified => format!("verified via {}", result.source.as_deref().unwrap_or("unknown")),
-                    Status::AuthorMismatch => format!("author mismatch via {}", result.source.as_deref().unwrap_or("unknown")),
+                    Status::Verified => format!(
+                        "verified via {}",
+                        result.source.as_deref().unwrap_or("unknown")
+                    ),
+                    Status::AuthorMismatch => format!(
+                        "author mismatch via {}",
+                        result.source.as_deref().unwrap_or("unknown")
+                    ),
                 };
                 progress(ProgressEvent::Warning {
                     index: i,
                     total,
                     title: title.to_string(),
                     failed_dbs: result.failed_dbs.clone(),
-                    message: format!("{} timed out; {}", result.failed_dbs.join(", "), context),
+                    message: format!(
+                        "{} timed out; {}",
+                        result.failed_dbs.join(", "),
+                        context
+                    ),
                 });
             }
 
@@ -115,11 +139,24 @@ pub async fn check_references(
             let prev_result = results[i].as_ref().unwrap();
             let failed_dbs = prev_result.failed_dbs.clone();
 
+            let progress_for_db = Arc::clone(&progress);
+            let ref_index = i;
+            let on_db_complete = move |db_result: DbResult| {
+                progress_for_db(ProgressEvent::DatabaseQueryComplete {
+                    paper_index: 0,
+                    ref_index,
+                    db_name: db_result.db_name.clone(),
+                    status: db_result.status.clone(),
+                    elapsed: db_result.elapsed.unwrap_or_default(),
+                });
+            };
+
             let result = check_single_reference_retry(
                 &reference,
                 &config,
                 &client,
                 &failed_dbs,
+                Some(&on_db_complete),
             )
             .await;
 
@@ -144,6 +181,7 @@ async fn check_single_reference(
     config: &Config,
     client: &reqwest::Client,
     longer_timeout: bool,
+    on_db_complete: Option<&(dyn Fn(DbResult) + Send + Sync)>,
 ) -> ValidationResult {
     let title = reference.title.as_deref().unwrap_or("");
     let timeout = Duration::from_secs(config.db_timeout_secs);
@@ -190,6 +228,13 @@ async fn check_single_reference(
                     found_authors: doi_authors,
                     paper_url: Some(format!("https://doi.org/{}", doi)),
                     failed_dbs: vec![],
+                    db_results: vec![DbResult {
+                        db_name: "DOI".into(),
+                        status: DbStatus::Match,
+                        elapsed: None,
+                        found_authors: vec![],
+                        paper_url: Some(format!("https://doi.org/{}", doi)),
+                    }],
                     doi_info,
                     arxiv_info: None,
                     retraction_info,
@@ -208,6 +253,13 @@ async fn check_single_reference(
                     found_authors: doi_authors,
                     paper_url: Some(format!("https://doi.org/{}", doi)),
                     failed_dbs: vec![],
+                    db_results: vec![DbResult {
+                        db_name: "DOI".into(),
+                        status: DbStatus::AuthorMismatch,
+                        elapsed: None,
+                        found_authors: vec![],
+                        paper_url: Some(format!("https://doi.org/{}", doi)),
+                    }],
                     doi_info,
                     arxiv_info: None,
                     retraction_info: None,
@@ -220,8 +272,16 @@ async fn check_single_reference(
     }
 
     // Step 2: Query all databases concurrently
-    let db_result =
-        query_all_databases(title, &reference.authors, config, client, longer_timeout, None).await;
+    let db_result = query_all_databases(
+        title,
+        &reference.authors,
+        config,
+        client,
+        longer_timeout,
+        None,
+        on_db_complete,
+    )
+    .await;
 
     // Step 3: Check retraction by title if verified
     let retraction_info = if db_result.status == Status::Verified {
@@ -248,6 +308,7 @@ async fn check_single_reference(
         found_authors: db_result.found_authors,
         paper_url: db_result.paper_url,
         failed_dbs: db_result.failed_dbs,
+        db_results: db_result.db_results,
         doi_info,
         arxiv_info: reference
             .arxiv_id
@@ -267,6 +328,7 @@ async fn check_single_reference_retry(
     config: &Config,
     client: &reqwest::Client,
     failed_dbs: &[String],
+    on_db_complete: Option<&(dyn Fn(DbResult) + Send + Sync)>,
 ) -> ValidationResult {
     let title = reference.title.as_deref().unwrap_or("");
 
@@ -277,6 +339,7 @@ async fn check_single_reference_retry(
         client,
         true, // longer timeout for retries
         Some(failed_dbs),
+        on_db_complete,
     )
     .await;
 
@@ -289,6 +352,7 @@ async fn check_single_reference_retry(
         found_authors: db_result.found_authors,
         paper_url: db_result.paper_url,
         failed_dbs: db_result.failed_dbs,
+        db_results: db_result.db_results,
         doi_info: None,
         arxiv_info: None,
         retraction_info: None,

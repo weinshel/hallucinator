@@ -363,6 +363,10 @@ fn send_progress_event(
         ProgressEvent::RetryPass { count } => {
             sse_event("retry_pass", &RetryPassEvent { count: *count })
         }
+        ProgressEvent::DatabaseQueryComplete { .. } => {
+            // Not sent via SSE (detail only needed in TUI)
+            return;
+        }
     };
 
     // Use try_send since we're in a sync context.

@@ -21,80 +21,142 @@ pub async fn run_batch(
     tx: mpsc::UnboundedSender<BackendEvent>,
     cancel: CancellationToken,
 ) {
+    run_batch_with_offset(pdfs, config, tx, cancel, 0, 1).await;
+}
+
+/// Run batch validation with paper indices starting at `offset`.
+///
+/// Spawns `max_concurrent_papers` worker tasks that pull from a shared work
+/// queue. Each worker processes one paper at a time, then grabs the next.
+pub async fn run_batch_with_offset(
+    pdfs: Vec<PathBuf>,
+    config: Config,
+    tx: mpsc::UnboundedSender<BackendEvent>,
+    cancel: CancellationToken,
+    offset: usize,
+    max_concurrent_papers: usize,
+) {
     let config = Arc::new(config);
+    let num_workers = max_concurrent_papers.max(1);
 
-    for (paper_index, pdf_path) in pdfs.iter().enumerate() {
-        if cancel.is_cancelled() {
-            break;
-        }
+    // Work queue: each item is (paper_index, path)
+    let (work_tx, work_rx) = mpsc::channel::<(usize, PathBuf)>(pdfs.len().max(1));
 
-        // Signal extraction start
-        let _ = tx.send(BackendEvent::ExtractionStarted { paper_index });
+    // Feed the queue upfront
+    for (i, pdf_path) in pdfs.into_iter().enumerate() {
+        let _ = work_tx.send((offset + i, pdf_path)).await;
+    }
+    drop(work_tx); // close sender so workers exit when queue is drained
 
-        // Extract references (blocking MuPDF call)
-        let path = pdf_path.clone();
-        let extraction: Result<ExtractionResult, String> =
-            tokio::task::spawn_blocking(move || {
-                hallucinator_pdf::extract_references(&path)
-                    .map_err(|e| format!("PDF extraction failed: {}", e))
-            })
-            .await
-            .unwrap_or_else(|e| Err(format!("Task join error: {}", e)));
+    // Wrap receiver in Arc<Mutex> so workers can share it
+    let work_rx = Arc::new(tokio::sync::Mutex::new(work_rx));
 
-        let extraction = match extraction {
-            Ok(ext) => ext,
-            Err(error) => {
-                let _ = tx.send(BackendEvent::ExtractionFailed { paper_index, error });
-                continue;
+    let mut handles = Vec::new();
+    for _ in 0..num_workers {
+        let work_rx = work_rx.clone();
+        let config = config.clone();
+        let tx = tx.clone();
+        let cancel = cancel.clone();
+
+        handles.push(tokio::spawn(async move {
+            loop {
+                let item = {
+                    let mut rx = work_rx.lock().await;
+                    rx.recv().await
+                };
+                match item {
+                    Some((paper_index, pdf_path)) => {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        process_single_paper(paper_index, &pdf_path, &config, &tx, &cancel).await;
+                    }
+                    None => break, // queue drained
+                }
             }
-        };
+        }));
+    }
 
-        let skip_stats = extraction.skip_stats.clone();
-        let refs = extraction.references;
-        let ref_titles: Vec<String> = refs
-            .iter()
-            .map(|r| r.title.clone().unwrap_or_default())
-            .collect();
-
-        let _ = tx.send(BackendEvent::ExtractionComplete {
-            paper_index,
-            ref_count: refs.len(),
-            ref_titles,
-            skip_stats,
-        });
-
-        if refs.is_empty() {
-            let _ = tx.send(BackendEvent::PaperComplete {
-                paper_index,
-                results: vec![],
-            });
-            continue;
-        }
-
-        // Build per-paper config (clone the Arc's inner to get owned Config)
-        let paper_config = (*config).clone();
-
-        // Bridge sync progress callback → async channel via unbounded send
-        let tx_progress = tx.clone();
-        let progress_cb = move |event: ProgressEvent| {
-            let _ = tx_progress.send(BackendEvent::Progress {
-                paper_index,
-                event,
-            });
-        };
-
-        let paper_cancel = cancel.clone();
-        let results =
-            hallucinator_core::check_references(refs, paper_config, progress_cb, paper_cancel)
-                .await;
-
-        let _ = tx.send(BackendEvent::PaperComplete {
-            paper_index,
-            results,
-        });
+    for handle in handles {
+        let _ = handle.await;
     }
 
     let _ = tx.send(BackendEvent::BatchComplete);
+}
+
+/// Process a single paper: extract references, validate, send events.
+async fn process_single_paper(
+    paper_index: usize,
+    pdf_path: &PathBuf,
+    config: &Config,
+    tx: &mpsc::UnboundedSender<BackendEvent>,
+    cancel: &CancellationToken,
+) {
+    // Signal extraction start
+    let _ = tx.send(BackendEvent::ExtractionStarted { paper_index });
+
+    // Extract references (blocking MuPDF call)
+    let path = pdf_path.clone();
+    let extraction: Result<ExtractionResult, String> =
+        tokio::task::spawn_blocking(move || {
+            hallucinator_pdf::extract_references(&path)
+                .map_err(|e| format!("PDF extraction failed: {}", e))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task join error: {}", e)));
+
+    let extraction = match extraction {
+        Ok(ext) => ext,
+        Err(error) => {
+            let _ = tx.send(BackendEvent::ExtractionFailed { paper_index, error });
+            return;
+        }
+    };
+
+    let skip_stats = extraction.skip_stats.clone();
+    let refs = extraction.references;
+    let ref_titles: Vec<String> = refs
+        .iter()
+        .map(|r| r.title.clone().unwrap_or_default())
+        .collect();
+
+    let _ = tx.send(BackendEvent::ExtractionComplete {
+        paper_index,
+        ref_count: refs.len(),
+        ref_titles,
+        references: refs.clone(),
+        skip_stats,
+    });
+
+    if refs.is_empty() {
+        let _ = tx.send(BackendEvent::PaperComplete {
+            paper_index,
+            results: vec![],
+        });
+        return;
+    }
+
+    // Build per-paper config
+    let paper_config = (*config).clone();
+
+    // Bridge sync progress callback → async channel via unbounded send
+    let tx_progress = tx.clone();
+    let progress_cb = move |event: ProgressEvent| {
+        let _ = tx_progress.send(BackendEvent::Progress {
+            paper_index,
+            event,
+        });
+    };
+
+    let paper_cancel = cancel.clone();
+    let results =
+        hallucinator_core::check_references(refs, paper_config, progress_cb, paper_cancel)
+            .await;
+
+    let _ = tx.send(BackendEvent::PaperComplete {
+        paper_index,
+        results,
+    });
 }
 
 /// Open offline DBLP database if a path is configured, returning the Arc<Mutex<..>> handle.

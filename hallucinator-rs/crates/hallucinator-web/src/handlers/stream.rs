@@ -45,12 +45,12 @@ async fn handle_stream(
     match fields.file.file_type {
         FileType::Pdf => handle_single_pdf(state, fields, tx, temp_dir).await,
         FileType::Zip => {
-            let pdfs = archive::extract_from_zip(&fields.file.data, temp_dir.path())?;
-            handle_archive(state, fields, pdfs, tx, temp_dir).await
+            let result = archive::extract_from_zip(&fields.file.data, temp_dir.path(), 0)?;
+            handle_archive(state, fields, result.pdfs, tx, temp_dir).await
         }
         FileType::TarGz => {
-            let pdfs = archive::extract_from_tar_gz(&fields.file.data, temp_dir.path())?;
-            handle_archive(state, fields, pdfs, tx, temp_dir).await
+            let result = archive::extract_from_tar_gz(&fields.file.data, temp_dir.path(), 0)?;
+            handle_archive(state, fields, result.pdfs, tx, temp_dir).await
         }
     }
 }

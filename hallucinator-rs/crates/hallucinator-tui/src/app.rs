@@ -450,14 +450,15 @@ impl App {
                 }
                 let dir = self.temp_dir.as_ref().unwrap().path();
 
-                match hallucinator_pdf::archive::extract_archive(path, dir) {
-                    Ok(extracted) => {
+                let max_size = self.config_state.max_archive_size_mb as u64 * 1024 * 1024;
+                match hallucinator_pdf::archive::extract_archive(path, dir, max_size) {
+                    Ok(result) => {
                         let archive_name = path
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        let count = extracted.len();
-                        for pdf in extracted {
+                        let count = result.pdfs.len();
+                        for pdf in result.pdfs {
                             let display_name = format!("{}/{}", archive_name, pdf.filename);
                             self.papers.push(PaperState::new(display_name));
                             self.ref_states.push(Vec::new());
@@ -470,6 +471,9 @@ impl App {
                             if count == 1 { "" } else { "s" },
                             archive_name,
                         ));
+                        for warning in result.warnings {
+                            self.activity.log_warn(warning);
+                        }
                     }
                     Err(e) => {
                         self.activity.log(format!(
@@ -499,6 +503,41 @@ impl App {
     pub fn update(&mut self, action: Action) -> bool {
         // Export modal intercepts
         if self.export_state.active {
+            // If editing path, handle text input
+            if self.export_state.editing_path {
+                match action {
+                    Action::Quit => {
+                        self.should_quit = true;
+                        return true;
+                    }
+                    Action::SearchCancel => {
+                        // Cancel path editing
+                        self.export_state.editing_path = false;
+                        self.input_mode = InputMode::Normal;
+                    }
+                    Action::SearchConfirm => {
+                        // Confirm path edit
+                        let buf = self.export_state.edit_buffer.clone();
+                        if !buf.is_empty() {
+                            self.export_state.output_path = buf;
+                        }
+                        self.export_state.editing_path = false;
+                        self.input_mode = InputMode::Normal;
+                    }
+                    Action::SearchInput(ch) => {
+                        if ch == '\x08' {
+                            self.export_state.edit_buffer.pop();
+                        } else {
+                            self.export_state.edit_buffer.push(ch);
+                        }
+                    }
+                    Action::Tick => {
+                        self.tick = self.tick.wrapping_add(1);
+                    }
+                    _ => {}
+                }
+                return false;
+            }
             match action {
                 Action::Quit => {
                     self.should_quit = true;
@@ -531,6 +570,12 @@ impl App {
                                 crate::view::export::ExportScope::ThisPaper
                             }
                         };
+                    }
+                    2 => {
+                        // Start editing the output path
+                        self.export_state.editing_path = true;
+                        self.export_state.edit_buffer = self.export_state.output_path.clone();
+                        self.input_mode = InputMode::TextInput;
                     }
                     3 => {
                         let path = format!(
@@ -1060,7 +1105,7 @@ impl App {
         match self.config_state.section {
             ConfigSection::ApiKeys => 2,
             ConfigSection::Databases => 1 + self.config_state.disabled_dbs.len(),
-            ConfigSection::Concurrency => 4,
+            ConfigSection::Concurrency => 5,
             ConfigSection::Display => 2, // theme + fps
         }
     }
@@ -1085,6 +1130,7 @@ impl App {
                     1 => self.config_state.max_concurrent_refs.to_string(),
                     2 => self.config_state.db_timeout_secs.to_string(),
                     3 => self.config_state.db_timeout_short_secs.to_string(),
+                    4 => self.config_state.max_archive_size_mb.to_string(),
                     _ => return,
                 };
                 self.config_state.editing = true;
@@ -1182,6 +1228,11 @@ impl App {
                 3 => {
                     if let Ok(v) = buf.parse::<u64>() {
                         self.config_state.db_timeout_short_secs = v.max(1);
+                    }
+                }
+                4 => {
+                    if let Ok(v) = buf.parse::<u32>() {
+                        self.config_state.max_archive_size_mb = v;
                     }
                 }
                 _ => {}

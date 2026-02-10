@@ -68,6 +68,8 @@ pub struct ExportState {
     pub scope: ExportScope,
     pub output_path: String,
     pub cursor: usize, // 0=format, 1=scope, 2=path, 3=confirm
+    pub editing_path: bool,
+    pub edit_buffer: String,
     pub message: Option<String>,
 }
 
@@ -79,6 +81,8 @@ impl Default for ExportState {
             scope: ExportScope::AllPapers,
             output_path: "hallucinator-results".to_string(),
             cursor: 0,
+            editing_path: false,
+            edit_buffer: String::new(),
             message: None,
         }
     }
@@ -124,13 +128,24 @@ pub fn render(f: &mut Frame, app: &App) {
 
     // Output path
     let path_indicator = if export.cursor == 2 { "> " } else { "  " };
+    let path_display = if export.editing_path {
+        format!("{}\u{2588}", export.edit_buffer)
+    } else {
+        export.output_path.clone()
+    };
+    let path_style = if export.editing_path {
+        Style::default().fg(theme.active)
+    } else {
+        Style::default().fg(theme.dim)
+    };
     lines.push(Line::from(vec![
         Span::styled(
             format!("  {}Output:  ", path_indicator),
             Style::default().fg(theme.text),
         ),
+        Span::styled(path_display, path_style),
         Span::styled(
-            format!("{}.{}", export.output_path, export.format.extension()),
+            format!(".{}", export.format.extension()),
             Style::default().fg(theme.dim),
         ),
     ]));
@@ -160,8 +175,13 @@ pub fn render(f: &mut Frame, app: &App) {
     }
 
     lines.push(Line::from(""));
+    let hint = if export.editing_path {
+        "  Type filename, Enter:confirm, Esc:cancel"
+    } else {
+        "  j/k:navigate  Enter:select/cycle  Esc:cancel"
+    };
     lines.push(Line::from(Span::styled(
-        "  j/k:navigate  Enter:select/cycle  Esc:cancel",
+        hint,
         Style::default().fg(theme.dim),
     )));
 

@@ -81,6 +81,16 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     )));
 
     let sparkline = activity.sparkline();
+    // Trim sparkline to fit panel width (borders=2, leading space=1)
+    let max_spark_chars = area.width.saturating_sub(3) as usize;
+    let sparkline: String = sparkline
+        .chars()
+        .rev()
+        .take(max_spark_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     if !sparkline.trim().is_empty() {
         lines.push(Line::from(Span::styled(
             format!(" {}", sparkline),
@@ -120,8 +130,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         )));
     } else {
         for q in activity.active_queries.iter().take(10) {
-            let title_short = if q.ref_title.len() > 25 {
-                format!("{}...", &q.ref_title[..22])
+            let title_short = if q.ref_title.chars().count() > 25 {
+                let truncated: String = q.ref_title.chars().take(22).collect();
+                format!("{}...", truncated)
             } else {
                 q.ref_title.clone()
             };

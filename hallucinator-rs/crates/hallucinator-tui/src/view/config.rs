@@ -188,6 +188,11 @@ fn render_databases(lines: &mut Vec<Line>, config: &ConfigState, theme: &Theme) 
 }
 
 fn render_concurrency(lines: &mut Vec<Line>, config: &ConfigState, theme: &Theme) {
+    let archive_limit = if config.max_archive_size_mb == 0 {
+        "unlimited".to_string()
+    } else {
+        format!("{}", config.max_archive_size_mb)
+    };
     let items = [
         (
             "Concurrent Papers",
@@ -202,6 +207,7 @@ fn render_concurrency(lines: &mut Vec<Line>, config: &ConfigState, theme: &Theme
             "Short Timeout (s)",
             config.db_timeout_short_secs.to_string(),
         ),
+        ("Archive Size Limit (MB)", archive_limit),
     ];
     for (i, (label, value)) in items.iter().enumerate() {
         let cursor = if config.item_cursor == i { "> " } else { "  " };

@@ -46,6 +46,7 @@ pub struct ConfigState {
     pub max_concurrent_refs: usize,
     pub db_timeout_secs: u64,
     pub db_timeout_short_secs: u64,
+    pub max_archive_size_mb: u32, // 0 = unlimited
     pub theme_name: String,
     pub fps: u32,
 }
@@ -80,6 +81,7 @@ impl Default for ConfigState {
             max_concurrent_refs: 4,
             db_timeout_secs: 10,
             db_timeout_short_secs: 5,
+            max_archive_size_mb: 0, // unlimited
             theme_name: "hacker".to_string(),
             fps: 30,
         }

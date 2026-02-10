@@ -32,6 +32,7 @@ pub struct ConcurrencyConfig {
     pub max_concurrent_refs: Option<usize>,
     pub db_timeout_secs: Option<u64>,
     pub db_timeout_short_secs: Option<u64>,
+    pub max_archive_size_mb: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -128,6 +129,15 @@ fn merge(base: ConfigFile, overlay: ConfigFile) -> ConfigFile {
                         .as_ref()
                         .and_then(|c| c.db_timeout_short_secs)
                 }),
+            max_archive_size_mb: overlay
+                .concurrency
+                .as_ref()
+                .and_then(|c| c.max_archive_size_mb)
+                .or_else(|| {
+                    base.concurrency
+                        .as_ref()
+                        .and_then(|c| c.max_archive_size_mb)
+                }),
         }),
         display: Some(DisplayConfig {
             theme: overlay
@@ -199,6 +209,9 @@ pub fn apply_to_config_state(file_cfg: &ConfigFile, state: &mut ConfigState) {
         if let Some(v) = conc.db_timeout_short_secs {
             state.db_timeout_short_secs = v.max(1);
         }
+        if let Some(v) = conc.max_archive_size_mb {
+            state.max_archive_size_mb = v;
+        }
     }
     if let Some(disp) = &file_cfg.display {
         if let Some(ref theme) = disp.theme {
@@ -251,6 +264,7 @@ pub fn from_config_state(state: &ConfigState) -> ConfigFile {
             max_concurrent_refs: Some(state.max_concurrent_refs),
             db_timeout_secs: Some(state.db_timeout_secs),
             db_timeout_short_secs: Some(state.db_timeout_short_secs),
+            max_archive_size_mb: Some(state.max_archive_size_mb),
         }),
         display: Some(DisplayConfig {
             theme: Some(state.theme_name.clone()),

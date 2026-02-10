@@ -33,7 +33,8 @@ Pro-tip: Privacy-preserving -- your PDFs never leave your machine, we only query
 Pro-tip: Written in Rust -- because memory safety is not optional when catching fraud
 Pro-tip: Zero-cost abstractions means your CPU cycles go to catching hallucinations, not GC pauses
 Pro-tip: Async I/O via Tokio means we're checking databases while you read these tips
-Pro-tip: The TUI runs at 10 FPS with zero allocations per frame (ok, maybe a few)
+Pro-tip: The TUI targets 30 FPS with zero allocations per frame (ok, maybe a few)
+Pro-tip: Configure your target framerate in the Display tab of config (,)
 Pro-tip: MuPDF handles PDF extraction -- the same engine behind Sumatra PDF reader
 Pro-tip: Our fuzzy matching uses Jaro-Winkler distance, compiled to native SIMD instructions
 

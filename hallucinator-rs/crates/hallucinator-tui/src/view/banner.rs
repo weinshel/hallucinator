@@ -45,7 +45,7 @@ static TIPS_RAW: &str = include_str!("../tips.txt");
 /// Parse tips.txt (skip comments and blank lines) and return a shuffled order.
 /// The shuffle uses a simple LCG seeded from the process start time so that
 /// tip order varies between runs but stays stable within a single session.
-fn shuffled_tips() -> &'static [&'static str] {
+pub(crate) fn shuffled_tips() -> &'static [&'static str] {
     static TIPS: OnceLock<Vec<&'static str>> = OnceLock::new();
     TIPS.get_or_init(|| {
         let mut tips: Vec<&str> = TIPS_RAW

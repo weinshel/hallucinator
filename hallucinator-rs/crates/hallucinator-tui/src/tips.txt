@@ -27,6 +27,7 @@ Pro-tip: Retraction checking queries CrossRef for retraction notices on found pa
 Pro-tip: The retry pass re-checks "not found" refs against DBs that timed out earlier
 Pro-tip: PDF text extraction handles ligatures (fi, fl, ffi) and hyphenation artifacts
 Pro-tip: Archive uploads (ZIP/tar.gz) let you batch-check entire conference proceedings
+Pro-tip: Privacy-preserving -- your PDFs never leave your machine, we only query citation metadata
 
 # === Rust & Performance ===
 Pro-tip: Written in Rust -- because memory safety is not optional when catching fraud

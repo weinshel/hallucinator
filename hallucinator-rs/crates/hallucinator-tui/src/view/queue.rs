@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, InputMode};
@@ -14,6 +14,20 @@ pub fn render_in(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = &app.theme;
 
     let has_search = app.input_mode == InputMode::Search || !app.search_query.is_empty();
+
+    // Calculate how tall the table actually needs to be:
+    // rows + header(1) + borders(2)
+    let row_count = app.queue_sorted.len();
+    let table_need = (row_count + 3) as u16; // rows + header + top/bottom border
+    let table_min = table_need.max(5);
+
+    // Fixed overhead: header(1) + progress(1) + footer(1) + optional search(1)
+    let overhead = 2 + 1 + if has_search { 1 } else { 0 };
+    let available = area.height.saturating_sub(overhead);
+
+    // If there's spare space beyond what the table needs, show a tips pane
+    let show_tips = available > table_min + 4; // need at least 4 rows for a tips box
+
     let mut constraints = vec![
         Constraint::Length(1), // header
         Constraint::Length(1), // progress bar
@@ -21,7 +35,12 @@ pub fn render_in(f: &mut Frame, app: &mut App, area: Rect) {
     if has_search {
         constraints.push(Constraint::Length(1)); // search bar
     }
-    constraints.push(Constraint::Min(5)); // table
+    if show_tips {
+        constraints.push(Constraint::Length(table_min)); // table (exact fit)
+        constraints.push(Constraint::Min(3)); // tips pane (fills remainder)
+    } else {
+        constraints.push(Constraint::Min(5)); // table (fills all)
+    }
     constraints.push(Constraint::Length(1)); // footer / stats
 
     let chunks = Layout::vertical(constraints).split(area);
@@ -42,6 +61,11 @@ pub fn render_in(f: &mut Frame, app: &mut App, area: Rect) {
     render_table(f, table_area, app);
     app.last_table_area = Some(table_area);
     chunk_idx += 1;
+
+    if show_tips {
+        render_tips_pane(f, chunks[chunk_idx], app.tick, theme);
+        chunk_idx += 1;
+    }
 
     render_footer(f, chunks[chunk_idx], app);
 }
@@ -298,4 +322,35 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 
     let footer = Line::from(spans);
     f.render_widget(Paragraph::new(footer), area);
+}
+
+fn render_tips_pane(f: &mut Frame, area: Rect, tick: usize, theme: &Theme) {
+    let tips = super::banner::shuffled_tips();
+    if tips.is_empty() {
+        return;
+    }
+
+    // Show multiple tips if there's room, rotating through the list
+    let max_lines = area.height.saturating_sub(2) as usize; // borders
+    let start_idx = (tick / 80) % tips.len();
+
+    let mut lines: Vec<Line> = Vec::new();
+    for i in 0..max_lines {
+        let idx = (start_idx + i) % tips.len();
+        let text = tips[idx]
+            .strip_prefix("Pro-tip: ")
+            .unwrap_or(tips[idx]);
+        let bullet = if i == 0 { "\u{25B6} " } else { "  " };
+        lines.push(Line::from(Span::styled(
+            format!(" {}{}", bullet, text),
+            Style::default().fg(if i == 0 { theme.text } else { theme.dim }),
+        )));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.border_style())
+        .title(" Pro-tips ");
+    let para = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
+    f.render_widget(para, area);
 }

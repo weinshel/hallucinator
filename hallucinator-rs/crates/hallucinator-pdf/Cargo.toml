@@ -10,3 +10,6 @@ mupdf.workspace = true
 regex.workspace = true
 once_cell.workspace = true
 thiserror.workspace = true
+zip.workspace = true
+tar.workspace = true
+flate2.workspace = true

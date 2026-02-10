@@ -44,6 +44,10 @@ enum Command {
         #[arg(long)]
         dblp_offline: Option<PathBuf>,
 
+        /// Path to offline ACL Anthology database
+        #[arg(long)]
+        acl_offline: Option<PathBuf>,
+
         /// Comma-separated list of databases to disable
         #[arg(long, value_delimiter = ',')]
         disable_dbs: Vec<String>,
@@ -58,6 +62,12 @@ enum Command {
         /// Path to store the DBLP SQLite database
         path: PathBuf,
     },
+
+    /// Download and build the offline ACL Anthology database
+    UpdateAcl {
+        /// Path to store the ACL SQLite database
+        path: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -67,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::UpdateDblp { path } => update_dblp(&path).await,
+        Command::UpdateAcl { path } => update_acl(&path).await,
         Command::Check {
             pdf_path,
             no_color,
@@ -74,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
             s2_api_key,
             output,
             dblp_offline,
+            acl_offline,
             disable_dbs,
             check_openalex_authors,
         } => {
@@ -84,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
                 s2_api_key,
                 output,
                 dblp_offline,
+                acl_offline,
                 disable_dbs,
                 check_openalex_authors,
             )
@@ -99,6 +112,7 @@ async fn check(
     s2_api_key: Option<String>,
     output: Option<PathBuf>,
     dblp_offline: Option<PathBuf>,
+    acl_offline: Option<PathBuf>,
     disable_dbs: Vec<String>,
     check_openalex_authors: bool,
 ) -> anyhow::Result<()> {
@@ -107,6 +121,8 @@ async fn check(
     let s2_api_key = s2_api_key.or_else(|| std::env::var("S2_API_KEY").ok());
     let dblp_offline_path =
         dblp_offline.or_else(|| std::env::var("DBLP_OFFLINE_PATH").ok().map(PathBuf::from));
+    let acl_offline_path =
+        acl_offline.or_else(|| std::env::var("ACL_OFFLINE_PATH").ok().map(PathBuf::from));
     let db_timeout_secs: u64 = std::env::var("DB_TIMEOUT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -167,6 +183,46 @@ async fn check(
         None
     };
 
+    // Open offline ACL Anthology database if configured
+    let acl_offline_db = if let Some(ref path) = acl_offline_path {
+        if !path.exists() {
+            anyhow::bail!(
+                "Offline ACL database not found at {}. Build it with: hallucinator-cli update-acl {}",
+                path.display(),
+                path.display()
+            );
+        }
+        let db = hallucinator_acl::AclDatabase::open(path)?;
+
+        if let Ok(staleness) = db.check_staleness(30) {
+            if staleness.is_stale {
+                let msg = if let Some(days) = staleness.age_days {
+                    format!(
+                        "Offline ACL database is {} days old. Consider running: hallucinator-cli update-acl {}",
+                        days,
+                        path.display()
+                    )
+                } else {
+                    format!(
+                        "Offline ACL database may be stale. Consider running: hallucinator-cli update-acl {}",
+                        path.display()
+                    )
+                };
+                if color.enabled() {
+                    use owo_colors::OwoColorize;
+                    writeln!(writer, "{}", msg.yellow())?;
+                } else {
+                    writeln!(writer, "{}", msg)?;
+                }
+                writeln!(writer)?;
+            }
+        }
+
+        Some(Arc::new(Mutex::new(db)))
+    } else {
+        None
+    };
+
     // Extract references from PDF
     if !pdf_path.exists() {
         anyhow::bail!("PDF file not found: {}", pdf_path.display());
@@ -197,6 +253,8 @@ async fn check(
         s2_api_key,
         dblp_offline_path: dblp_offline_path.clone(),
         dblp_offline_db,
+        acl_offline_path: acl_offline_path.clone(),
+        acl_offline_db,
         max_concurrent_refs: 4,
         db_timeout_secs,
         db_timeout_short_secs,
@@ -233,23 +291,14 @@ async fn check(
     });
 
     let skip_stats = extraction.skip_stats.clone();
-    let results = hallucinator_core::check_references(
-        extraction.references,
-        config,
-        progress_cb,
-        cancel,
-    )
-    .await;
+    let results =
+        hallucinator_core::check_references(extraction.references, config, progress_cb, cancel)
+            .await;
 
     // Print final report
     writeln!(writer)?;
 
-    output::print_hallucination_report(
-        &mut writer,
-        &results,
-        openalex_key.is_some(),
-        color,
-    )?;
+    output::print_hallucination_report(&mut writer, &results, openalex_key.is_some(), color)?;
 
     output::print_doi_issues(&mut writer, &results, color)?;
     output::print_retraction_warnings(&mut writer, &results, color)?;
@@ -270,10 +319,8 @@ async fn update_dblp(db_path: &PathBuf) -> anyhow::Result<()> {
     .unwrap()
     .progress_chars("=> ");
 
-    let dl_unknown_style = ProgressStyle::with_template(
-        "{spinner:.cyan} {msg} {bytes} ({bytes_per_sec})",
-    )
-    .unwrap();
+    let dl_unknown_style =
+        ProgressStyle::with_template("{spinner:.cyan} {msg} {bytes} ({bytes_per_sec})").unwrap();
 
     let parse_bar_style = ProgressStyle::with_template(
         "{spinner:.green} {msg} [{bar:40.green/dim}] {percent}% (eta {eta})",
@@ -281,10 +328,7 @@ async fn update_dblp(db_path: &PathBuf) -> anyhow::Result<()> {
     .unwrap()
     .progress_chars("=> ");
 
-    let parse_spinner_style = ProgressStyle::with_template(
-        "{spinner:.green} {msg}",
-    )
-    .unwrap();
+    let parse_spinner_style = ProgressStyle::with_template("{spinner:.green} {msg}").unwrap();
 
     let dl_bar = multi.add(ProgressBar::new(0));
     dl_bar.set_style(dl_unknown_style.clone());
@@ -382,14 +426,156 @@ async fn update_dblp(db_path: &PathBuf) -> anyhow::Result<()> {
             } else {
                 parse_bar.finish_with_message(format!(
                     "Indexed {} publications, {} authors{}",
-                    HumanCount(publications), HumanCount(authors), total_elapsed
+                    HumanCount(publications),
+                    HumanCount(authors),
+                    total_elapsed
                 ));
             }
         }
-    }).await?;
+    })
+    .await?;
 
+    let canonical = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.clone());
     if !updated {
-        println!("Database is already up to date.");
+        println!("Database is already up to date: {}", canonical.display());
+    } else {
+        println!("DBLP database saved to: {}", canonical.display());
+    }
+
+    Ok(())
+}
+
+async fn update_acl(db_path: &PathBuf) -> anyhow::Result<()> {
+    use indicatif::{HumanCount, MultiProgress, ProgressBar, ProgressStyle};
+    use std::time::{Duration, Instant};
+
+    let multi = MultiProgress::new();
+
+    let dl_bar_style = ProgressStyle::with_template(
+        "{spinner:.cyan} {msg} [{bar:40.cyan/dim}] {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta})",
+    )
+    .unwrap()
+    .progress_chars("=> ");
+
+    let dl_unknown_style =
+        ProgressStyle::with_template("{spinner:.cyan} {msg} {bytes} ({bytes_per_sec})").unwrap();
+
+    let parse_bar_style = ProgressStyle::with_template(
+        "{spinner:.green} {msg} [{bar:40.green/dim}] {percent}% (eta {eta})",
+    )
+    .unwrap()
+    .progress_chars("=> ");
+
+    let parse_spinner_style = ProgressStyle::with_template("{spinner:.green} {msg}").unwrap();
+
+    let dl_bar = multi.add(ProgressBar::new(0));
+    dl_bar.set_style(dl_unknown_style.clone());
+    dl_bar.set_message("Connecting to GitHub...");
+    dl_bar.enable_steady_tick(Duration::from_millis(120));
+
+    let parse_bar = multi.add(ProgressBar::new(0));
+    parse_bar.set_style(parse_spinner_style.clone());
+    parse_bar.enable_steady_tick(Duration::from_millis(120));
+
+    let parse_start = std::cell::Cell::new(None::<Instant>);
+
+    let updated = hallucinator_acl::build_database(db_path, |event| match event {
+        hallucinator_acl::BuildProgress::Downloading {
+            bytes_downloaded,
+            total_bytes,
+        } => {
+            if let Some(total) = total_bytes {
+                if dl_bar.length() == Some(0) {
+                    dl_bar.set_length(total);
+                    dl_bar.set_style(dl_bar_style.clone());
+                }
+                dl_bar.set_position(bytes_downloaded);
+                dl_bar.set_message("acl-anthology.tar.gz");
+            } else {
+                dl_bar.set_position(bytes_downloaded);
+                dl_bar.set_message("acl-anthology.tar.gz");
+            }
+        }
+        hallucinator_acl::BuildProgress::Extracting { files_extracted } => {
+            if !dl_bar.is_finished() {
+                dl_bar.finish_with_message(format!(
+                    "Downloaded in {:.0?}",
+                    dl_bar.elapsed()
+                ));
+            }
+            parse_bar.set_message(format!("Extracting XML files... ({})", files_extracted));
+        }
+        hallucinator_acl::BuildProgress::Parsing {
+            records_parsed,
+            records_inserted,
+            files_processed,
+            files_total,
+        } => {
+            if !dl_bar.is_finished() {
+                dl_bar.finish_with_message(format!(
+                    "Downloaded in {:.0?}",
+                    dl_bar.elapsed()
+                ));
+            }
+            if parse_start.get().is_none() {
+                parse_start.set(Some(Instant::now()));
+            }
+            if files_total > 0 && parse_bar.length() == Some(0) {
+                parse_bar.set_length(files_total);
+                parse_bar.set_style(parse_bar_style.clone());
+            }
+            parse_bar.set_position(files_processed);
+            let elapsed = parse_start.get().unwrap().elapsed().as_secs_f64();
+            let inserted_per_sec = if elapsed > 0.0 {
+                records_inserted as f64 / elapsed
+            } else {
+                0.0
+            };
+            parse_bar.set_message(format!(
+                "{} parsed, {} inserted ({}/s)",
+                HumanCount(records_parsed),
+                HumanCount(records_inserted),
+                HumanCount(inserted_per_sec as u64),
+            ));
+        }
+        hallucinator_acl::BuildProgress::RebuildingIndex => {
+            if !dl_bar.is_finished() {
+                dl_bar.finish_with_message(format!(
+                    "Downloaded in {:.0?}",
+                    dl_bar.elapsed()
+                ));
+            }
+            parse_bar.set_style(parse_spinner_style.clone());
+            parse_bar.set_message("Rebuilding FTS search index...");
+        }
+        hallucinator_acl::BuildProgress::Complete {
+            publications,
+            authors,
+            skipped,
+        } => {
+            let total_elapsed = parse_start
+                .get()
+                .map(|s| format!(" in {:.0?}", s.elapsed()))
+                .unwrap_or_default();
+            if skipped {
+                parse_bar.finish_with_message("Database is already up to date (same commit SHA)");
+            } else {
+                parse_bar.finish_with_message(format!(
+                    "Indexed {} publications, {} authors{}",
+                    HumanCount(publications),
+                    HumanCount(authors),
+                    total_elapsed
+                ));
+            }
+        }
+    })
+    .await?;
+
+    let canonical = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.clone());
+    if !updated {
+        println!("Database is already up to date: {}", canonical.display());
+    } else {
+        println!("ACL database saved to: {}", canonical.display());
     }
 
     Ok(())

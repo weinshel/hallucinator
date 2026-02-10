@@ -2,9 +2,44 @@ use super::{DatabaseBackend, DbQueryResult};
 use crate::matching::titles_match;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub struct AclAnthology;
+
+/// Offline ACL Anthology backend backed by a local SQLite database with FTS5.
+pub struct AclOffline {
+    pub db: Arc<Mutex<hallucinator_acl::AclDatabase>>,
+}
+
+impl DatabaseBackend for AclOffline {
+    fn name(&self) -> &str {
+        "ACL Anthology"
+    }
+
+    fn query<'a>(
+        &'a self,
+        title: &'a str,
+        _client: &'a reqwest::Client,
+        _timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, String>> + Send + 'a>> {
+        let db = Arc::clone(&self.db);
+        let title = title.to_string();
+        Box::pin(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let db = db.lock().map_err(|e| e.to_string())?;
+                db.query(&title).map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+
+            match result {
+                Some(qr) => Ok((Some(qr.record.title), qr.record.authors, qr.record.url)),
+                None => Ok((None, vec![], None)),
+            }
+        })
+    }
+}
 
 impl DatabaseBackend for AclAnthology {
     fn name(&self) -> &str {

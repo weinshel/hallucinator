@@ -6,9 +6,11 @@ use crate::text_processing::fix_hyphenation;
 
 /// Abbreviations that should NEVER be sentence boundaries (mid-title abbreviations).
 static MID_SENTENCE_ABBREVIATIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    ["vs", "eg", "ie", "cf", "fig", "figs", "eq", "eqs", "sec", "ch", "pt", "no"]
-        .into_iter()
-        .collect()
+    [
+        "vs", "eg", "ie", "cf", "fig", "figs", "eq", "eqs", "sec", "ch", "pt", "no",
+    ]
+    .into_iter()
+    .collect()
 });
 
 /// Extract title from a reference string.
@@ -105,6 +107,15 @@ pub fn clean_title(title: &str, from_quotes: bool) -> String {
         title = title[..=qmark_pos].to_string();
     }
 
+    // Handle "? JournalName, vol(issue)" — journal name bleeding after question mark
+    static QMARK_JOURNAL_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\?\s+[A-Z][a-zA-Z\s&]+,\s*\d+\s*[\(:]").unwrap()
+    });
+    if let Some(m) = QMARK_JOURNAL_RE.find(&title) {
+        let qmark_pos = title[..m.end()].rfind('?').unwrap();
+        title = title[..=qmark_pos].to_string();
+    }
+
     // Apply cutoff patterns to remove trailing venue/metadata
     title = apply_cutoff_patterns(&title);
 
@@ -121,10 +132,14 @@ fn try_quoted_title(ref_text: &str) -> Option<(String, bool)> {
     static QUOTE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         vec![
             // Smart quotes (any combo of \u201c, \u201d, \u201c)
-            Regex::new(r#"[\u{201c}\u{201d}"]([^\u{201c}\u{201d}"]+)[\u{201c}\u{201d}"]"#)
-                .unwrap(),
+            Regex::new(r#"[\u{201c}\u{201d}"]([^\u{201c}\u{201d}"]+)[\u{201c}\u{201d}"]"#).unwrap(),
             // Regular quotes
             Regex::new(r#""([^"]+)""#).unwrap(),
+            // Smart single quotes (Harvard/APA style): \u2018...\u2019
+            Regex::new(r"[\u{2018}]([^\u{2018}\u{2019}]{10,})[\u{2019}]").unwrap(),
+            // Plain single quotes (Harvard/APA style): require ') ' or similar delimiter
+            // to avoid matching possessive apostrophes
+            Regex::new(r"(?:^|[\s(])'([^']{10,})'(?:\s*[,.]|\s*$)").unwrap(),
         ]
     });
 
@@ -159,8 +174,7 @@ fn try_quoted_title(ref_text: &str) -> Option<(String, bool)> {
                 if let Some(sub) = subtitle_text {
                     let subtitle_end = find_subtitle_end(sub);
                     let subtitle = sub[..subtitle_end].trim();
-                    static TRAIL: Lazy<Regex> =
-                        Lazy::new(|| Regex::new(r"[.,;:]+$").unwrap());
+                    static TRAIL: Lazy<Regex> = Lazy::new(|| Regex::new(r"[.,;:]+$").unwrap());
                     let subtitle = TRAIL.replace(subtitle, "");
                     if subtitle.split_whitespace().count() >= 2 {
                         return Some((format!("{}: {}", quoted_part, subtitle), true));
@@ -202,9 +216,8 @@ fn find_subtitle_end(text: &str) -> usize {
 
 fn try_lncs(ref_text: &str) -> Option<(String, bool)> {
     // Pattern: comma/space + Initial(s) + colon, then title
-    static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"[,\s][A-Z]\.(?:[-\u{2013}][A-Z]\.)?\s*:\s*(.+)").unwrap()
-    });
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"[,\s][A-Z]\.(?:[-\u{2013}][A-Z]\.)?\s*:\s*(.+)").unwrap());
 
     let caps = RE.captures(ref_text)?;
     let after_colon = caps.get(1).unwrap().as_str().trim();
@@ -245,8 +258,7 @@ fn find_title_end_lncs(text: &str) -> usize {
 }
 
 fn try_org_doc(ref_text: &str) -> Option<(String, bool)> {
-    static RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"^([A-Z][a-zA-Z\s]+):\s*(.+)").unwrap());
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^([A-Z][a-zA-Z\s]+):\s*(.+)").unwrap());
 
     let caps = RE.captures(ref_text)?;
     let after_colon = caps.get(2).unwrap().as_str().trim();
@@ -278,8 +290,7 @@ fn try_org_doc(ref_text: &str) -> Option<(String, bool)> {
 }
 
 fn try_springer_year(ref_text: &str) -> Option<(String, bool)> {
-    static RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"\((\d{4}[a-z]?)\)\.?\s+").unwrap());
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\((\d{4}[a-z]?)\)\.?\s+").unwrap());
 
     let caps = RE.captures(ref_text)?;
     let after_year = &ref_text[caps.get(0).unwrap().end()..];
@@ -296,13 +307,22 @@ fn try_springer_year(ref_text: &str) -> Option<(String, bool)> {
             Regex::new(r"\.\s*URL\s+").unwrap(),
             Regex::new(r"\.\s*Tech\.\s*rep\.").unwrap(),
             Regex::new(r"\.\s*pp?\.?\s*\d+").unwrap(),
+            // Journal name after sentence-ending punctuation: "? JournalName, vol(issue)"
+            Regex::new(r"[?!]\s+[A-Z][a-zA-Z\s&]+,\s*\d+\s*\(").unwrap(),
+            // Journal after ? with volume:pages: "? JournalName, vol: pages"
+            Regex::new(r"[?!]\s+[A-Z][a-zA-Z\s&]+,\s*\d+\s*:").unwrap(),
         ]
     });
 
     let mut title_end = after_year.len();
     for re in END_PATTERNS.iter() {
         if let Some(m) = re.find(after_year) {
-            title_end = title_end.min(m.start());
+            let candidate = if after_year.as_bytes().get(m.start()).map_or(false, |&b| b == b'?' || b == b'!') {
+                m.start() + 1
+            } else {
+                m.start()
+            };
+            title_end = title_end.min(candidate);
         }
     }
 
@@ -319,8 +339,7 @@ fn try_springer_year(ref_text: &str) -> Option<(String, bool)> {
 
 fn try_acm_year(ref_text: &str) -> Option<(String, bool)> {
     // ". YYYY. Title" — require \s+ after year to avoid matching DOIs
-    static RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"\.\s*((?:19|20)\d{2})\.\s+").unwrap());
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.\s*((?:19|20)\d{2})\.\s+").unwrap());
 
     let caps = RE.captures(ref_text)?;
     let after_year = &ref_text[caps.get(0).unwrap().end()..];
@@ -330,13 +349,27 @@ fn try_acm_year(ref_text: &str) -> Option<(String, bool)> {
             Regex::new(r"\.\s*[Ii]n\s+[A-Z]").unwrap(),
             Regex::new(r"\.\s*(?:Proceedings|IEEE|ACM|USENIX|arXiv)").unwrap(),
             Regex::new(r"\s+doi:").unwrap(),
+            // Journal name after sentence-ending punctuation: "? JournalName, vol(issue)"
+            Regex::new(r"[?!]\s+[A-Z][a-zA-Z\s&]+,\s*\d+\s*\(").unwrap(),
+            // Journal after ? with volume:issue pattern: "? JournalName, vol: pages"
+            Regex::new(r"[?!]\s+[A-Z][a-zA-Z\s&]+,\s*\d+\s*:").unwrap(),
+            // Period then journal + volume/issue: ". JournalName, vol(issue)"
+            Regex::new(r"\.\s*[A-Z][a-zA-Z\s&]+,\s*\d+\s*\(").unwrap(),
+            // Period then journal + volume:pages: ". JournalName, vol: pages"
+            Regex::new(r"\.\s*[A-Z][a-zA-Z\s&]+,\s*\d+\s*:").unwrap(),
         ]
     });
 
     let mut title_end = after_year.len();
     for re in END_PATTERNS.iter() {
         if let Some(m) = re.find(after_year) {
-            title_end = title_end.min(m.start());
+            // For patterns anchored on ? or !, keep the punctuation mark
+            let candidate = if after_year.as_bytes().get(m.start()).map_or(false, |&b| b == b'?' || b == b'!') {
+                m.start() + 1
+            } else {
+                m.start()
+            };
+            title_end = title_end.min(candidate);
         }
     }
 
@@ -513,10 +546,7 @@ fn try_fallback_sentence(ref_text: &str) -> Option<(String, bool)> {
     if !words.is_empty() {
         static CAP_WORD: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Z][a-z]+$").unwrap());
         let cap_words = words.iter().filter(|w| CAP_WORD.is_match(w)).count();
-        let and_count = words
-            .iter()
-            .filter(|w| w.to_lowercase() == "and")
-            .count();
+        let and_count = words.iter().filter(|w| w.to_lowercase() == "and").count();
 
         if (cap_words as f64 / words.len() as f64) > 0.7 && and_count > 0 {
             // Try third sentence
@@ -600,6 +630,10 @@ fn split_sentences_skip_initials(text: &str) -> Vec<String> {
         while word_start > 0 && text.as_bytes()[word_start - 1].is_ascii_alphabetic() {
             word_start -= 1;
         }
+        // Ensure word_start is on a char boundary (backward byte walk may land inside multi-byte UTF-8)
+        while word_start > 0 && !text.is_char_boundary(word_start) {
+            word_start -= 1;
+        }
         let word_before = &text[word_start..pos];
         if MID_SENTENCE_ABBREVIATIONS.contains(word_before.to_lowercase().as_str()) {
             continue;
@@ -635,8 +669,7 @@ fn truncate_at_sentence_end(title: &str) -> String {
 
         // If segment > 2 chars, it's a real sentence end
         // OR 2-char ALL-CAPS segment (acronyms like "AI.", "ML.")
-        if segment.len() > 2 || (segment.len() == 2 && segment.chars().all(|c| c.is_uppercase()))
-        {
+        if segment.len() > 2 || (segment.len() == 2 && segment.chars().all(|c| c.is_uppercase())) {
             // Skip if period is immediately followed by a letter (product names)
             if pos + 1 < title.len() && title.as_bytes()[pos + 1].is_ascii_alphabetic() {
                 continue;
@@ -745,7 +778,8 @@ mod tests {
 
     #[test]
     fn test_springer_year_format() {
-        let ref_text = "Smith J, Jones A (2023) A novel approach to detection. Nature 500(3):123-456";
+        let ref_text =
+            "Smith J, Jones A (2023) A novel approach to detection. Nature 500(3):123-456";
         let (title, _) = extract_title_from_reference(ref_text);
         assert!(title.contains("novel approach"));
     }
@@ -755,5 +789,57 @@ mod tests {
         let (title, from_quotes) = extract_title_from_reference("");
         assert!(title.is_empty());
         assert!(!from_quotes);
+    }
+
+    #[test]
+    fn test_journal_name_after_question_mark() {
+        // Journal name "New media & society" should NOT be part of the title
+        let ref_text = "Baek, Y. M.; Wojcieszak, M.; and Delli Carpini, M. X. 2012. Online versus face-to-face deliberation: Who? Why? What? With what effects? New media & society, 14(3): 363\u{2013}383";
+        let (title, _) = extract_title_from_reference(ref_text);
+        let cleaned = clean_title(&title, false);
+        assert!(
+            !cleaned.contains("New media"),
+            "Journal name leaked into title: {}",
+            cleaned,
+        );
+        assert!(
+            cleaned.contains("With what effects?"),
+            "Title should end with question mark: {}",
+            cleaned,
+        );
+    }
+
+    #[test]
+    fn test_harvard_single_quoted_title() {
+        // Harvard/APA style uses single quotes around the title
+        let ref_text = "Biswas, A., Saha, K. and De Choudhury, M. (2025) \u{2018}Political Elites in the Attention Economy: Visibility Over Civility and Credibility?\u{2019}, Proceedings of the International AAAI Conference on Web and Social Media (ICWSM).";
+        let (title, from_quotes) = extract_title_from_reference(ref_text);
+        assert!(from_quotes, "Should detect single-quoted title");
+        assert!(
+            title.contains("Political Elites"),
+            "Title should contain 'Political Elites': {}",
+            title,
+        );
+    }
+
+    #[test]
+    fn test_utf8_smart_quote_no_crash() {
+        // Regression: smart quote before period should not cause UTF-8 panic
+        let text = "Smith J. \u{201c}Some title\u{201d}. In Proceedings.";
+        let parts = split_sentences_skip_initials(text);
+        assert!(!parts.is_empty());
+    }
+
+    #[test]
+    fn test_journal_after_period() {
+        // "American Political Science Review" should not be in the title
+        let ref_text = "Fishkin, J.; Siu, A.; Diamond, L.; and Bradburn, N. 2021. Is deliberation an antidote to extreme partisan polarization? Reflections on \u{201c}America in one room\u{201d}. American Political Science Review, 115(4): 1464\u{2013}1481";
+        let (title, _) = extract_title_from_reference(ref_text);
+        let cleaned = clean_title(&title, false);
+        assert!(
+            !cleaned.contains("American Political"),
+            "Journal name leaked into title: {}",
+            cleaned,
+        );
     }
 }

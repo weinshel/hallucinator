@@ -3,22 +3,72 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use tar::Archive;
 
-const MAX_FILES: usize = 50;
-const MAX_EXTRACTED_SIZE: u64 = 500 * 1024 * 1024; // 500MB
-
 /// A PDF file extracted from an archive.
 pub struct ExtractedPdf {
     pub path: PathBuf,
     pub filename: String,
 }
 
+/// Result of archive extraction — includes any warnings (e.g. size limit reached).
+pub struct ExtractionResult {
+    pub pdfs: Vec<ExtractedPdf>,
+    pub warnings: Vec<String>,
+}
+
+/// Returns true if the given path looks like a supported archive.
+pub fn is_archive_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    name.ends_with(".zip") || name.ends_with(".tar.gz") || name.ends_with(".tgz")
+}
+
+/// Read an archive file from disk, detect its type, and extract PDFs into `dir`.
+///
+/// Supports ZIP and tar.gz archives. Type is detected by extension and magic bytes.
+/// `max_size` limits total extracted bytes (0 = unlimited). When the limit is reached,
+/// extraction stops and a warning is included in the result.
+pub fn extract_archive(
+    archive_path: &Path,
+    dir: &Path,
+    max_size: u64,
+) -> Result<ExtractionResult, String> {
+    let data = std::fs::read(archive_path)
+        .map_err(|e| format!("Failed to read archive {}: {}", archive_path.display(), e))?;
+
+    let name = archive_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    // Detect by extension first, then fall back to magic bytes
+    if name.ends_with(".zip") || data.starts_with(b"PK") {
+        extract_from_zip(&data, dir, max_size)
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") || data.starts_with(&[0x1f, 0x8b])
+    {
+        extract_from_tar_gz(&data, dir, max_size)
+    } else {
+        Err(format!(
+            "Unsupported archive format: {}",
+            archive_path.display()
+        ))
+    }
+}
+
 /// Extract PDF files from a ZIP archive.
-pub fn extract_from_zip(data: &[u8], dir: &Path) -> Result<Vec<ExtractedPdf>, String> {
+/// `max_size` limits total extracted bytes (0 = unlimited).
+pub fn extract_from_zip(
+    data: &[u8],
+    dir: &Path,
+    max_size: u64,
+) -> Result<ExtractionResult, String> {
     let cursor = std::io::Cursor::new(data);
     let mut archive =
         zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open ZIP: {}", e))?;
 
     let mut pdfs = Vec::new();
+    let mut warnings = Vec::new();
     let mut total_size: u64 = 0;
 
     for i in 0..archive.len() {
@@ -52,20 +102,17 @@ pub fn extract_from_zip(data: &[u8], dir: &Path) -> Result<Vec<ExtractedPdf>, St
             continue;
         }
 
-        // Check limits
-        total_size += file.size();
-        if total_size > MAX_EXTRACTED_SIZE {
-            return Err(format!(
-                "Archive exceeds maximum extracted size of {}MB",
-                MAX_EXTRACTED_SIZE / 1024 / 1024
-            ));
-        }
-
-        if pdfs.len() >= MAX_FILES {
-            return Err(format!(
-                "Archive contains more than {} PDF files",
-                MAX_FILES
-            ));
+        // Check size limit
+        if max_size > 0 {
+            total_size += file.size();
+            if total_size > max_size {
+                warnings.push(format!(
+                    "Size limit ({}MB) reached after {} PDFs, skipping remaining files",
+                    max_size / 1024 / 1024,
+                    pdfs.len()
+                ));
+                break;
+            }
         }
 
         // Extract to temp dir with flat name
@@ -99,11 +146,16 @@ pub fn extract_from_zip(data: &[u8], dir: &Path) -> Result<Vec<ExtractedPdf>, St
         return Err("No PDF files found in archive".to_string());
     }
 
-    Ok(pdfs)
+    Ok(ExtractionResult { pdfs, warnings })
 }
 
 /// Extract PDF files from a tar.gz archive.
-pub fn extract_from_tar_gz(data: &[u8], dir: &Path) -> Result<Vec<ExtractedPdf>, String> {
+/// `max_size` limits total extracted bytes (0 = unlimited).
+pub fn extract_from_tar_gz(
+    data: &[u8],
+    dir: &Path,
+    max_size: u64,
+) -> Result<ExtractionResult, String> {
     let gz = GzDecoder::new(data);
     let mut archive = Archive::new(gz);
 
@@ -112,6 +164,7 @@ pub fn extract_from_tar_gz(data: &[u8], dir: &Path) -> Result<Vec<ExtractedPdf>,
         .map_err(|e| format!("Failed to read tar.gz: {}", e))?;
 
     let mut pdfs = Vec::new();
+    let mut warnings = Vec::new();
     let mut total_size: u64 = 0;
 
     for (i, entry) in entries.enumerate() {
@@ -146,20 +199,17 @@ pub fn extract_from_tar_gz(data: &[u8], dir: &Path) -> Result<Vec<ExtractedPdf>,
             continue;
         }
 
-        // Check limits
-        total_size += entry.size();
-        if total_size > MAX_EXTRACTED_SIZE {
-            return Err(format!(
-                "Archive exceeds maximum extracted size of {}MB",
-                MAX_EXTRACTED_SIZE / 1024 / 1024
-            ));
-        }
-
-        if pdfs.len() >= MAX_FILES {
-            return Err(format!(
-                "Archive contains more than {} PDF files",
-                MAX_FILES
-            ));
+        // Check size limit
+        if max_size > 0 {
+            total_size += entry.size();
+            if total_size > max_size {
+                warnings.push(format!(
+                    "Size limit ({}MB) reached after {} PDFs, skipping remaining files",
+                    max_size / 1024 / 1024,
+                    pdfs.len()
+                ));
+                break;
+            }
         }
 
         // Extract to temp dir
@@ -194,5 +244,5 @@ pub fn extract_from_tar_gz(data: &[u8], dir: &Path) -> Result<Vec<ExtractedPdf>,
         return Err("No PDF files found in archive".to_string());
     }
 
-    Ok(pdfs)
+    Ok(ExtractionResult { pdfs, warnings })
 }

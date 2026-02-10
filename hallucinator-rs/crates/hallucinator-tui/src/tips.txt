@@ -1,0 +1,52 @@
+# Tips for the Hallucinator TUI Pro-tips pane.
+# One tip per line. Lines starting with # are comments. Blank lines are ignored.
+# The "Pro-tip: " prefix is stripped in the bordered pane (header already says "Pro-tips")
+# but kept for narrow-terminal fallback display.
+
+# === Config & Usage ===
+Pro-tip: Press , to open config -- set API keys, concurrency, timeouts
+Pro-tip: Set an OpenAlex key for broader coverage (--openalex-key or config)
+Pro-tip: Build an offline DBLP database for instant local lookups (hallucinator-tui update-dblp)
+Pro-tip: Increase concurrent papers in config to process batches faster
+Pro-tip: Press Space on a reference to mark false positives as safe
+Pro-tip: Use s to cycle sort order, f to filter by status on queue/paper views
+Pro-tip: The Semantic Scholar API key improves rate limits (--s2-api-key)
+Pro-tip: Press e to export results as Markdown, JSON, or CSV
+Pro-tip: References with < 5 words are auto-skipped (too short for reliable matching)
+Pro-tip: Press ? anywhere for a full keybinding reference
+Pro-tip: You can set API keys via environment variables or a .env file
+Pro-tip: Run 'hallucinator-tui update-dblp' to build a local DBLP database (~1 GB compressed XML)
+Pro-tip: Press o to add more PDFs to the queue without restarting
+
+# === How It Works ===
+Pro-tip: Each reference is checked against up to 11 databases simultaneously
+Pro-tip: Databases: CrossRef, arXiv, DBLP, Semantic Scholar, ACL, NeurIPS, PubMed, and more
+Pro-tip: Title matching uses fuzzy comparison at 95% similarity (rapidfuzz)
+Pro-tip: Author verification catches cases where a title exists but authors don't match
+Pro-tip: Retraction checking queries CrossRef for retraction notices on found papers
+Pro-tip: The retry pass re-checks "not found" refs against DBs that timed out earlier
+Pro-tip: PDF text extraction handles ligatures (fi, fl, ffi) and hyphenation artifacts
+Pro-tip: Archive uploads (ZIP/tar.gz) let you batch-check entire conference proceedings
+Pro-tip: Privacy-preserving -- your PDFs never leave your machine, we only query citation metadata
+
+# === Rust & Performance ===
+Pro-tip: Written in Rust -- because memory safety is not optional when catching fraud
+Pro-tip: Zero-cost abstractions means your CPU cycles go to catching hallucinations, not GC pauses
+Pro-tip: Async I/O via Tokio means we're checking databases while you read these tips
+Pro-tip: The TUI targets 30 FPS with zero allocations per frame (ok, maybe a few)
+Pro-tip: Configure your target framerate in the Display tab of config (,)
+Pro-tip: MuPDF handles PDF extraction -- the same engine behind Sumatra PDF reader
+Pro-tip: Our fuzzy matching uses Jaro-Winkler distance, compiled to native SIMD instructions
+
+# === Fun Facts ===
+Pro-tip: Be careful, except for this one, the pro-tips were written by an LLM!
+Pro-tip: LLMs might hallucinate references 5-15% of the time in academic writing -- now you can catch them
+Pro-tip: The offline DBLP database indexes millions of CS publications for instant lookups
+Pro-tip: "Author mismatch" might mean the LLM invented a plausible-sounding author list
+Pro-tip: Built by the iDRAMA Lab -- because the drama of fake citations needed investigating
+Pro-tip: Jeremy Blackburn studies online harms at Binghamton -- fake refs are just another kind of harm
+Pro-tip: Gianluca Stringhini at Boston University has 100+ papers on security -- all real, we checked
+#Pro-tip: The iDRAMA Lab has studied everything from hate speech to memes to radicalization pipelines
+Pro-tip: This project is AGPL-3.0 licensed -- free as in freedom, free as in catching fraud
+Pro-tip: Europe PMC and PubMed coverage means biomedical hallucinations don't escape either
+Pro-tip: The name "Hallucinator" is a portmanteau -- hallucination + terminator (approximately)

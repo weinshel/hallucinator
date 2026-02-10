@@ -47,6 +47,7 @@ pub async fn retry(
         &client,
         true, // longer timeout for retries
         Some(&req.failed_dbs),
+        None,
     )
     .await;
 

@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-mod archive;
 mod handlers;
 mod models;
 mod state;
@@ -38,7 +37,10 @@ async fn main() -> anyhow::Result<()> {
                     println!("DBLP offline database loaded: {}", path_str);
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to open DBLP database at {}: {}", path_str, e);
+                    eprintln!(
+                        "Warning: Failed to open DBLP database at {}: {}",
+                        path_str, e
+                    );
                 }
             }
         } else {
@@ -57,7 +59,10 @@ async fn main() -> anyhow::Result<()> {
 
     let app = axum::Router::new()
         .route("/", axum::routing::get(handlers::index::index))
-        .route("/analyze/stream", axum::routing::post(handlers::stream::stream))
+        .route(
+            "/analyze/stream",
+            axum::routing::post(handlers::stream::stream),
+        )
         .route("/retry", axum::routing::post(handlers::retry::retry))
         .route("/static/logo.png", axum::routing::get(template::serve_logo))
         .layer(body_limit)

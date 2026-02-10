@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -15,6 +16,27 @@ pub mod retraction;
 pub use hallucinator_pdf::{ExtractionResult, Reference, SkipStats};
 pub use orchestrator::{query_all_databases, DbSearchResult};
 
+/// Status of a single database query within an orchestrator run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DbStatus {
+    Match,
+    NoMatch,
+    AuthorMismatch,
+    Timeout,
+    Error,
+    Skipped,
+}
+
+/// Result from querying a single database backend.
+#[derive(Debug, Clone)]
+pub struct DbResult {
+    pub db_name: String,
+    pub status: DbStatus,
+    pub elapsed: Option<Duration>,
+    pub found_authors: Vec<String>,
+    pub paper_url: Option<String>,
+}
+
 #[derive(Error, Debug)]
 pub enum CoreError {
     #[error("PDF extraction error: {0}")]
@@ -23,6 +45,8 @@ pub enum CoreError {
     Http(#[from] reqwest::Error),
     #[error("DBLP error: {0}")]
     Dblp(#[from] hallucinator_dblp::DblpError),
+    #[error("ACL error: {0}")]
+    Acl(#[from] hallucinator_acl::AclError),
     #[error("validation error: {0}")]
     Validation(String),
 }
@@ -70,6 +94,7 @@ pub struct ValidationResult {
     pub found_authors: Vec<String>,
     pub paper_url: Option<String>,
     pub failed_dbs: Vec<String>,
+    pub db_results: Vec<DbResult>,
     pub doi_info: Option<DoiInfo>,
     pub arxiv_info: Option<ArxivInfo>,
     pub retraction_info: Option<RetractionInfo>,
@@ -98,6 +123,13 @@ pub enum ProgressEvent {
     RetryPass {
         count: usize,
     },
+    DatabaseQueryComplete {
+        paper_index: usize,
+        ref_index: usize,
+        db_name: String,
+        status: DbStatus,
+        elapsed: Duration,
+    },
 }
 
 /// Summary statistics for a complete check run.
@@ -118,6 +150,8 @@ pub struct Config {
     pub s2_api_key: Option<String>,
     pub dblp_offline_path: Option<PathBuf>,
     pub dblp_offline_db: Option<Arc<Mutex<hallucinator_dblp::DblpDatabase>>>,
+    pub acl_offline_path: Option<PathBuf>,
+    pub acl_offline_db: Option<Arc<Mutex<hallucinator_acl::AclDatabase>>>,
     pub max_concurrent_refs: usize,
     pub db_timeout_secs: u64,
     pub db_timeout_short_secs: u64,
@@ -131,7 +165,15 @@ impl std::fmt::Debug for Config {
             .field("openalex_key", &self.openalex_key.as_ref().map(|_| "***"))
             .field("s2_api_key", &self.s2_api_key.as_ref().map(|_| "***"))
             .field("dblp_offline_path", &self.dblp_offline_path)
-            .field("dblp_offline_db", &self.dblp_offline_db.as_ref().map(|_| "<open>"))
+            .field(
+                "dblp_offline_db",
+                &self.dblp_offline_db.as_ref().map(|_| "<open>"),
+            )
+            .field("acl_offline_path", &self.acl_offline_path)
+            .field(
+                "acl_offline_db",
+                &self.acl_offline_db.as_ref().map(|_| "<open>"),
+            )
             .field("max_concurrent_refs", &self.max_concurrent_refs)
             .field("db_timeout_secs", &self.db_timeout_secs)
             .field("db_timeout_short_secs", &self.db_timeout_short_secs)
@@ -148,6 +190,8 @@ impl Default for Config {
             s2_api_key: None,
             dblp_offline_path: None,
             dblp_offline_db: None,
+            acl_offline_path: None,
+            acl_offline_db: None,
             max_concurrent_refs: 4,
             db_timeout_secs: 10,
             db_timeout_short_secs: 5,

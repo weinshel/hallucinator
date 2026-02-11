@@ -225,7 +225,9 @@ fn build_database_list(
     };
 
     if should_include("CrossRef") {
-        databases.push(Box::new(crossref::CrossRef));
+        databases.push(Box::new(crossref::CrossRef {
+            mailto: config.crossref_mailto.clone(),
+        }));
     }
     if should_include("arXiv") {
         databases.push(Box::new(arxiv::Arxiv));

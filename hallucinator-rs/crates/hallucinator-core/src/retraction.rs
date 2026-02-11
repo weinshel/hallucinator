@@ -26,18 +26,21 @@ pub async fn check_retraction(
     doi: &str,
     client: &reqwest::Client,
     timeout: Duration,
+    mailto: Option<&str>,
 ) -> RetractionResult {
     if doi.is_empty() {
         return RetractionResult::default();
     }
 
+    let user_agent = match mailto {
+        Some(email) => format!("HallucinatedReferenceChecker/1.0 (mailto:{})", email),
+        None => "HallucinatedReferenceChecker/1.0 (mailto:hallucination-checker@example.com)".to_string(),
+    };
+
     let url = format!("https://api.crossref.org/works/{}", doi);
     let resp = match client
         .get(&url)
-        .header(
-            "User-Agent",
-            "HallucinatedReferenceChecker/1.0 (mailto:hallucination-checker@example.com)",
-        )
+        .header("User-Agent", &user_agent)
         .timeout(timeout)
         .send()
         .await
@@ -122,6 +125,7 @@ pub async fn check_retraction_by_title(
     title: &str,
     client: &reqwest::Client,
     timeout: Duration,
+    mailto: Option<&str>,
 ) -> RetractionResult {
     if title.len() < 10 {
         return RetractionResult::default();
@@ -132,12 +136,14 @@ pub async fn check_retraction_by_title(
         urlencoding::encode(title)
     );
 
+    let user_agent = match mailto {
+        Some(email) => format!("HallucinatedReferenceChecker/1.0 (mailto:{})", email),
+        None => "HallucinatedReferenceChecker/1.0 (mailto:hallucination-checker@example.com)".to_string(),
+    };
+
     let resp = match client
         .get(&url)
-        .header(
-            "User-Agent",
-            "HallucinatedReferenceChecker/1.0 (mailto:hallucination-checker@example.com)",
-        )
+        .header("User-Agent", &user_agent)
         .timeout(timeout)
         .send()
         .await

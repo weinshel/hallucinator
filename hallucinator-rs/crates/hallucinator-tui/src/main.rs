@@ -323,6 +323,12 @@ async fn main() -> anyhow::Result<()> {
                 .to_string(),
         );
     }
+    if app.config_state.crossref_mailto.is_empty() {
+        app.activity.log_warn(
+            "No CrossRef mailto set. Set your email in Config > API Keys for better rate limits."
+                .to_string(),
+        );
+    }
 
     // Initialize results persistence directory
     let run_dir = persistence::run_dir();

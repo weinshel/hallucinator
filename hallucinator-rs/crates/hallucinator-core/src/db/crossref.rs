@@ -5,7 +5,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-pub struct CrossRef;
+pub struct CrossRef {
+    pub mailto: Option<String>,
+}
 
 impl DatabaseBackend for CrossRef {
     fn name(&self) -> &str {
@@ -21,14 +23,21 @@ impl DatabaseBackend for CrossRef {
         Box::pin(async move {
             let words = get_query_words(title, 6);
             let query = words.join(" ");
-            let url = format!(
+            let mut url = format!(
                 "https://api.crossref.org/works?query.title={}&rows=5",
                 urlencoding::encode(&query)
             );
 
+            let user_agent = if let Some(ref email) = self.mailto {
+                url.push_str(&format!("&mailto={}", urlencoding::encode(email)));
+                format!("HallucinatedReferenceChecker/1.0 (mailto:{})", email)
+            } else {
+                "Academic Reference Parser".to_string()
+            };
+
             let resp = client
                 .get(&url)
-                .header("User-Agent", "Academic Reference Parser")
+                .header("User-Agent", user_agent)
                 .timeout(timeout)
                 .send()
                 .await

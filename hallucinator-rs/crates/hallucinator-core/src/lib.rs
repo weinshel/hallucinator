@@ -157,6 +157,7 @@ pub struct Config {
     pub db_timeout_short_secs: u64,
     pub disabled_dbs: Vec<String>,
     pub check_openalex_authors: bool,
+    pub crossref_mailto: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -179,6 +180,7 @@ impl std::fmt::Debug for Config {
             .field("db_timeout_short_secs", &self.db_timeout_short_secs)
             .field("disabled_dbs", &self.disabled_dbs)
             .field("check_openalex_authors", &self.check_openalex_authors)
+            .field("crossref_mailto", &self.crossref_mailto.as_ref().map(|_| "***"))
             .finish()
     }
 }
@@ -197,6 +199,7 @@ impl Default for Config {
             db_timeout_short_secs: 5,
             disabled_dbs: vec![],
             check_openalex_authors: false,
+            crossref_mailto: None,
         }
     }
 }

@@ -18,6 +18,7 @@ pub struct ConfigFile {
 pub struct ApiKeysConfig {
     pub openalex_key: Option<String>,
     pub s2_api_key: Option<String>,
+    pub crossref_mailto: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -80,6 +81,11 @@ fn merge(base: ConfigFile, overlay: ConfigFile) -> ConfigFile {
                 .as_ref()
                 .and_then(|a| a.s2_api_key.clone())
                 .or_else(|| base.api_keys.as_ref().and_then(|a| a.s2_api_key.clone())),
+            crossref_mailto: overlay
+                .api_keys
+                .as_ref()
+                .and_then(|a| a.crossref_mailto.clone())
+                .or_else(|| base.api_keys.as_ref().and_then(|a| a.crossref_mailto.clone())),
         }),
         databases: Some(DatabasesConfig {
             dblp_offline_path: overlay
@@ -191,6 +197,11 @@ pub fn apply_to_config_state(file_cfg: &ConfigFile, state: &mut ConfigState) {
                 state.s2_api_key = key.clone();
             }
         }
+        if let Some(ref email) = api.crossref_mailto {
+            if !email.is_empty() {
+                state.crossref_mailto = email.clone();
+            }
+        }
     }
     if let Some(db) = &file_cfg.databases {
         if let Some(ref path) = db.dblp_offline_path {
@@ -260,6 +271,11 @@ pub fn from_config_state(state: &ConfigState) -> ConfigFile {
                 None
             } else {
                 Some(state.s2_api_key.clone())
+            },
+            crossref_mailto: if state.crossref_mailto.is_empty() {
+                None
+            } else {
+                Some(state.crossref_mailto.clone())
             },
         }),
         databases: Some(DatabasesConfig {

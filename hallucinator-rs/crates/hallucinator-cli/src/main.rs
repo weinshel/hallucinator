@@ -260,6 +260,7 @@ async fn check(
         db_timeout_short_secs,
         disabled_dbs: disable_dbs,
         check_openalex_authors,
+        crossref_mailto: None,
     };
 
     // Set up progress callback

@@ -40,6 +40,7 @@ pub struct ConfigState {
     // Editable fields
     pub openalex_key: String,
     pub s2_api_key: String,
+    pub crossref_mailto: String,
     pub disabled_dbs: Vec<(String, bool)>, // (name, enabled)
     pub dblp_offline_path: String,
     pub acl_offline_path: String,
@@ -76,6 +77,7 @@ impl Default for ConfigState {
             prev_screen: None,
             openalex_key: String::new(),
             s2_api_key: String::new(),
+            crossref_mailto: String::new(),
             disabled_dbs: all_dbs,
             dblp_offline_path: String::new(),
             acl_offline_path: String::new(),

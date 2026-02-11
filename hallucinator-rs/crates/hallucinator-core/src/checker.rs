@@ -227,7 +227,7 @@ async fn check_single_reference(
                 doi_authors,
             } => {
                 // Check retraction
-                let retraction = check_retraction(doi, client, timeout).await;
+                let retraction = check_retraction(doi, client, timeout, config.crossref_mailto.as_deref()).await;
                 let retraction_info = if retraction.retracted {
                     Some(RetractionInfo {
                         is_retracted: true,
@@ -308,7 +308,7 @@ async fn check_single_reference(
 
     // Step 3: Check retraction by title if verified
     let retraction_info = if db_result.status == Status::Verified {
-        let retraction = check_retraction_by_title(title, client, timeout).await;
+        let retraction = check_retraction_by_title(title, client, timeout, config.crossref_mailto.as_deref()).await;
         if retraction.retracted {
             Some(RetractionInfo {
                 is_retracted: true,

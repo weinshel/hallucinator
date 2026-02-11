@@ -458,6 +458,11 @@ impl App {
             db_timeout_short_secs: self.config_state.db_timeout_short_secs,
             disabled_dbs,
             check_openalex_authors: false,
+            crossref_mailto: if self.config_state.crossref_mailto.is_empty() {
+                None
+            } else {
+                Some(self.config_state.crossref_mailto.clone())
+            },
         }
     }
 
@@ -1262,7 +1267,7 @@ impl App {
     fn config_section_item_count(&self) -> usize {
         use crate::model::config::ConfigSection;
         match self.config_state.section {
-            ConfigSection::ApiKeys => 2,
+            ConfigSection::ApiKeys => 3,
             ConfigSection::Databases => 2 + self.config_state.disabled_dbs.len(),
             ConfigSection::Concurrency => 5,
             ConfigSection::Display => 2, // theme + fps
@@ -1277,6 +1282,7 @@ impl App {
                 let value = match self.config_state.item_cursor {
                     0 => self.config_state.openalex_key.clone(),
                     1 => self.config_state.s2_api_key.clone(),
+                    2 => self.config_state.crossref_mailto.clone(),
                     _ => return,
                 };
                 self.config_state.editing = true;
@@ -1371,6 +1377,7 @@ impl App {
             ConfigSection::ApiKeys => match self.config_state.item_cursor {
                 0 => self.config_state.openalex_key = buf,
                 1 => self.config_state.s2_api_key = buf,
+                2 => self.config_state.crossref_mailto = buf,
                 _ => {}
             },
             ConfigSection::Concurrency => match self.config_state.item_cursor {

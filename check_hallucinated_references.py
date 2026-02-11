@@ -1159,7 +1159,9 @@ def split_sentences_skip_initials(text):
                 # Also match Elsevier author pattern: "Surname Initial," like "Smith J," or "Smith JK,"
                 # Also match "and Surname" pattern for author lists like "J. and Jones, M."
                 # Also match another initial "X." or "X.-Y." for IEEE format like "H. W. Chung"
-                surname_char = r"[a-zA-Z\u00A0-\u017F''`´\-]"  # Letters, accents (including diacritics like ¨), apostrophes, backticks, hyphens
+                surname_char = r"[a-zA-Z\u00A0-\u017F''`´\u2018\u2019\-]"  # Letters, accents, apostrophes (including curly quotes U+2018/U+2019), backticks, hyphens
+                # Lowercase surname prefixes common in German, Dutch, Spanish, Portuguese, French, Italian names
+                surname_prefix = r'(?:von|van|de|del|della|la|le|da|das|dos|der|den|ter|di|du|el|af|ten|op|zum|zur)'
                 author_pattern = re.match(rf'^([A-Z]{surname_char}+)\s*,', after_period) or \
                                  re.match(rf'^([A-Z]{surname_char}+)\s+([A-Z][A-Z]?)\s*,', after_period) or \
                                  re.match(rf'^([A-Z]{surname_char}+)\s+[A-Z]{{1,2}},', after_period) or \
@@ -1168,7 +1170,11 @@ def split_sentences_skip_initials(text):
                                  re.match(r'^[A-Z]\.-[A-Z]\.', after_period) or \
                                  re.match(rf'^([A-Z]{surname_char}+)\.\s+[A-Z]', after_period) or \
                                  re.match(rf'^([A-Z]{surname_char}+)\s+and\s+[A-Z]', after_period, re.IGNORECASE) or \
-                                 re.match(rf'^([A-Z]{surname_char}+)\s+([A-Z]{surname_char}+)\s*,', after_period)  # Multi-part surname: "Van Goethem,"
+                                 re.match(rf'^([A-Z]{surname_char}+)\s+([A-Z]{surname_char}+)\s*,', after_period) or \
+                                 re.match(rf'^{surname_prefix}\s+[A-Z]', after_period, re.IGNORECASE) or \
+                                 re.match(rf'^([A-Z]{surname_char}+)\s+([A-Z]{surname_char}+)\.', after_period) or \
+                                 re.match(rf'^([A-Z]{surname_char}+)\.\s+\d', after_period) or \
+                                 re.match(rf'^([A-Z]{surname_char}+)\.\s+[A-Z][a-z]+\s+[a-z]', after_period)
 
                 if author_pattern:
                     # This clearly looks like another author - skip this period

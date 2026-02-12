@@ -83,30 +83,41 @@ crate is a thin wrapper that:
 This is the highest-value phase: let users override the ~100 hardcoded regex
 patterns from Python.
 
-**Step 1.1: Add `RegexOverrides` to `hallucinator-pdf`**
+**Step 1.1: Add `PdfParsingConfig` to `hallucinator-pdf`**
 
 Currently all regexes are `static Lazy<Regex>`. Refactor so each parsing module
-accepts an optional overrides struct:
+accepts an optional config struct. There are two kinds of overrides:
+
+- **Single-regex fields** — pure replacement (your regex replaces the default)
+- **List fields** — support both `set_*` (replace entire list) and `add_*` (append
+  to defaults), stored internally with an enum:
 
 ```rust
 // hallucinator-pdf/src/config.rs (new file)
+
+/// For list-valued config: replace defaults entirely, or extend them.
+pub enum ListOverride<T> {
+    Replace(Vec<T>),
+    Extend(Vec<T>),
+}
+
 pub struct PdfParsingConfig {
     // Section detection
-    pub section_header_re: Option<String>,
-    pub section_end_markers_re: Option<String>,
-    pub fallback_fraction: Option<f64>,      // default 0.7
+    pub section_header_re: Option<String>,       // replaces default
+    pub section_end_markers_re: Option<String>,   // replaces default
+    pub fallback_fraction: Option<f64>,           // default 0.7
 
-    // Segmentation
-    pub ieee_segment_re: Option<String>,     // [1] style
-    pub numbered_segment_re: Option<String>, // 1. style
+    // Segmentation — regex overrides for built-in strategies
+    pub ieee_segment_re: Option<String>,          // [1] style
+    pub numbered_segment_re: Option<String>,      // 1. style
     pub aaai_segment_re: Option<String>,
     pub springer_segment_re: Option<String>,
     pub fallback_segment_re: Option<String>,
 
     // Title extraction
-    pub quote_patterns: Option<Vec<String>>,
-    pub venue_cutoff_patterns: Option<Vec<String>>,
-    pub subtitle_patterns: Option<Vec<String>>,
+    pub quote_patterns: Option<ListOverride<String>>,         // set or extend
+    pub venue_cutoff_patterns: Option<ListOverride<String>>,  // set or extend
+    pub subtitle_patterns: Option<ListOverride<String>>,      // set or extend
 
     // Author extraction
     pub em_dash_re: Option<String>,
@@ -118,8 +129,8 @@ pub struct PdfParsingConfig {
     pub arxiv_re: Option<String>,
 
     // Text processing
-    pub compound_suffixes: Option<Vec<String>>,
-    pub ligature_map: Option<Vec<(String, String)>>,
+    pub compound_suffixes: Option<ListOverride<String>>,      // set or extend
+    pub ligature_map: Option<ListOverride<(String, String)>>, // set or extend
 
     // Filtering
     pub min_title_words: Option<usize>,      // default 4
@@ -129,6 +140,11 @@ pub struct PdfParsingConfig {
 
 impl Default for PdfParsingConfig { /* all None = use built-in defaults */ }
 ```
+
+For list fields, the resolution logic is:
+- `None` → use built-in defaults
+- `Replace(list)` → use only the provided list, discard defaults
+- `Extend(list)` → concatenate provided list onto defaults
 
 Then thread this config through the existing functions, falling back to the
 current hardcoded `Lazy<Regex>` when `None`.
@@ -143,12 +159,17 @@ from hallucinator import PdfExtractor, Reference
 
 ext = PdfExtractor()
 
-# Override any regex
+# Replace a single-regex field (swaps out the default entirely)
 ext.section_header_regex = r"(?i)\n\s*(?:References|Bibliograf[ií]a)\s*\n"
 ext.ieee_segment_regex = r"\n\s*\[(\d+)\]\s*"
 ext.min_title_words = 3
+
+# List fields: add to defaults (most common)
 ext.add_venue_cutoff_pattern(r"(?i)\.\s*Nature\b.*$")
 ext.add_compound_suffix("aware")
+
+# List fields: replace defaults entirely (rare, for full control)
+ext.set_venue_cutoff_patterns([r"pattern1", r"pattern2"])
 
 # Extract
 refs: list[Reference] = ext.extract("paper.pdf")
@@ -191,7 +212,77 @@ from PyPI.
 
 ---
 
-### Phase 2 — Validation pipeline
+### Phase 2 — Custom segmentation strategies + validation pipeline
+
+#### 2A: Python-callable segmentation strategies
+
+Phase 1 lets users tweak the *regexes* inside the 5 built-in segmentation strategies,
+but some papers need entirely different splitting logic. Phase 2 adds the ability
+to inject custom Python callables into the segmentation pipeline.
+
+**Design:**
+
+The segmenter tries strategies in priority order, using the first one that returns
+a valid result (3+ segments). Custom strategies slot into this ordered list:
+
+```python
+from hallucinator import PdfExtractor
+
+ext = PdfExtractor()
+
+# Custom strategy: split on "(1)", "(2)", etc.
+def paren_number_segmenter(text: str) -> list[str] | None:
+    """Return segments if this strategy applies, None to fall through."""
+    import re
+    parts = re.split(r'\n\s*\(\d+\)\s+', text)
+    return parts if len(parts) >= 3 else None
+
+# Insert before all built-in strategies (priority 0 = first)
+ext.add_segmentation_strategy(paren_number_segmenter, priority=0)
+
+# Or append after built-ins (priority=-1 = last, before fallback)
+ext.add_segmentation_strategy(my_other_strategy, priority=-1)
+
+# Can also disable specific built-in strategies
+ext.disable_segmentation_strategy("springer")
+
+# Full control: replace the entire strategy list
+ext.set_segmentation_strategies([
+    paren_number_segmenter,
+    "ieee",       # refer to built-in by name
+    "numbered",
+    "fallback",
+])
+```
+
+**Implementation notes:**
+- Rust side: the segmenter loop already tries strategies in order and takes the
+  first one returning 3+ results. We generalize this into a `Vec<SegmentationStrategy>`
+  where each entry is either a built-in (Rust closure) or a Python callback.
+- Python callbacks are invoked via `Python::with_gil()` from within the Rust
+  segmentation loop. This is safe because PDF extraction is single-threaded.
+- The `Fn(str) -> Option<Vec<str>>` signature is simple enough for PyO3 to marshal
+  without issues.
+- Performance: Python callbacks add ~microseconds of GIL overhead per call, which
+  is negligible compared to the PDF text extraction that precedes it.
+
+**Same pattern extends to title/author extraction:**
+
+For advanced users, the same callable-injection pattern can apply to title and
+author extraction in later iterations:
+
+```python
+def my_title_extractor(raw_citation: str) -> str | None:
+    """Return extracted title, or None to use default logic."""
+    ...
+
+ext.add_title_extractor(my_title_extractor, priority=0)
+```
+
+This is lower priority than segmentation because title/author regex overrides
+(Phase 1) cover most cases. Segmentation is where entirely new logic is most needed.
+
+#### 2B: Validation pipeline
 
 Expose the full check-references flow:
 
@@ -288,7 +379,8 @@ No other crates need modification for Phase 1. The `-core`, `-dblp`, `-acl`, and
 | Phase | New/Changed Files | Complexity |
 |-------|-------------------|------------|
 | Phase 1 (PDF + regexes) | ~8 new files, ~5 modified | Medium-high (regex threading is mechanical but touches many functions) |
-| Phase 2 (Validation) | ~3 new files | Medium (async bridging) |
+| Phase 2A (Custom strategies) | ~2 new files, ~2 modified | Medium (PyO3 callable bridging, strategy abstraction) |
+| Phase 2B (Validation) | ~3 new files | Medium (async bridging) |
 | Phase 3 (Offline DBs) | ~2 new files | Low (clean existing APIs) |
 | Phase 4 (BBL + async) | ~2 new files | Low-medium |
 
@@ -300,8 +392,5 @@ No other crates need modification for Phase 1. The `-core`, `-dblp`, `-acl`, and
 2. **Minimum Python version** — 3.9+ seems reasonable (matches PyO3 support)
 3. **Should regex overrides also be loadable from a TOML/JSON config file?** This
    would let users share "fix packs" for specific paper formats without writing Python.
-4. **Should we expose a way to add entirely new segmentation strategies from Python?**
-   Currently there are 5 hardcoded strategies tried in order. A plugin system would
-   be more powerful but significantly more complex.
-5. **Wheel distribution** — Build for manylinux, macOS (arm64+x86), Windows? Or
+4. **Wheel distribution** — Build for manylinux, macOS (arm64+x86), Windows? Or
    source-only initially?

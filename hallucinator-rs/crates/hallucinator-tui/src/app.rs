@@ -390,6 +390,38 @@ impl App {
         indices
     }
 
+    /// Get the paper index for the currently viewed paper (if any).
+    fn current_paper_index(&self) -> Option<usize> {
+        match self.screen {
+            Screen::Paper(i) | Screen::RefDetail(i, _) => Some(i),
+            Screen::Queue => self.queue_sorted.get(self.queue_cursor).copied(),
+            _ => None,
+        }
+    }
+
+    /// Derive an export filename stem from a paper's filename (strip extension).
+    fn paper_export_stem(&self, paper_index: usize) -> String {
+        if let Some(paper) = self.papers.get(paper_index) {
+            std::path::Path::new(&paper.filename)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "hallucinator-results".to_string())
+        } else {
+            "hallucinator-results".to_string()
+        }
+    }
+
+    /// Compute the default export filename based on scope and current paper.
+    fn export_default_path(&self, scope: crate::view::export::ExportScope) -> String {
+        match scope {
+            crate::view::export::ExportScope::ThisPaper => self
+                .current_paper_index()
+                .map(|i| self.paper_export_stem(i))
+                .unwrap_or_else(|| "hallucinator-results".to_string()),
+            crate::view::export::ExportScope::AllPapers => "hallucinator-results".to_string(),
+        }
+    }
+
     /// Send a start command to the backend if not already started.
     pub fn start_processing(&mut self) {
         if self.processing_started {
@@ -766,6 +798,8 @@ impl App {
                                 crate::view::export::ExportScope::ThisPaper
                             }
                         };
+                        self.export_state.output_path =
+                            self.export_default_path(self.export_state.scope);
                     }
                     2 => {
                         // Start editing the output path
@@ -1167,6 +1201,8 @@ impl App {
                 self.export_state.active = true;
                 self.export_state.cursor = 0;
                 self.export_state.message = None;
+                self.export_state.output_path =
+                    self.export_default_path(self.export_state.scope);
             }
             Action::StartProcessing => {
                 if self.screen == Screen::Queue {

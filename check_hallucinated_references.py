@@ -110,13 +110,12 @@ def print_hallucinated_reference(title, error_type, source=None, ref_authors=Non
     print()
 
 def normalize_title(title):
-    """Normalize title for comparison - keep only alphanumeric characters."""
+    """Normalize title for comparison - keep only alphanumeric characters (Unicode-aware)."""
     import html
     title = html.unescape(str(title))  # Decode HTML entities like &quot;
     title = unicodedata.normalize("NFKD", title)
-    title = title.encode("ascii", "ignore").decode("ascii")
-    # Keep only letters and numbers, remove everything else including spaces
-    title = re.sub(r'[^a-zA-Z0-9]', '', title)
+    # Keep only Unicode letters and numbers, remove everything else including spaces
+    title = ''.join(c for c in title if c.isalnum())
     return title.lower()
 
 

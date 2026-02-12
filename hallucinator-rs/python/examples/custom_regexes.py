@@ -21,9 +21,9 @@ def spanish_paper_example():
     text = (
         "Cuerpo del artículo.\n\n"
         "Bibliografía\n\n"
-        "[1] García, A. \"Un estudio sobre la detección de referencias falsas.\"\n"
-        "[2] López, B. \"Análisis de citas en documentos académicos modernos.\"\n"
-        "[3] Martínez, C. \"Métodos computacionales para verificación bibliográfica.\"\n"
+        '[1] García, A. "Un estudio sobre la detección de referencias falsas."\n'
+        '[2] López, B. "Análisis de citas en documentos académicos modernos."\n'
+        '[3] Martínez, C. "Métodos computacionales para verificación bibliográfica."\n'
     )
 
     result = ext.extract_from_text(text)
@@ -42,11 +42,11 @@ def curly_bracket_segmentation():
     ext.ieee_segment_regex = r"\n\s*\{(\d+)\}\s*"
 
     section = (
-        "\n{1} Smith, J. \"A Novel Approach to Reference Verification Systems.\" "
+        '\n{1} Smith, J. "A Novel Approach to Reference Verification Systems." '
         "Proc. IEEE, 2023.\n"
-        "{2} Jones, A. \"Machine Learning for Academic Document Analysis.\" "
+        '{2} Jones, A. "Machine Learning for Academic Document Analysis." '
         "Proc. AAAI, 2022.\n"
-        "{3} Brown, C. \"Natural Language Processing in Citation Parsing.\" "
+        '{3} Brown, C. "Natural Language Processing in Citation Parsing." '
         "Proc. ACL, 2021.\n"
     )
 
@@ -71,7 +71,7 @@ def short_titles_and_custom_venue():
     ext.add_venue_cutoff_pattern(r"(?i)\.\s*My Journal\b.*$")
 
     ref = ext.parse_reference(
-        'Smith, J. and Jones, A. 2022. Neural Reference Detection. My Journal, vol 5.'
+        "Smith, J. and Jones, A. 2022. Neural Reference Detection. My Journal, vol 5."
     )
     if ref:
         print(f"  Title: {ref.title}")
@@ -108,7 +108,7 @@ def limit_authors():
     ext.max_authors = 3
 
     ref = ext.parse_reference(
-        'A. Smith, B. Jones, C. Williams, D. Brown, and E. Davis, '
+        "A. Smith, B. Jones, C. Williams, D. Brown, and E. Davis, "
         '"A Large Collaborative Study on Reference Validation Methods," '
         "Proc. IEEE, 2023."
     )
@@ -129,8 +129,8 @@ def german_appendix_cutoff():
 
     text = (
         "Body.\n\nReferences\n\n"
-        "[1] Schmidt, H. \"Referenzerkennung in wissenschaftlichen Arbeiten.\" 2023.\n"
-        "[2] Müller, K. \"Automatische Zitationsanalyse mit neuronalen Netzen.\" 2022.\n"
+        '[1] Schmidt, H. "Referenzerkennung in wissenschaftlichen Arbeiten." 2023.\n'
+        '[2] Müller, K. "Automatische Zitationsanalyse mit neuronalen Netzen." 2022.\n'
         "\nAnhang A\n\nAdditional material here.\n"
     )
 

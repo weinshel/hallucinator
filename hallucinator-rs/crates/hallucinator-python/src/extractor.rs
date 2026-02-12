@@ -133,10 +133,7 @@ impl PyPdfExtractor {
 
     /// Add an extra quote detection pattern (appended to defaults).
     fn add_quote_pattern(&mut self, pattern: &str) {
-        self.builder = self
-            .builder
-            .clone()
-            .add_quote_pattern(pattern.to_string());
+        self.builder = self.builder.clone().add_quote_pattern(pattern.to_string());
         self.invalidate();
     }
 
@@ -148,10 +145,7 @@ impl PyPdfExtractor {
 
     /// Add an extra compound suffix (appended to defaults).
     fn add_compound_suffix(&mut self, suffix: &str) {
-        self.builder = self
-            .builder
-            .clone()
-            .add_compound_suffix(suffix.to_string());
+        self.builder = self.builder.clone().add_compound_suffix(suffix.to_string());
         self.invalidate();
     }
 

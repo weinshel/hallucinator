@@ -38,7 +38,9 @@ impl PyValidatorConfig {
         let dblp_offline_db = match &self.dblp_offline_path {
             Some(path) => {
                 let db = hallucinator_dblp::DblpDatabase::open(std::path::Path::new(path))
-                    .map_err(|e| PyRuntimeError::new_err(format!("Failed to open DBLP database: {}", e)))?;
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("Failed to open DBLP database: {}", e))
+                    })?;
                 Some(Arc::new(Mutex::new(db)))
             }
             None => None,
@@ -46,8 +48,9 @@ impl PyValidatorConfig {
 
         let acl_offline_db = match &self.acl_offline_path {
             Some(path) => {
-                let db = hallucinator_acl::AclDatabase::open(std::path::Path::new(path))
-                    .map_err(|e| PyRuntimeError::new_err(format!("Failed to open ACL database: {}", e)))?;
+                let db = hallucinator_acl::AclDatabase::open(std::path::Path::new(path)).map_err(
+                    |e| PyRuntimeError::new_err(format!("Failed to open ACL database: {}", e)),
+                )?;
                 Some(Arc::new(Mutex::new(db)))
             }
             None => None,

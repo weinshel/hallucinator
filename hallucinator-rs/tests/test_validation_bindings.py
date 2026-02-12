@@ -13,7 +13,6 @@ from hallucinator import (
     ProgressEvent,
     CheckStats,
     PdfExtractor,
-    Reference,
 )
 
 
@@ -173,9 +172,9 @@ def test_check_single_reference():
     """Check a single well-known reference (requires network)."""
     ext = PdfExtractor()
     ref = ext.parse_reference(
-        'V. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, '
+        "V. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, "
         'A. N. Gomez, L. Kaiser, and I. Polosukhin, "Attention Is All You Need," '
-        'in Advances in Neural Information Processing Systems 30, 2017.'
+        "in Advances in Neural Information Processing Systems 30, 2017."
     )
     assert ref is not None
 
@@ -210,7 +209,7 @@ def test_progress_event_properties():
     ref = ext.parse_reference(
         'J. Devlin, M. Chang, K. Lee, and K. Toutanova, "BERT: Pre-training '
         'of Deep Bidirectional Transformers for Language Understanding," '
-        'in Proc. NAACL, 2019.'
+        "in Proc. NAACL, 2019."
     )
     assert ref is not None
 
@@ -221,7 +220,7 @@ def test_progress_event_properties():
 
     config = ValidatorConfig()
     validator = Validator(config)
-    results = validator.check([ref], progress=on_progress)
+    validator.check([ref], progress=on_progress)
 
     # Check 'checking' event properties
     checking_events = [e for e in events if e.event_type == "checking"]
@@ -246,8 +245,16 @@ def test_disabled_dbs():
     assert ref is not None
 
     config = ValidatorConfig()
-    config.disabled_dbs = ["crossref", "arxiv", "dblp", "semantic_scholar",
-                           "acl", "neurips", "europe_pmc", "pubmed"]
+    config.disabled_dbs = [
+        "crossref",
+        "arxiv",
+        "dblp",
+        "semantic_scholar",
+        "acl",
+        "neurips",
+        "europe_pmc",
+        "pubmed",
+    ]
     validator = Validator(config)
     results = validator.check([ref])
 
@@ -261,8 +268,14 @@ def test_disabled_dbs():
     for db_r in r.db_results:
         assert isinstance(db_r, DbResult)
         assert isinstance(db_r.db_name, str)
-        assert db_r.status in ("match", "no_match", "author_mismatch",
-                                "timeout", "error", "skipped")
+        assert db_r.status in (
+            "match",
+            "no_match",
+            "author_mismatch",
+            "timeout",
+            "error",
+            "skipped",
+        )
 
 
 @pytest.mark.network
@@ -270,10 +283,10 @@ def test_stats_from_results():
     """Stats computed from real validation results."""
     ext = PdfExtractor()
     ref = ext.parse_reference(
-        'I. Goodfellow, J. Pouget-Abadie, M. Mirza, B. Xu, D. Warde-Farley, '
+        "I. Goodfellow, J. Pouget-Abadie, M. Mirza, B. Xu, D. Warde-Farley, "
         'S. Ozair, A. Courville, and Y. Bengio, "Generative Adversarial Networks '
         'for Image Synthesis and Domain Adaptation," '
-        'in Advances in Neural Information Processing Systems, 2014.'
+        "in Advances in Neural Information Processing Systems, 2014."
     )
     assert ref is not None
 

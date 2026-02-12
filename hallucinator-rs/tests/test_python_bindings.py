@@ -2,7 +2,7 @@
 
 import pytest
 
-from hallucinator import PdfExtractor, Reference, ExtractionResult, SkipStats
+from hallucinator import PdfExtractor, Reference, ExtractionResult
 from hallucinator._native import NativePdfExtractor
 
 
@@ -127,8 +127,7 @@ def test_parse_reference_prev_authors():
 def test_parse_reference_no_prev_authors():
     ext = PdfExtractor()
     ref = ext.parse_reference(
-        'J. Smith, "Detecting Fake References in Academic Papers," '
-        "in Proc. IEEE, 2023."
+        'J. Smith, "Detecting Fake References in Academic Papers," in Proc. IEEE, 2023.'
     )
     assert ref is not None
     # prev_authors defaults to None/empty
@@ -140,18 +139,14 @@ def test_parse_reference_no_prev_authors():
 
 def test_min_title_words_default_skips_short():
     ext = PdfExtractor()
-    ref = ext.parse_reference(
-        'J. Smith, "Three Word Title," in Proc. IEEE, 2023.'
-    )
+    ref = ext.parse_reference('J. Smith, "Three Word Title," in Proc. IEEE, 2023.')
     assert ref is None  # default min=4, "Three Word Title" = 3 words
 
 
 def test_min_title_words_custom_keeps_short():
     ext = PdfExtractor()
     ext.min_title_words = 3
-    ref = ext.parse_reference(
-        'J. Smith, "Three Word Title," in Proc. IEEE, 2023.'
-    )
+    ref = ext.parse_reference('J. Smith, "Three Word Title," in Proc. IEEE, 2023.')
     assert ref is not None
     assert "Three Word Title" in ref.title
 
@@ -163,7 +158,7 @@ def test_max_authors():
     ext = PdfExtractor()
     ext.max_authors = 2
     ref = ext.parse_reference(
-        'A. Smith, B. Jones, C. Williams, and D. Brown, '
+        "A. Smith, B. Jones, C. Williams, and D. Brown, "
         '"A Paper About Testing Maximum Author Limits in Reference Parsing," '
         "in Proc. IEEE, 2023."
     )
@@ -326,7 +321,8 @@ def test_custom_strategy_with_extract_from_text():
         call_count += 1
         # Split by parenthesized numbers
         import re
-        parts = re.split(r'\n\s*\(\d+\)\s+', text)
+
+        parts = re.split(r"\n\s*\(\d+\)\s+", text)
         parts = [p.strip() for p in parts if p.strip()]
         return parts if len(parts) >= 3 else None
 
@@ -423,8 +419,7 @@ def test_parse_reference_detailed():
 
     # Successful parse
     ref, reason = ext._native.parse_reference_detailed(
-        'J. Smith, "Detecting Fake References in Academic Papers," '
-        "in Proc. IEEE, 2023."
+        'J. Smith, "Detecting Fake References in Academic Papers," in Proc. IEEE, 2023.'
     )
     assert ref is not None
     assert reason is None
@@ -449,8 +444,7 @@ def test_extraction_result_from_parts():
     """ExtractionResult._from_parts() constructs a valid result."""
     ext = PdfExtractor()
     ref = ext.parse_reference(
-        'J. Smith, "Detecting Fake References in Academic Papers," '
-        "in Proc. IEEE, 2023."
+        'J. Smith, "Detecting Fake References in Academic Papers," in Proc. IEEE, 2023.'
     )
     assert ref is not None
 

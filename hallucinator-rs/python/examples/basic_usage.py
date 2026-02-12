@@ -22,7 +22,9 @@ def main():
     # ── Full pipeline: PDF → structured references ──
     result = ext.extract(pdf_path)
 
-    print(f"Found {len(result)} references (from {result.skip_stats.total_raw} raw segments)\n")
+    print(
+        f"Found {len(result)} references (from {result.skip_stats.total_raw} raw segments)\n"
+    )
 
     # Show skip stats
     stats = result.skip_stats

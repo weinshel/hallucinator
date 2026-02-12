@@ -142,8 +142,7 @@ fn parse_single_reference(
 
     // Skip entries with non-academic URLs
     static URL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?\s*:\s*//").unwrap());
-    static BROKEN_URL_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"ht\s*tps?\s*:\s*//").unwrap());
+    static BROKEN_URL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"ht\s*tps?\s*:\s*//").unwrap());
     static ACADEMIC_URL_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)(acm\.org|ieee\.org|usenix\.org|arxiv\.org|doi\.org)").unwrap()
     });
@@ -159,15 +158,13 @@ fn parse_single_reference(
         title::extract_title_from_reference_with_config(&ref_text, config);
     let cleaned_title = title::clean_title_with_config(&extracted_title, from_quotes, config);
 
-    if cleaned_title.is_empty()
-        || cleaned_title.split_whitespace().count() < config.min_title_words
+    if cleaned_title.is_empty() || cleaned_title.split_whitespace().count() < config.min_title_words
     {
         return ParsedRef::Skip(SkipReason::ShortTitle);
     }
 
     // Extract authors
-    let mut ref_authors =
-        authors::extract_authors_from_reference_with_config(&ref_text, config);
+    let mut ref_authors = authors::extract_authors_from_reference_with_config(&ref_text, config);
 
     // Handle em-dash "same authors as previous"
     if ref_authors.len() == 1 && ref_authors[0] == authors::SAME_AS_PREVIOUS {
@@ -262,7 +259,7 @@ mod tests {
         let ref_text = "See https://github.com/some/repo for details about the implementation.";
         let parsed = ext.parse_reference(ref_text, &[]);
         match parsed {
-            ParsedRef::Skip(SkipReason::UrlOnly) => {} // expected
+            ParsedRef::Skip(SkipReason::UrlOnly) => {}    // expected
             ParsedRef::Skip(SkipReason::ShortTitle) => {} // also acceptable
             ParsedRef::Ref(r) => panic!("URL-only ref should be skipped, got: {:?}", r.title),
         }

@@ -68,16 +68,18 @@ class PdfExtractor:
     """
 
     # Config attributes forwarded to the native extractor via __setattr__.
-    _CONFIG_ATTRS = frozenset({
-        "section_header_regex",
-        "section_end_regex",
-        "fallback_fraction",
-        "ieee_segment_regex",
-        "numbered_segment_regex",
-        "fallback_segment_regex",
-        "min_title_words",
-        "max_authors",
-    })
+    _CONFIG_ATTRS = frozenset(
+        {
+            "section_header_regex",
+            "section_end_regex",
+            "fallback_fraction",
+            "ieee_segment_regex",
+            "numbered_segment_regex",
+            "fallback_segment_regex",
+            "min_title_words",
+            "max_authors",
+        }
+    )
 
     def __init__(self):
         self._native = NativePdfExtractor()

@@ -31,8 +31,9 @@ impl PyValidator {
     #[new]
     fn new(config: &PyValidatorConfig) -> PyResult<Self> {
         let core_config = config.to_core_config()?;
-        let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create tokio runtime: {}", e)))?;
+        let runtime = tokio::runtime::Runtime::new().map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to create tokio runtime: {}", e))
+        })?;
         Ok(Self {
             config: core_config,
             runtime,
@@ -59,10 +60,7 @@ impl PyValidator {
         progress: Option<PyObject>,
     ) -> PyResult<Vec<PyValidationResult>> {
         // Convert PyReference -> Reference
-        let refs: Vec<Reference> = references
-            .into_iter()
-            .map(|r| r.into_inner())
-            .collect();
+        let refs: Vec<Reference> = references.into_iter().map(|r| r.into_inner()).collect();
 
         let config = self.config.clone();
         let cancel = self.cancel.clone();
@@ -96,21 +94,12 @@ impl PyValidator {
                     )
                     .await
                 } else {
-                    hallucinator_core::check_references(
-                        refs,
-                        config,
-                        |_| {},
-                        cancel,
-                    )
-                    .await
+                    hallucinator_core::check_references(refs, config, |_| {}, cancel).await
                 }
             })
         });
 
-        Ok(results
-            .into_iter()
-            .map(PyValidationResult::from)
-            .collect())
+        Ok(results.into_iter().map(PyValidationResult::from).collect())
     }
 
     /// Compute summary statistics from validation results.

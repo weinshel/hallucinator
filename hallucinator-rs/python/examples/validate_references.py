@@ -62,7 +62,7 @@ def main():
 
     # Step 3: Summary
     check_stats = Validator.stats(results)
-    print(f"\n--- Summary ---")
+    print("\n--- Summary ---")
     print(f"Total:            {check_stats.total}")
     print(f"Verified:         {check_stats.verified}")
     print(f"Not found:        {check_stats.not_found}")

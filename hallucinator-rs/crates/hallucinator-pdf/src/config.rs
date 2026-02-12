@@ -245,14 +245,13 @@ impl PdfParsingConfigBuilder {
                 }
             };
 
-        let compile_plain =
-            |builder: ListOverridePlainBuilder| -> ListOverride<String> {
-                match builder {
-                    ListOverridePlainBuilder::Default => ListOverride::Default,
-                    ListOverridePlainBuilder::Replace(v) => ListOverride::Replace(v),
-                    ListOverridePlainBuilder::Extend(v) => ListOverride::Extend(v),
-                }
-            };
+        let compile_plain = |builder: ListOverridePlainBuilder| -> ListOverride<String> {
+            match builder {
+                ListOverridePlainBuilder::Default => ListOverride::Default,
+                ListOverridePlainBuilder::Replace(v) => ListOverride::Replace(v),
+                ListOverridePlainBuilder::Extend(v) => ListOverride::Extend(v),
+            }
+        };
 
         Ok(PdfParsingConfig {
             section_header_re: compile(self.section_header_re)?,

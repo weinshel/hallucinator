@@ -803,21 +803,12 @@ def find_references_section(text):
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             ref_start = match.end()
-            # Find end markers (Appendix, Acknowledgments, etc.)
-            end_markers = [
-                r'\n\s*Appendix',
-                r'\n\s*APPENDIX',
-                r'\n\s*Acknowledgments',
-                r'\n\s*ACKNOWLEDGMENTS',
-                r'\n\s*Acknowledgements',
-                r'\n\s*Supplementary',
-                r'\n\s*SUPPLEMENTARY',
-            ]
+            # Find end markers (Appendix, Acknowledgments, Ethics, etc.)
+            end_marker = r'\n\s*(?:Appendix|Acknowledge?ments?|Supplementary|Ethics\s+Statement|Ethical\s+Considerations|Broader\s+Impact|Paper\s+Checklist|Checklist)\b'
             ref_end = len(text)
-            for end_pattern in end_markers:
-                end_match = re.search(end_pattern, text[ref_start:], re.IGNORECASE)
-                if end_match:
-                    ref_end = min(ref_end, ref_start + end_match.start())
+            end_match = re.search(end_marker, text[ref_start:], re.IGNORECASE)
+            if end_match:
+                ref_end = ref_start + end_match.start()
 
             return text[ref_start:ref_end]
 
@@ -876,20 +867,34 @@ def segment_references(ref_text):
     # Group 1 captures the prefix char(s) so we can include them in the previous reference
     # (?:\d{1,4}\n)? handles page/reference numbers on their own line between references
     # \s* after optional page number handles extra whitespace/newlines (e.g., column breaks)
-    aaai_pattern = r'([a-z0-9)]|[A-Z]{2})\.\n(?:\d{1,4}\n)?\s*(?!In\s)([A-Z][a-zA-Z]+(?:[ -][A-Za-z]+)?,\s+[A-Z]\.)'
+    # Primary pattern: personal authors (unicode-aware for diacritics)
+    aaai_pattern = r'([a-z0-9)]|[A-Z]{2})\.\n(?:\d{1,4}\n)?\s*(?!In\s)([A-Z][a-zA-Z\u00C0-\u024F]+(?:[ -][A-Za-z\u00C0-\u024F]+)?,\s+[A-Z]\.)'
+    # Secondary pattern: organization authors (e.g., "European Union. 2022a.")
+    aaai_org_pattern = r'([a-z0-9)]|[A-Z]{2})\.\n(?:\d{1,4}\n)?\s*(?!In\s)([A-Z][a-zA-Z\u00C0-\u024F]+(?:\s+[A-Z][a-zA-Z\u00C0-\u024F]+)+\.\s+\d{4}[a-z]?\.)'
     aaai_matches = list(re.finditer(aaai_pattern, ref_text))
+    aaai_org_matches = list(re.finditer(aaai_org_pattern, ref_text))
 
-    if len(aaai_matches) >= 3:
+    # Merge boundaries from both patterns, sort, deduplicate within 10 chars
+    all_aaai = aaai_matches + aaai_org_matches
+    if all_aaai:
+        all_aaai.sort(key=lambda m: m.start())
+        merged = [all_aaai[0]]
+        for m in all_aaai[1:]:
+            if m.start() - merged[-1].start() > 10:
+                merged.append(m)
+        all_aaai = merged
+
+    if len(all_aaai) >= 3:
         refs = []
         # Handle first reference (before first match) - starts at beginning of ref_text
         # end(1) includes the consumed prefix char(s) in the previous reference
-        first_ref = ref_text[:aaai_matches[0].end(1)].strip()
+        first_ref = ref_text[:all_aaai[0].end(1)].strip()
         if first_ref and len(first_ref) > 20:
             refs.append(first_ref)
         # Handle remaining references
-        for i, match in enumerate(aaai_matches):
+        for i, match in enumerate(all_aaai):
             start = match.start(2)  # Start at the author name (group 2)
-            end = aaai_matches[i + 1].end(1) if i + 1 < len(aaai_matches) else len(ref_text)
+            end = all_aaai[i + 1].end(1) if i + 1 < len(all_aaai) else len(ref_text)
             ref_content = ref_text[start:end].strip()
             if ref_content:
                 refs.append(ref_content)
@@ -1089,6 +1094,11 @@ def clean_title(title, from_quotes=False):
     if in_venue_match:
         title = title[:in_venue_match.start() + 1]  # Keep the question mark
 
+    # Handle "? Journal Name, vol(" pattern (question-ending title leaking into journal)
+    q_journal_match = re.search(r'[?!]\s+[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014\-]+,\s*\d+\s*[(:]', title)
+    if q_journal_match:
+        title = title[:q_journal_match.start() + 1]  # Keep the ?/!
+
     # Remove trailing journal/venue info that might have been included
     cutoff_patterns = [
         r'\.\s*[Ii]n:\s+[A-Z].*$',  # Elsevier ". In: Proceedings" or ". In: IFIP"
@@ -1118,6 +1128,8 @@ def clean_title(title, from_quotes=False):
         r'\s*\(pp\.?\s*\d+[–\-]\d*\)\s*$',  # "(pp. 280-289)" or "(pp 280–289)"
         r',?\s+\d+[–\-]\d+\s*$',  # Trailing page range: ", 280-289" or " 280–289"
         r'\.\s*[A-Z][a-zA-Z]+(?:\s+(?:in|of|on|and|for|the|a|an|&|[A-Z]?[a-zA-Z]+))+,\s*\d+\s*[,:]\s*\d+[–\-]?\d*.*$',  # ". Journal Name, vol: pages" like ". Computers in Human Behavior, 61: 280–28"
+        r'\.\s*[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014-]+\d+\s*[(,:]\s*\d+[–\-]?\d*.*$',  # ". Journal Name vol(pages" with extended chars
+        r'\.\s*[A-Z][a-zA-Z\s]+[&+]\s*[A-Z].*$',  # ". Words & More" or ". Words + More" (standalone journal names ending with &/+)
     ]
 
     for pattern in cutoff_patterns:
@@ -1225,6 +1237,8 @@ def extract_title_from_reference(ref_text):
     quote_patterns = [
         r'["\u201c\u201d]([^"\u201c\u201d]+)["\u201c\u201d]',  # Smart quotes (any combo)
         r'"([^"]+)"',  # Regular quotes
+        r'[\u2018]([^\u2018\u2019]{10,})[\u2019]',  # Smart single quotes (Harvard/APA)
+        r"(?:^|[\s(])'([^']{10,})'(?:\s*[,.]|\s*$)",  # Plain single quotes with delimiters
     ]
 
     for pattern in quote_patterns:
@@ -1347,8 +1361,9 @@ def extract_title_from_reference(ref_text):
             r'\.\s*[Ii]n\s+[A-Z]',  # ". In Proceedings"
             r'\.\s*(?:Proceedings|IEEE|ACM|USENIX|arXiv)',
             r'\.\s*[A-Z][a-zA-Z\s]+\d+\s*\(\d+\)',  # ". Journal Name 34(5)" - journal with volume
-            r'\.\s*[A-Z][a-zA-Z\s&]+\d+:\d+',  # ". Journal Name 34:123" - journal with pages
-            r'\.\s*[A-Z][a-zA-Z\s&-]+,\s*\d+',  # ". Journal Name, 11" or ". PACM-HCI, 4"
+            r'\.\s*[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014]+\d+:\d+',  # ". Journal Name 34:123" - journal with pages
+            r'\.\s*[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014-]+,\s*\d+',  # ". Journal Name, 11" or ". PACM-HCI, 4"
+            r'[?!]\s+[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014-]+,\s*\d+\s*[(:]',  # "? Journal Name, vol(" - cut after ?/!
             r'\.\s*https?://',  # URL follows title
             r'\.\s*URL\s+',  # URL follows title
             r'\.\s*Tech\.\s*rep\.',  # Technical report
@@ -1358,7 +1373,11 @@ def extract_title_from_reference(ref_text):
         for pattern in title_end_patterns:
             m = re.search(pattern, after_year)
             if m:
-                title_end = min(title_end, m.start())
+                # For ?/! patterns, keep the punctuation in the title (cut after it)
+                if m.group(0)[0] in '?!':
+                    title_end = min(title_end, m.start() + 1)
+                else:
+                    title_end = min(title_end, m.start())
 
         title = after_year[:title_end].strip()
         title = re.sub(r'\.\s*$', '', title)
@@ -1375,13 +1394,19 @@ def extract_title_from_reference(ref_text):
         title_end_patterns = [
             r'\.\s*[Ii]n\s+[A-Z]',  # ". In Proceedings"
             r'\.\s*(?:Proceedings|IEEE|ACM|USENIX|arXiv)',
+            r'\.\s*[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014-]{10,},\s*\d+',  # ". Long Journal Name, vol" - long journal names
+            r'[?!]\s+[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014-]+,\s*\d+\s*[(:]',  # "? Journal Name, vol(" - cut after ?/!
             r'\s+doi:',
         ]
         title_end = len(after_year)
         for pattern in title_end_patterns:
             m = re.search(pattern, after_year)
             if m:
-                title_end = min(title_end, m.start())
+                # For ?/! patterns, keep the punctuation in the title (cut after it)
+                if m.group(0)[0] in '?!':
+                    title_end = min(title_end, m.start() + 1)
+                else:
+                    title_end = min(title_end, m.start())
 
         title = after_year[:title_end].strip()
         title = re.sub(r'\.\s*$', '', title)

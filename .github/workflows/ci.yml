@@ -51,12 +51,19 @@ jobs:
 
       - run: sudo apt-get update && sudo apt-get -y install libfontconfig1-dev
 
-      - name: Install deps
-        run: uv pip install --system pytest maturin
+      - name: Create venv and install deps
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install pytest maturin
 
       - name: Build + install bindings
-        run: uv run --no-project maturin develop --release
+        run: |
+          source .venv/bin/activate
+          maturin develop --release
         working-directory: hallucinator-rs
 
       - name: Run tests
-        run: pytest hallucinator-rs/tests/ -m "not network" -v
+        run: |
+          source .venv/bin/activate
+          pytest hallucinator-rs/tests/ -m "not network" -v

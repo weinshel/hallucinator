@@ -186,7 +186,7 @@ fn process_bib_entries(entries: &[&biblatex::Entry]) -> ExtractionResult {
         let title = entry
             .title()
             .ok()
-            .map(|c| chunks_to_string(c))
+            .map(chunks_to_string)
             .map(|t| strip_latex(&t));
 
         // Same skip logic as BBL: no title, short title (<4 words)

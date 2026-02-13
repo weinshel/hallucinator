@@ -1330,6 +1330,44 @@ def is_journal_metadata_not_title(text: str) -> bool:
     if elsevier_pattern:
         return True
 
+    # Pattern 6: "In: Year IEEE/ACM Conference" - venue starting with year
+    # Example: "In: 2019 IEEE Global Communications Conference (GLOBECOM)"
+    in_year_venue = re.match(
+        r'^In[:\s]+\d{4}\s+(?:IEEE|ACM|USENIX)',
+        text,
+        re.IGNORECASE
+    )
+    if in_year_venue:
+        return True
+
+    # Pattern 7: "In: Proceedings Nth Annual/International..."
+    # Example: "In: Proceedings 35th Annual Symposium on Foundations"
+    in_proceedings = re.match(
+        r'^In[:\s]+(?:Proceedings|Proc\.)',
+        text,
+        re.IGNORECASE
+    )
+    if in_proceedings:
+        return True
+
+    # Pattern 8: Journal with acronym in parens followed by volume
+    # Example: "Journal of the ACM (JACM) 32(2), 374–382 (1985)"
+    journal_acronym_pattern = re.match(
+        r'^[A-Z][A-Za-z\s]+\([A-Z]+\)\s+\d+\s*\(\d+\)',
+        text
+    )
+    if journal_acronym_pattern:
+        return True
+
+    # Pattern 9: Short journal name with volume/pages
+    # Example: "Nature 299(5886), 802–803 (1982)"
+    short_journal_pattern = re.match(
+        r'^(?:Nature|Science|Cell|PNAS|PLoS)\s+\d+\s*\(\d+\)',
+        text
+    )
+    if short_journal_pattern:
+        return True
+
     return False
 
 
@@ -1381,6 +1419,14 @@ def test_journal_metadata_detection():
         "In Ouyang, F., Jiao, P., McLaren, B.M., Alavi, A.H",
         "Nature 123:456-789 (2020)",
         "13(6), 4–16 (1984)",
+        # New patterns from batch 3 evaluation
+        "In: Proceedings 35th Annual Symposium on Foundations of Computer Science, pp",
+        "In: 2019 IEEE Global Communications Conference (GLOBECOM)",
+        "In: Proceedings of the Twenty-eighth Annual ACM Symposium on Theory of Computing",
+        "Journal of the ACM (JACM) 32(2), 374–382 (1985)",
+        "Nature 299(5886), 802–803 (1982) https://doi.org/10",
+        "Journal of cryptology 4(3), 161–174 (1991)",
+        "In: Proceedings of the 8th ACM Conference on Computer and Communications Security",
     ]
 
     # Should NOT be detected as metadata (these are real titles)
@@ -1548,8 +1594,12 @@ def test_springer_enhanced():
 JOURNAL_METADATA_PATTERNS = {
     # Patterns that indicate extracted text is journal metadata, not title
     "in_venue_start": r"^In[:\s]",  # Starts with "In:" or "In "
+    "in_proceedings": r"^In[:\s]+(?:Proceedings|Proc\.)",  # "In: Proceedings..."
+    "in_year_venue": r"^In[:\s]+\d{4}\s+(?:IEEE|ACM|USENIX)",  # "In: 2019 IEEE..."
     "journal_vol_issue": r"^[A-Z][A-Za-z\s&\-]+\s+\d+\s*\(\d+\)\s*[,:]\s*\d+[–\-]\d+\s*\(\d{4}\)",
     "journal_colon_pages": r"^[A-Z][A-Za-z\s&\-]+\s+\d+\s*:\s*\d+[–\-]\d+\s*\(\d{4}\)",
+    "journal_acronym": r"^[A-Z][A-Za-z\s]+\([A-Z]+\)\s+\d+\s*\(\d+\)",  # "Journal (JACM) 32(2)"
+    "short_journal": r"^(?:Nature|Science|Cell|PNAS|PLoS)\s+\d+\s*\(\d+\)",  # "Nature 299(5886)"
     "vol_page_only": r"^\d+\s*\(\d+\)\s*[,:]\s*\d+[–\-]\d+",
 }
 

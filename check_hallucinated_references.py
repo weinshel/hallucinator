@@ -1287,6 +1287,10 @@ def clean_title(title, from_quotes=False):
         r'\.\s*[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014-]+\d+\s*[(,:]\s*\d+[–\-]?\d*.*$',  # ". Journal Name vol(pages" with extended chars
         r'\.\s*[A-Z][a-zA-Z\s]+[&+]\s*[A-Z].*$',  # ". Words & More" or ". Words + More" (standalone journal names ending with &/+)
         r'\.\s+(?:Beaverton|New\s+York|San\s+Francisco|Cambridge|London|Berlin|Springer|Heidelberg).*$',  # ". Location/Publisher..." (tech report locations)
+        r'\.\s+[A-Z][a-z]+\s+of\s+[A-Z][a-z]+(?:\s+(?:and|&)\s+[A-Z][a-z]+)*\s*$',  # ". Journal of Law and Technology" or ". Journal of X"
+        r'\.\s+Foundations\s+and\s+Trends.*$',  # ". Foundations and Trends in..."
+        r"\.\s+(?:CHI|CSCW|UbiComp|IMWUT|SOUPS|PETS)\s*['\u2019]?\d{2,4}.*$",  # ". CHI'24" or ". CSCW 2024" etc.
+        r",\s+(?:CHI|CSCW|UbiComp|IMWUT|SOUPS|PETS)\s*['\u2019]?\d{2,4}.*$",  # ", CHI'24" etc.
     ]
 
     for pattern in cutoff_patterns:
@@ -1409,6 +1413,7 @@ def extract_title_from_reference(ref_text):
     # === Format 1: IEEE/USENIX - Quoted titles or titles with quoted portions ===
     # Handles: "Full Title" or "Quoted part": Subtitle
     quote_patterns = [
+        r'""([^"]+)""',  # Double double-quotes (escaped quotes in some formats)
         r'["\u201c\u201d]([^"\u201c\u201d]+)["\u201c\u201d]',  # Smart quotes (any combo)
         r'"([^"]+)"',  # Regular quotes
         r'[\u2018]([^\u2018\u2019]{10,})[\u2019]',  # Smart single quotes (Harvard/APA)

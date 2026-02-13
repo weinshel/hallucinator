@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Ratatui-based terminal UI for batch hallucinated reference detection"
+repository.workspace = true
 
 [[bin]]
 name = "hallucinator-tui"

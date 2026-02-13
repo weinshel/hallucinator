@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "PDF extraction and reference parsing for hallucinated reference detection"
 
+[package.metadata.dist]
+dist = false
+
 [features]
 default = ["pdf"]
 pdf = ["dep:mupdf", "dep:zip", "dep:tar", "dep:flate2"]

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Axum web server with SSE streaming for hallucinated reference detection"
 
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 hallucinator-core.workspace = true
 hallucinator-pdf = { workspace = true, features = ["pdf"] }

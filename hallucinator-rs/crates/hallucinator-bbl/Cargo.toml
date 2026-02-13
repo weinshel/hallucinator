@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "BibTeX .bbl file parser for hallucinated reference detection"
 
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 hallucinator-pdf.workspace = true
 biblatex.workspace = true

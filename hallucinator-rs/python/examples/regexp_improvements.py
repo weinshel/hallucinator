@@ -11,6 +11,8 @@ Improvements covered:
 4. Venue leak fixes after question marks
 5. 2-word quoted titles support
 6. Reference number prefix stripping in title extraction
+7. Format 5 skip for Chinese ALL CAPS
+8. Author names with particles and special characters (von, van der, etc.)
 
 Run with:
     pip install .          # from hallucinator-rs/
@@ -451,6 +453,616 @@ def test_format5_skip_detection():
 
 
 # =============================================================================
+# IMPROVEMENT 8: Author Names with Particles and Special Characters
+# =============================================================================
+# Academic names often include:
+#   - Lowercase particles: von, van, van der, de, del, della, Le, La, etc.
+#   - Accented characters: Bissyand´e, Müller, García
+#   - Apostrophes: Dell'Amico, O'Brien
+#   - Hyphenated names: Styp-Rekowsky, Vallina-Rodriguez
+#
+# The current title extraction fails because these patterns break the
+# "Initial. LastName, Initial. LastName, and Initial. LastName. Title."
+# boundary detection.
+#
+# Example failures:
+#   "K. Allix, T. F. Bissyand´e, J. Klein, and Y. Le Traon. Androzoo: ..."
+#   -> Title extracted as "Bissyand´e, J. Klein, and Y. Le Traon" (WRONG)
+#   -> Should be "Androzoo: Collecting millions of android apps..."
+#
+# Location in Python: extract_title_from_reference()
+# Rust location: hallucinator-pdf/src/title.rs
+
+# Common name particles (lowercase) that appear between first/middle names and surnames
+NAME_PARTICLES = {
+    'von', 'van', 'de', 'del', 'della', 'di', 'da', 'dos', 'das', 'du',
+    'le', 'la', 'les', 'den', 'der', 'ten', 'ter', 'op', 'het',
+    'bin', 'ibn', 'al', 'el', 'ben',  # Arabic/Hebrew
+    'mac', 'mc', "o'",  # Celtic (note: O' with apostrophe)
+}
+
+
+def extract_title_author_particle_aware(ref_text: str) -> Optional[str]:
+    """Extract title from references with complex author names.
+
+    Handles:
+    - Lowercase particles: von, van der, de, Le, etc.
+    - Accented characters: Bissyand´e, Müller
+    - Apostrophes: Dell'Amico, O'Brien
+    - Hyphenated surnames: Styp-Rekowsky, Vallina-Rodriguez
+
+    The key insight is that the author list follows a strict pattern:
+    "I. Name, I. Name, and I. Name. Title"
+
+    Where:
+    - I = Initial(s) like "J." or "T. F." or "A. E. B."
+    - Name = Surname possibly with particles/accents/hyphens
+    - The author list ends with ". " followed by the title
+
+    The title typically starts with a capital letter or number.
+    """
+    # Strip reference number prefixes first
+    ref_text = re.sub(r'^\[\d+\]\s*', '', ref_text)
+    ref_text = re.sub(r'^\d+\.\s*', '', ref_text)
+    ref_text = ref_text.lstrip('. ')
+
+    # Pattern for author initials: "J." or "T. F." or "A. E. B." or "P.-A."
+    # Must handle:
+    # - Accented initials like "´A." (seen in Spanish names)
+    # - Hyphenated initials like "P.-A." (seen in European names)
+    # Using Unicode ranges instead of literal characters to avoid escaping issues
+    initial_pattern = r"(?:[\u0041-\u005A\u00C0-\u00D6\u00D8-\u00DE\u0027\u0060\u00B4]\.(?:[\s\-]*[A-Z]\.)*)"
+
+    # Pattern for surname: letters, accents, hyphens, apostrophes, particles
+    # Examples: "Smith", "von Styp-Rekowsky", "Bissyand´e", "Dell'Amico", "van der Sloot"
+    # Using Unicode ranges: \u00C0-\u024F covers Latin Extended-A and Extended-B
+    surname_chars = r"[A-Za-z\u00C0-\u024F\u0027\u0060\u00B4\u2019\-]"
+    # Structure: optional particles, then base name, then optional additional parts
+    surname_pattern = (
+        r"(?:(?:von|van|de|del|della|di|da|dos|das|du|le|la|les|den|der|ten|ter|op|het)\s+)?"  # optional particle
+        + surname_chars + r"+"  # base name with accents, apostrophes, hyphens
+        + r"(?:\s+" + surname_chars + r"+)*"  # additional name parts (e.g., "van der Sloot")
+    )
+
+    # Full author pattern: "I. Surname" or "I. I. Surname"
+    author_pattern = initial_pattern + r"\s*" + surname_pattern
+
+    # Pattern for author list: "Author, Author, and Author."
+    # The key is finding where the author list ends (after "and LastName.")
+    # and the title begins (capital letter or number after ". ")
+
+    # Strategy: Find the pattern "and Initial. Surname. Title"
+    # where Title starts with a capital letter (not an initial pattern)
+
+    # Look for "and I. Name. " followed by title start
+    # Title start patterns:
+    # - Capital + lowercase letter (most titles): "Androzoo:", "Artist:", "The european"
+    # - Digit (numbered titles): "50 ways"
+    # - Quote (quoted titles): '"A title"'
+    # We need to avoid matching another author initial like "A." or "J."
+    # So we look for capital + lowercase, or capital + space + lowercase (single-word start like "A ")
+    and_author_title_pattern = (
+        r",?\s+and\s+"  # "and" or ", and"
+        + author_pattern +  # Final author
+        r"\.\s+"  # Period and space after author list
+        # Title start: avoid matching "X." (initial) by requiring lowercase after capital,
+        # or a digit, or a quote. Also handle "A simple" (capital + space + lowercase)
+        r"([A-Z\u00C0-\u00D6][a-z]|[A-Z]\s+[a-z]|[0-9]|[\"\u0022])"
+    )
+
+    match = re.search(and_author_title_pattern, ref_text)
+    if match:
+        # Title starts at the captured group
+        title_start = match.start(1)
+        title_text = ref_text[title_start:]
+
+        # Find where title ends (venue/year markers)
+        title_end_patterns = [
+            r'\.\s+In\s+',  # ". In Proceedings"
+            r'\s+In\s+Proceedings',  # " In Proceedings" (no period)
+            r'\.\s+(?:Proc\.|Proceedings\s+of)',  # ". Proc." or ". Proceedings of"
+            r'\.\s+(?:IEEE|ACM|USENIX|NDSS|CCS|AAAI|ICML|NeurIPS|EuroS&P)\b',  # ". IEEE" venue
+            r'\.\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+\d{4}',  # ". Journal Name 2021"
+            r'\.\s+[A-Z][a-z]+(?:\s*&\s*[A-Z][a-z]+)+',  # ". Information & Communications"
+            r'\.\s+arXiv\s+preprint',  # ". arXiv preprint"
+            r',\s+(?:vol\.|pp\.|pages)\s',  # ", vol." or ", pp."
+            r',\s+\d{4}\.$',  # ", 2021." at end
+            r',\s+\d+\(\d+\)',  # ", 28(1)" - volume(issue)
+            # Publisher/journal names
+            r'\.\s+(?:Springer|Elsevier|Wiley|Nature|Science|PLOS|Oxford|Cambridge)\b',
+            # "The X of Y" and "X of Y" journal patterns
+            r'\.\s+The\s+(?:Annals|Journal|Proceedings)\s+of\b',
+            r'\.\s+Journal\s+of\s+[A-Z]',  # ". Journal of X"
+            # Generic journal pattern: ". Word Word, vol" or ". Word Word 123"
+            r'\.\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+,\s*\d',
+            r'\.\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\s+\d+[:(]',
+        ]
+
+        title_end = len(title_text)
+        for pattern in title_end_patterns:
+            m = re.search(pattern, title_text)
+            if m:
+                title_end = min(title_end, m.start())
+
+        title = title_text[:title_end].strip()
+        # Clean up trailing period if present
+        title = re.sub(r'\.\s*$', '', title)
+
+        if len(title.split()) >= 3:
+            return title
+
+    return None
+
+
+def test_author_particle_names():
+    """Test title extraction from references with complex author names."""
+    print("=" * 60)
+    print("IMPROVEMENT 8: Author Names with Particles/Special Chars")
+    print("=" * 60)
+
+    test_cases = [
+        # (raw_citation, expected_title)
+        (
+            "K. Allix, T. F. Bissyand´e, J. Klein, and Y. Le Traon. "
+            "Androzoo: Collecting millions of android apps for the research community. In MSR, 2016.",
+            "Androzoo: Collecting millions of android apps for the research community"
+        ),
+        (
+            "M. Backes, S. Bugiel, O. Schranz, P. von Styp-Rekowsky, and S. Weisgerber. "
+            "Artist: The android runtime instrumentation and security toolkit. In EuroS&P, 2017.",
+            "Artist: The android runtime instrumentation and security toolkit"
+        ),
+        (
+            "C. J. Hoofnagle, B. van der Sloot, and F. Z. Borgesius. "
+            "The european union general data protection regulation: what it is and what it means. "
+            "Information & Communications Technology Law, 28(1), 2019.",
+            "The european union general data protection regulation: what it is and what it means"
+        ),
+        (
+            "J. Reardon, ´A. Feal, P. Wijesekera, A. E. B. On, N. Vallina-Rodriguez, and S. Egelman. "
+            "50 ways to leak your data: An exploration of apps' circumvention of the android permissions system. "
+            "In USENIX Security, 2019.",
+            "50 ways to leak your data: An exploration of apps' circumvention of the android permissions system"
+        ),
+        (
+            "A. Smith, B. Dell'Amico, D. Balzarotti, and P.-A. Vervier. "
+            "Detecting malicious behavior in networks. In IEEE S&P, 2020.",
+            "Detecting malicious behavior in networks"
+        ),
+        # Negative test: should still work for simple names
+        (
+            "A. Smith, B. Jones, and C. Brown. "
+            "A simple title for testing. In Proceedings of Test, 2023.",
+            "A simple title for testing"
+        ),
+    ]
+
+    for raw, expected in test_cases:
+        result = extract_title_author_particle_aware(raw)
+        if result is None:
+            print(f"  FAIL: No title extracted")
+            print(f"    Input: {raw[:70]}...")
+            print(f"    Expected: {expected[:50]}...")
+        elif result.lower() == expected.lower():
+            print(f"  OK: '{result[:55]}{'...' if len(result) > 55 else ''}'")
+        else:
+            print(f"  MISMATCH:")
+            print(f"    Got:      {result}")
+            print(f"    Expected: {expected}")
+
+    print()
+
+
+# Regex patterns for Rust implementation
+AUTHOR_PARTICLE_PATTERNS = {
+    # Initial pattern: handles accented initials and hyphenated like "P.-A."
+    # Unicode ranges: \u0041-\u005A = A-Z, \u00C0-\u00DE = accented capitals
+    "initial": r"[\u0041-\u005A\u00C0-\u00D6\u00D8-\u00DE\u0027\u0060\u00B4]\.(?:[\s\-]*[A-Z]\.)*",
+
+    # Common lowercase particles (should be case-insensitive in matching)
+    "particles": [
+        "von", "van", "de", "del", "della", "di", "da", "dos", "das", "du",
+        "le", "la", "les", "den", "der", "ten", "ter", "op", "het",
+    ],
+
+    # Surname character class: letters (including accented), hyphens, apostrophes
+    # Unicode ranges for apostrophes: \u0027=', \u0060=`, \u00B4=´, \u2019='
+    "surname_chars": r"[A-Za-z\u00C0-\u024F\u0027\u0060\u00B4\u2019\-]",
+
+    # Pattern to find author list end: ", and I. Surname. TitleStart"
+    "author_list_end": (
+        r",?\s+and\s+"  # ", and" or "and"
+        r"[\u0041-\u005A\u00C0-\u00D6\u00D8-\u00DE\u0027\u0060\u00B4]\.(?:[\s\-]*[A-Z]\.)*"  # Initial(s)
+        r"\s*"
+        r"(?:(?:von|van|de|del|della|di|da|dos|das|du|le|la|les|den|der|ten|ter|op|het)\s+)?"  # Optional particle
+        r"[A-Za-z\u00C0-\u024F\u0027\u0060\u00B4\u2019\-]+"  # Base surname
+        r"(?:\s+[A-Za-z\u00C0-\u024F\u0027\u0060\u00B4\u2019\-]+)*"  # Additional name parts
+        r"\.\s+"  # Period after surname
+        r"([A-Z\u00C0-\u00D6][a-z]|[A-Z]\s+[a-z]|[0-9]|[\"\u0022])"  # Title start
+    ),
+
+    # Title end patterns (for trimming venue/journal info)
+    "title_end_patterns": [
+        r"\.\s+In\s+",  # ". In Proceedings"
+        r"\.\s+(?:Proc\.|Proceedings\s+of)",  # ". Proc."
+        r"\.\s+(?:IEEE|ACM|USENIX|NDSS|CCS|AAAI|ICML|NeurIPS|EuroS&P)\b",  # Venues
+        r"\.\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+\d{4}",  # ". Journal Name 2021"
+        r"\.\s+[A-Z][a-z]+(?:\s*&\s*[A-Z][a-z]+)+",  # ". Information & Communications"
+        r"\.\s+arXiv\s+preprint",  # ". arXiv preprint"
+        r",\s+(?:vol\.|pp\.|pages)\s",  # ", vol." or ", pp."
+        r",\s+\d{4}\.$",  # ", 2021." at end
+        r",\s+\d+\(\d+\)",  # ", 28(1)" - volume(issue)
+    ],
+}
+
+
+# =============================================================================
+# IMPROVEMENT 9: Springer/LNCS Format (colon after authors)
+# =============================================================================
+# Springer/LNCS references use: "LastName, F., LastName, F.: Title. In: Venue"
+# The colon after the last author initial is the key marker.
+#
+# Example failures from evaluation:
+#   "Micali, S., Ohta, K., Reyzin, L.: Accountable-subgroup multisignatures. In: ..."
+#   "Schnorr, C.P.: Efficient signature generation by smart cards. Journal of ..."
+#
+# Location: hallucinator-pdf/src/title.rs
+
+
+def extract_title_springer_format(ref_text: str) -> Optional[str]:
+    """Extract title from Springer/LNCS format references.
+
+    Pattern: LastName, F., LastName, F.: Title. In: Venue
+    or: LastName, F.: Title. Journal Name vol(issue)
+    """
+    # Strip reference number prefixes
+    ref_text = re.sub(r'^\[\d+\]\s*', '', ref_text)
+    ref_text = re.sub(r'^\d+\.\s*', '', ref_text)
+
+    # Look for the pattern: "Initial.: Title" where Initial is like "S." or "C.P."
+    # The colon after the initial(s) marks the end of authors
+    # Pattern: comma-space-Initial(s)-period-colon
+    colon_match = re.search(
+        r',\s*'  # comma before last author
+        r'[A-Z](?:\.[A-Z])*\.'  # Initial(s) like "S." or "C.P."
+        r':\s*'  # colon after authors
+        r'([A-Z\u00C0-\u00D6][^:]{10,}?)'  # Title (at least 10 chars, no colons)
+        r'(?:\.\s+(?:In[:\s]|Journal|[A-Z][a-z]+\s+\d))',  # End marker (In: or In space)
+        ref_text
+    )
+
+    if colon_match:
+        title = colon_match.group(1).strip()
+        # Clean up trailing period
+        title = re.sub(r'\.\s*$', '', title)
+        # Accept 2+ words for this format (hyphenated words count as 1)
+        if len(title.split()) >= 2:
+            return title
+
+    return None
+
+
+def test_springer_format():
+    """Test Springer/LNCS format extraction."""
+    print("=" * 60)
+    print("IMPROVEMENT 9: Springer/LNCS Format (colon after authors)")
+    print("=" * 60)
+
+    test_cases = [
+        (
+            "Micali, S., Ohta, K., Reyzin, L.: Accountable-subgroup multisignatures. "
+            "In: Proceedings of the 8th ACM Conference on Computer and Communications Security.",
+            "Accountable-subgroup multisignatures"
+        ),
+        (
+            "Schnorr, C.P.: Efficient signature generation by smart cards. "
+            "Journal of cryptology 4(3), 161–174 (1991)",
+            "Efficient signature generation by smart cards"
+        ),
+        (
+            "Hedabou, M., Abdulsalam, Y.S.: Efficient and secure implementation of BLS "
+            "multisignature scheme on TPM. In: 2020 IEEE International Conference.",
+            "Efficient and secure implementation of BLS multisignature scheme on TPM"
+        ),
+        (
+            "Rezaeighaleh, H., Zou, C.C.: New secure approach to backup cryptocurrency wallets. "
+            "In: 2019 IEEE Global Communications Conference (GLOBECOM)",
+            "New secure approach to backup cryptocurrency wallets"
+        ),
+    ]
+
+    for raw, expected in test_cases:
+        result = extract_title_springer_format(raw)
+        if result is None:
+            print(f"  FAIL: No title extracted")
+            print(f"    Raw: {raw[:70]}...")
+        elif result.lower() == expected.lower():
+            print(f"  OK: '{result[:55]}...' " if len(result) > 55 else f"  OK: '{result}'")
+        else:
+            print(f"  MISMATCH:")
+            print(f"    Got:      {result}")
+            print(f"    Expected: {expected}")
+
+    print()
+
+
+# =============================================================================
+# IMPROVEMENT 10: Bracket Citation Format [CODE]
+# =============================================================================
+# Some papers use bracket codes: "[ACGH20] Authors. Title. In Venue"
+# The bracket code should be stripped and not confused with IEEE format.
+#
+# Example failures:
+#   "[ACGH20] Gorjan Alagic, Andrew M. Childs, Alex B. Grilo, and Shih-Han Hung.
+#    Noninteractive classical verification of quantum computation. In CRYPTO 2020"
+#
+# Location: hallucinator-pdf/src/title.rs
+
+
+def extract_title_bracket_code_format(ref_text: str) -> Optional[str]:
+    """Extract title from bracket-code format references.
+
+    Pattern: [CODE] Authors. Title. In Venue
+    where CODE is like ACGH20, CCY20, GR25, etc.
+    """
+    # Check for bracket code at start: [LettersNumbers]
+    bracket_match = re.match(r'\[([A-Z]+\d+[a-z]?)\]\s*', ref_text)
+    if not bracket_match:
+        return None
+
+    # Remove the bracket code
+    ref_text = ref_text[bracket_match.end():]
+
+    # Now look for "Authors. Title. In" pattern
+    # Authors are like "First Last, First Last, and First Last."
+    # Title follows and ends at ". In" or venue markers
+
+    # Find the first sentence that looks like a title (after author names)
+    # Authors typically end with a period after a name, then title starts with capital
+    # Look for pattern: "LastName. Title" where Title is capitalized
+
+    # Strategy: Find ". " followed by capital letter, then find title end
+    sentences = re.split(r'\.\s+', ref_text)
+
+    if len(sentences) >= 2:
+        # First sentence is likely authors, second is likely title
+        # But we need to handle cases where author list has multiple sentences
+        for i, sent in enumerate(sentences[:-1]):  # Exclude last (likely venue)
+            # Check if this sentence ends with what looks like an author name
+            # and next sentence starts with a title-like pattern
+            next_sent = sentences[i + 1] if i + 1 < len(sentences) else ""
+
+            # If current ends with a name pattern and next starts with capital
+            if re.search(r'(?:and\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*$', sent):
+                # Check if next sentence looks like a title (not a venue)
+                if next_sent and re.match(r'[A-Z]', next_sent):
+                    # Check it's not starting with "In" (venue marker)
+                    if not re.match(r'In\s+', next_sent):
+                        # This is likely the title
+                        # Find where it ends (at "In" or next venue marker)
+                        title = next_sent
+                        in_match = re.search(r'\.\s*In\s+', '. ' + '. '.join(sentences[i+1:]))
+                        if in_match:
+                            # Extract just the title part
+                            remaining = '. '.join(sentences[i+1:])
+                            title_end = remaining.find('. In ')
+                            if title_end > 0:
+                                title = remaining[:title_end]
+
+                        if len(title.split()) >= 3:
+                            return title.strip()
+
+    return None
+
+
+def test_bracket_code_format():
+    """Test bracket code format extraction."""
+    print("=" * 60)
+    print("IMPROVEMENT 10: Bracket Citation Format [CODE]")
+    print("=" * 60)
+
+    test_cases = [
+        (
+            "[ACGH20] Gorjan Alagic, Andrew M. Childs, Alex B. Grilo, and Shih-Han Hung. "
+            "Noninteractive classical verification of quantum computation. In CRYPTO 2020.",
+            "Noninteractive classical verification of quantum computation"
+        ),
+        (
+            "[CCY20] Nai-Hui Chia, Kai-Min Chung, and Takashi Yamakawa. "
+            "Classical verification of quantum computations with efficient verifier. "
+            "In Theory of Cryptography Conference 2020.",
+            "Classical verification of quantum computations with efficient verifier"
+        ),
+    ]
+
+    for raw, expected in test_cases:
+        result = extract_title_bracket_code_format(raw)
+        if result is None:
+            print(f"  FAIL: No title extracted")
+            print(f"    Raw: {raw[:70]}...")
+        elif result.lower() == expected.lower():
+            print(f"  OK: '{result[:55]}...' " if len(result) > 55 else f"  OK: '{result}'")
+        else:
+            print(f"  MISMATCH:")
+            print(f"    Got:      {result}")
+            print(f"    Expected: {expected}")
+
+    print()
+
+
+# =============================================================================
+# IMPROVEMENT 11: Remove Editor Names from Venue
+# =============================================================================
+# Some references include editor names after "In":
+#   "Title. In Naveen Garg, Klaus Jansen, ... editors, Venue"
+# The editor list should not be extracted as part of the title.
+#
+# Example:
+#   "Beating the random assignment on constraint satisfaction problems of bounded degree.
+#    In Naveen Garg, Klaus Jansen, Anup Rao, and José D. P. Rolim, editors, Approximation..."
+#
+# Location: hallucinator-pdf/src/title.rs (title cleaning)
+
+
+def clean_title_editor_list(title: str) -> str:
+    """Remove editor lists that leaked into title.
+
+    Editors pattern: "In FirstName LastName, ... editors, Venue"
+    Handles names with initials like "José D. P. Rolim"
+    """
+    # Name pattern: handles accented characters and initials
+    # e.g., "Naveen Garg", "José D. P. Rolim", "Klaus Jansen"
+    name_pattern = r'[A-Za-z\u00C0-\u024F]+(?:\s+[A-Z]\.)*(?:\s+[A-Za-z\u00C0-\u024F]+)?'
+
+    # Look for "In Name, Name, ... editors," pattern at end
+    editor_match = re.search(
+        r'\.\s*In\s+' + name_pattern +  # First name
+        r'(?:,\s*' + name_pattern + r')*'  # More names
+        r'(?:,?\s*and\s+' + name_pattern + r')?'  # "and Name"
+        r',\s*editors?,',
+        title,
+        re.IGNORECASE
+    )
+
+    if editor_match:
+        title = title[:editor_match.start()]
+
+    # Also catch simpler "In Venue" patterns at end
+    in_venue_match = re.search(r'\.\s*In\s+(?:Proceedings|Proc\.|[A-Z][a-z]+\s+\d{4})', title)
+    if in_venue_match:
+        title = title[:in_venue_match.start()]
+
+    return title.strip()
+
+
+def test_editor_list_cleaning():
+    """Test editor list removal from titles."""
+    print("=" * 60)
+    print("IMPROVEMENT 11: Remove Editor Names from Venue")
+    print("=" * 60)
+
+    test_cases = [
+        (
+            "Beating the random assignment on constraint satisfaction problems. "
+            "In Naveen Garg, Klaus Jansen, Anup Rao, and José D. P. Rolim, editors, Approximation",
+            "Beating the random assignment on constraint satisfaction problems"
+        ),
+        (
+            "A great paper title. In John Smith and Jane Doe, editors, Proceedings of Something",
+            "A great paper title"
+        ),
+        (
+            "Another title here. In Proceedings of ICML 2024",
+            "Another title here"
+        ),
+    ]
+
+    for dirty, expected in test_cases:
+        result = clean_title_editor_list(dirty)
+        if result == expected:
+            print(f"  OK: '{result[:55]}...' " if len(result) > 55 else f"  OK: '{result}'")
+        else:
+            print(f"  MISMATCH:")
+            print(f"    Got:      {result}")
+            print(f"    Expected: {expected}")
+
+    print()
+
+
+# =============================================================================
+# IMPROVEMENT 12: Direct Title Before "In Venue" Pattern
+# =============================================================================
+# Some references have the title directly followed by "In Venue" without authors,
+# or the authors were already stripped. Handle this as a fallback.
+#
+# Example: "Title of the paper. In Proceedings of Something."
+#
+# Location: hallucinator-pdf/src/title.rs
+
+
+def extract_title_direct_in_venue(ref_text: str) -> Optional[str]:
+    """Extract title from 'Title. In Venue' pattern.
+
+    This is a fallback for references where the title appears directly
+    without a recognizable author pattern.
+    """
+    # Strip reference number prefixes
+    ref_text = re.sub(r'^\[\d+\]\s*', '', ref_text)
+    ref_text = re.sub(r'^\d+\.\s*', '', ref_text)
+
+    # Look for "Title. In Something" pattern
+    # Title must start with capital letter and have multiple words
+    in_match = re.search(
+        r'^([A-Z][^.]{15,}?)\.\s+In\s+(?:[A-Z]|Proceedings|Proc\.)',
+        ref_text
+    )
+
+    if in_match:
+        title = in_match.group(1).strip()
+        if len(title.split()) >= 4:  # Require at least 4 words for this pattern
+            return title
+
+    return None
+
+
+def test_direct_in_venue():
+    """Test direct 'Title. In Venue' extraction."""
+    print("=" * 60)
+    print("IMPROVEMENT 12: Direct Title Before 'In Venue'")
+    print("=" * 60)
+
+    test_cases = [
+        (
+            "Beating the random assignment on constraint satisfaction problems of bounded degree. "
+            "In Naveen Garg, Klaus Jansen, Anup Rao, and José D. P. Rolim, editors, Approximation.",
+            "Beating the random assignment on constraint satisfaction problems of bounded degree"
+        ),
+        (
+            "A great paper about something interesting. In Proceedings of ICML 2024.",
+            "A great paper about something interesting"
+        ),
+    ]
+
+    for raw, expected in test_cases:
+        result = extract_title_direct_in_venue(raw)
+        if result and result.lower() == expected.lower():
+            print(f"  OK: '{result[:55]}...' " if len(result) > 55 else f"  OK: '{result}'")
+        else:
+            print(f"  FAIL: expected '{expected[:40]}...', got '{result}'")
+
+    print()
+
+
+# Regex patterns for Rust implementation - Improvements 9-11
+SPRINGER_LNCS_PATTERNS = {
+    # Colon after author initials marks end of author list
+    "author_end_colon": r",\s*[A-Z](?:\.[A-Z])*\.:\s*",
+
+    # Title follows colon, ends at venue markers
+    "title_after_colon": r"([A-Z\u00C0-\u00D6][^:]{10,}?)(?:\.\s+(?:In:|In\s|Journal|[A-Z][a-z]+\s+\d))",
+}
+
+BRACKET_CODE_PATTERNS = {
+    # Bracket code at start: [ACGH20], [CCY20], etc.
+    "bracket_code": r"^\[([A-Z]+\d+[a-z]?)\]\s*",
+
+    # After removing bracket, find author-title boundary
+    # Authors end with name, title starts with capital
+    "author_title_boundary": r"(?:and\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\.\s+([A-Z])",
+}
+
+EDITOR_LIST_PATTERNS = {
+    # Editor list: "In Name, Name, and Name, editors,"
+    "editor_list": (
+        r"\.\s*In\s+[A-Z][a-z]+\s+[A-Z][a-z]+"
+        r"(?:,\s*[A-Z][a-z]+\s+[A-Z][a-z]+)*"
+        r"(?:,\s*and\s+[A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)?"
+        r",\s*editors?,"
+    ),
+}
+
+
+# =============================================================================
 # COMBINED: Custom Title Extractor with All Improvements
 # =============================================================================
 
@@ -461,6 +1073,8 @@ def extract_title_with_improvements(ref_text: str) -> Optional[str]:
     This combines all the improvements into a single function that can be
     used to validate behavior before porting to Rust.
     """
+    original_text = ref_text
+
     # Preprocessing
     ref_text = strip_reference_prefix(ref_text)
 
@@ -470,11 +1084,36 @@ def extract_title_with_improvements(ref_text: str) -> Optional[str]:
         if title:
             return clean_title_question_mark_fix(title)
 
+    # Try bracket code format [ACGH20]
+    title = extract_title_bracket_code_format(original_text)
+    if title:
+        title = clean_title_editor_list(title)
+        return clean_title_question_mark_fix(title)
+
+    # Try Springer/LNCS format (colon after authors)
+    title = extract_title_springer_format(ref_text)
+    if title:
+        return clean_title_question_mark_fix(title)
+
+    # Try author-particle-aware extraction for complex names
+    # This handles von, van der, accented chars, etc.
+    title = extract_title_author_particle_aware(ref_text)
+    if title:
+        title = clean_title_editor_list(title)
+        return clean_title_question_mark_fix(title)
+
+    # Try direct "Title. In Venue" pattern as fallback
+    title = extract_title_direct_in_venue(ref_text)
+    if title:
+        title = clean_title_editor_list(title)
+        return clean_title_question_mark_fix(title)
+
     # Fall back to native extraction
     ext = PdfExtractor()
-    ref = ext.parse_reference(ref_text)
+    ref = ext.parse_reference(original_text)
     if ref and ref.title:
-        return clean_title_question_mark_fix(ref.title)
+        title = clean_title_editor_list(ref.title)
+        return clean_title_question_mark_fix(title)
 
     return None
 
@@ -564,6 +1203,46 @@ def print_patterns_to_port():
     print("   Replace '∞' with 'infinity' before stripping non-alnum")
     print()
 
+    print("8. Author names with particles/special characters:")
+    print("   Initial pattern (handles accented):")
+    print("     [A-Z\\u00C0-\\u00D6\\u00D8-\\u00DE´`']\\.(?:\\s*[A-Z]\\.)*")
+    print()
+    print("   Name particles (case-insensitive):")
+    print("     von, van, de, del, della, di, da, dos, das, du,")
+    print("     le, la, les, den, der, ten, ter, op, het")
+    print()
+    print("   Surname characters (Unicode letters + hyphens + apostrophes):")
+    print("     [A-Za-z\\u00C0-\\u024F'´`'\\-]+")
+    print()
+    print("   Author list end pattern (finds where title starts):")
+    print("     ,?\\s+and\\s+")
+    print("     [A-Z\\u00C0-\\u00DE´`']\\.(?:\\s*[A-Z]\\.)*\\s*")  # Initials
+    print("     (?:(?:von|van|de|del|della|di|da|le|la|den|der|ter)\\s+)*")  # Particles
+    print("     [A-Za-z\\u00C0-\\u024F'´`'\\-]+(?:\\s+[...]+)*")  # Surname
+    print("     \\.\\s+")  # Period after surname
+    print("     ([A-Z0-9\\u00C0-\\u024F\\\"\\'])  <- Capture title start")
+    print()
+
+    print("9. Springer/LNCS format (colon after authors):")
+    print("   Author end marker: ,\\s*[A-Z](?:\\.[A-Z])*\\.:\\s*")
+    print("   Example: 'Micali, S., Ohta, K., Reyzin, L.: Title. In: Venue'")
+    print("   Title extraction: ([A-Z][^:]{10,}?)(?:\\.\\s+(?:In:|In\\s|Journal))")
+    print()
+
+    print("10. Bracket citation format [CODE]:")
+    print("   Bracket code: ^\\[([A-Z]+\\d+[a-z]?)\\]\\s*")
+    print("   Example: '[ACGH20] Authors. Title. In Venue'")
+    print("   After stripping bracket, find 'Authors. Title' boundary")
+    print()
+
+    print("11. Editor list removal from title:")
+    print("   Pattern: \\.\\s*In\\s+[A-Z][a-z]+\\s+[A-Z][a-z]+")
+    print("            (?:,\\s*[A-Z][a-z]+\\s+[A-Z][a-z]+)*")
+    print("            (?:,\\s*and\\s*[A-Z][a-z]+...)?")
+    print("            ,\\s*editors?,")
+    print("   Example: 'Title. In John Smith, Jane Doe, editors, Venue'")
+    print()
+
 
 # =============================================================================
 # MAIN
@@ -577,6 +1256,11 @@ if __name__ == "__main__":
     test_two_word_quoted_titles()
     test_reference_prefix_stripping()
     test_format5_skip_detection()
+    test_author_particle_names()
+    test_springer_format()
+    test_bracket_code_format()
+    test_editor_list_cleaning()
+    test_direct_in_venue()
     test_combined_extraction()
     print_patterns_to_port()
 

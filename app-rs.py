@@ -235,7 +235,7 @@ def validation_result_to_dict(r: ValidationResult) -> dict:
         result["doi_info"] = {
             "doi": r.doi_info.doi,
             "valid": r.doi_info.valid,
-            "error": r.doi_info.error,
+            "title": r.doi_info.title,
         }
 
     # Add arXiv info if present
@@ -243,7 +243,7 @@ def validation_result_to_dict(r: ValidationResult) -> dict:
         result["arxiv_info"] = {
             "arxiv_id": r.arxiv_info.arxiv_id,
             "valid": r.arxiv_info.valid,
-            "error": r.arxiv_info.error,
+            "title": r.arxiv_info.title,
         }
 
     # Add retraction info if present
@@ -251,7 +251,6 @@ def validation_result_to_dict(r: ValidationResult) -> dict:
         result["retraction_info"] = {
             "is_retracted": r.retraction_info.is_retracted,
             "retraction_doi": r.retraction_info.retraction_doi,
-            "retraction_type": r.retraction_info.retraction_type,
             "retraction_source": r.retraction_info.retraction_source,
         }
         if r.retraction_info.is_retracted:

@@ -1282,9 +1282,11 @@ def clean_title(title, from_quotes=False):
         r'\s*\(\d+[–\-]\d*\)\s*$',  # Trailing page numbers in parens: "(280–28)" or "(280-289)"
         r'\s*\(pp\.?\s*\d+[–\-]\d*\)\s*$',  # "(pp. 280-289)" or "(pp 280–289)"
         r',?\s+\d+[–\-]\d+\s*$',  # Trailing page range: ", 280-289" or " 280–289"
+        r',\s+\d{1,4}[–\-]\d{1,4}\s+https?://.*$',  # ", 739–752 https://doi.org/..." (page range + URL)
         r'\.\s*[A-Z][a-zA-Z]+(?:\s+(?:in|of|on|and|for|the|a|an|&|[A-Z]?[a-zA-Z]+))+,\s*\d+\s*[,:]\s*\d+[–\-]?\d*.*$',  # ". Journal Name, vol: pages" like ". Computers in Human Behavior, 61: 280–28"
         r'\.\s*[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014-]+\d+\s*[(,:]\s*\d+[–\-]?\d*.*$',  # ". Journal Name vol(pages" with extended chars
         r'\.\s*[A-Z][a-zA-Z\s]+[&+]\s*[A-Z].*$',  # ". Words & More" or ". Words + More" (standalone journal names ending with &/+)
+        r'\.\s+(?:Beaverton|New\s+York|San\s+Francisco|Cambridge|London|Berlin|Springer|Heidelberg).*$',  # ". Location/Publisher..." (tech report locations)
     ]
 
     for pattern in cutoff_patterns:
@@ -1503,7 +1505,9 @@ def extract_title_from_reference(ref_text):
 
         title = after_colon[:title_end].strip()
         title = re.sub(r'\.\s*$', '', title)
-        if len(title.split()) >= 3:
+        # Allow 2-word titles for LNCS format (hyphenated titles count as 1 word)
+        # e.g., "Accountable-subgroup multisignatures" is only 2 words
+        if len(title.split()) >= 2:
             return title, False
 
     # === Format 1c: Organization/Documentation - "Organization: Title (Year), URL" ===

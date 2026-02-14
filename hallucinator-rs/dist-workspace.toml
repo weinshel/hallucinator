@@ -22,6 +22,9 @@ install-updater = false
 allow-dirty = ["ci"]
 # Only plan on PRs, don't build
 pr-run-mode = "plan"
+# mupdf-sys compiles MuPDF via MSBuild with /MD (dynamic CRT);
+# must disable dist's default +crt-static to avoid linker conflicts
+msvc-crt-static = false
 
 # System dependencies for Linux builds (mupdf needs fontconfig, scraper needs libclang)
 [dist.dependencies.apt]

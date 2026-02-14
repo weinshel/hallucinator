@@ -144,11 +144,21 @@ jobs:
           ${{ matrix.packages_install }}
       - name: Build artifacts
         working-directory: hallucinator-rs
-        env:
-          # mupdf-sys compiles MuPDF via MSBuild with /MD (dynamic CRT).
-          # Rust must match to avoid 60+ unresolved CRT symbol errors.
-          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=-crt-static' || '' }}
+        shell: bash
         run: |
+          # mupdf-sys compiles MuPDF via MSBuild with /MD (dynamic CRT).
+          # Force Rust to use dynamic CRT on Windows to avoid linker errors.
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            echo "=== Debug: env vars before override ==="
+            echo "RUSTFLAGS=${RUSTFLAGS:-<unset>}"
+            echo "CARGO_ENCODED_RUSTFLAGS=${CARGO_ENCODED_RUSTFLAGS:-<unset>}"
+            echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS=${CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS:-<unset>}"
+            export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=-crt-static"
+            unset CARGO_ENCODED_RUSTFLAGS
+            echo "=== Debug: env vars after override ==="
+            echo "RUSTFLAGS=$RUSTFLAGS"
+            echo "CARGO_ENCODED_RUSTFLAGS=${CARGO_ENCODED_RUSTFLAGS:-<unset>}"
+          fi
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"

@@ -110,17 +110,169 @@ def print_hallucinated_reference(title, error_type, source=None, ref_authors=Non
     print()
 
 def normalize_title(title):
-    """Normalize title for comparison - keep only alphanumeric characters (Unicode-aware)."""
+    """Normalize title for comparison - keep only alphanumeric characters (Unicode-aware).
+
+    Steps (order matters):
+    1. HTML unescape
+    2. Fix separated diacritics from PDF extraction (e.g., "B ¨UNZ" -> "BÜNZ")
+    3. Transliterate Greek letters (e.g., "αdiff" -> "alphadiff")
+    4. Replace math symbols (e.g., "√n" -> "sqrtn")
+    5. NFKD normalization (decomposes accents)
+    6. Keep only alphanumeric
+    7. Lowercase
+    """
     import html
     title = html.unescape(str(title))  # Decode HTML entities like &quot;
-    title = unicodedata.normalize("NFKD", title)
+
+    # Fix separated diacritics from PDF extraction (before NFKD)
+    # E.g., "B ¨UNZ" -> "BÜNZ", "R´enyi" -> "Rényi"
+    title = fix_separated_diacritics(title)
+
+    # Transliterate Greek letters (before NFKD, which doesn't convert them)
+    # E.g., "αdiff" -> "alphadiff", "εpsolute" -> "epsilonpsolute"
+    title = transliterate_greek(title)
+
     # Handle mathematical symbols that would otherwise be stripped
-    # H∞ (H-infinity) is common in control theory papers
-    title = title.replace('∞', 'infinity')
-    title = title.replace('∞', 'infinity')  # Alternative infinity symbol
+    title = title.replace('∞', 'infinity')  # H-infinity control theory
+    title = title.replace('√', 'sqrt')
+    title = title.replace('≤', 'leq')
+    title = title.replace('≥', 'geq')
+    title = title.replace('≠', 'neq')
+    title = title.replace('±', 'pm')
+    title = title.replace('×', 'times')
+    title = title.replace('÷', 'div')
+
+    # NFKD normalization (decomposes accented characters)
+    title = unicodedata.normalize("NFKD", title)
+
     # Keep only Unicode letters and numbers, remove everything else including spaces
     title = ''.join(c for c in title if c.isalnum())
     return title.lower()
+
+
+# Greek letter transliteration mapping
+GREEK_TRANSLITERATIONS = {
+    # Lowercase
+    'α': 'alpha', 'β': 'beta', 'γ': 'gamma', 'δ': 'delta', 'ε': 'epsilon',
+    'ζ': 'zeta', 'η': 'eta', 'θ': 'theta', 'ι': 'iota', 'κ': 'kappa',
+    'λ': 'lambda', 'μ': 'mu', 'ν': 'nu', 'ξ': 'xi', 'ο': 'o',
+    'π': 'pi', 'ρ': 'rho', 'σ': 'sigma', 'ς': 'sigma',
+    'τ': 'tau', 'υ': 'upsilon', 'φ': 'phi', 'χ': 'chi', 'ψ': 'psi', 'ω': 'omega',
+    # Uppercase
+    'Α': 'alpha', 'Β': 'beta', 'Γ': 'gamma', 'Δ': 'delta', 'Ε': 'epsilon',
+    'Ζ': 'zeta', 'Η': 'eta', 'Θ': 'theta', 'Ι': 'iota', 'Κ': 'kappa',
+    'Λ': 'lambda', 'Μ': 'mu', 'Ν': 'nu', 'Ξ': 'xi', 'Ο': 'o',
+    'Π': 'pi', 'Ρ': 'rho', 'Σ': 'sigma',
+    'Τ': 'tau', 'Υ': 'upsilon', 'Φ': 'phi', 'Χ': 'chi', 'Ψ': 'psi', 'Ω': 'omega',
+}
+
+
+def transliterate_greek(text):
+    """Transliterate Greek letters to ASCII equivalents."""
+    for greek, latin in GREEK_TRANSLITERATIONS.items():
+        text = text.replace(greek, latin)
+    return text
+
+
+# Diacritic composition mapping for separated diacritics
+DIACRITIC_COMPOSITIONS = {
+    # Umlaut/diaeresis (¨)
+    ('¨', 'A'): 'Ä', ('¨', 'a'): 'ä',
+    ('¨', 'E'): 'Ë', ('¨', 'e'): 'ë',
+    ('¨', 'I'): 'Ï', ('¨', 'i'): 'ï',
+    ('¨', 'O'): 'Ö', ('¨', 'o'): 'ö',
+    ('¨', 'U'): 'Ü', ('¨', 'u'): 'ü',
+    ('¨', 'Y'): 'Ÿ', ('¨', 'y'): 'ÿ',
+    # Acute accent (´)
+    ('´', 'A'): 'Á', ('´', 'a'): 'á',
+    ('´', 'E'): 'É', ('´', 'e'): 'é',
+    ('´', 'I'): 'Í', ('´', 'i'): 'í',
+    ('´', 'O'): 'Ó', ('´', 'o'): 'ó',
+    ('´', 'U'): 'Ú', ('´', 'u'): 'ú',
+    ('´', 'N'): 'Ń', ('´', 'n'): 'ń',
+    ('´', 'C'): 'Ć', ('´', 'c'): 'ć',
+    ('´', 'S'): 'Ś', ('´', 's'): 'ś',
+    ('´', 'Z'): 'Ź', ('´', 'z'): 'ź',
+    ('´', 'Y'): 'Ý', ('´', 'y'): 'ý',
+    # Grave accent (`)
+    ('`', 'A'): 'À', ('`', 'a'): 'à',
+    ('`', 'E'): 'È', ('`', 'e'): 'è',
+    ('`', 'I'): 'Ì', ('`', 'i'): 'ì',
+    ('`', 'O'): 'Ò', ('`', 'o'): 'ò',
+    ('`', 'U'): 'Ù', ('`', 'u'): 'ù',
+    # Tilde (~, ˜)
+    ('~', 'A'): 'Ã', ('~', 'a'): 'ã', ('˜', 'A'): 'Ã', ('˜', 'a'): 'ã',
+    ('~', 'N'): 'Ñ', ('~', 'n'): 'ñ', ('˜', 'N'): 'Ñ', ('˜', 'n'): 'ñ',
+    ('~', 'O'): 'Õ', ('~', 'o'): 'õ', ('˜', 'O'): 'Õ', ('˜', 'o'): 'õ',
+    # Caron/háček (ˇ)
+    ('ˇ', 'C'): 'Č', ('ˇ', 'c'): 'č',
+    ('ˇ', 'S'): 'Š', ('ˇ', 's'): 'š',
+    ('ˇ', 'Z'): 'Ž', ('ˇ', 'z'): 'ž',
+    ('ˇ', 'E'): 'Ě', ('ˇ', 'e'): 'ě',
+    ('ˇ', 'R'): 'Ř', ('ˇ', 'r'): 'ř',
+    ('ˇ', 'N'): 'Ň', ('ˇ', 'n'): 'ň',
+    # Circumflex (^)
+    ('^', 'A'): 'Â', ('^', 'a'): 'â',
+    ('^', 'E'): 'Ê', ('^', 'e'): 'ê',
+    ('^', 'I'): 'Î', ('^', 'i'): 'î',
+    ('^', 'O'): 'Ô', ('^', 'o'): 'ô',
+    ('^', 'U'): 'Û', ('^', 'u'): 'û',
+}
+
+# Patterns for separated diacritics
+SPACE_BEFORE_DIACRITIC_PATTERN = re.compile(r'([A-Za-z])\s+([¨´`~˜ˇ^])')
+SEPARATED_DIACRITIC_PATTERN = re.compile(r'([¨´`~˜ˇ^])\s*([A-Za-z])')
+
+
+def fix_separated_diacritics(text):
+    """Fix separated diacritics from PDF extraction.
+
+    Converts patterns like "B ¨UNZ" to "BÜNZ" and "R´enyi" to "Rényi".
+    """
+    # Step 1: Remove spaces between a letter and a diacritic (like "B ¨" -> "B¨")
+    text = SPACE_BEFORE_DIACRITIC_PATTERN.sub(r'\1\2', text)
+
+    # Step 2: Compose diacritic + letter into single character
+    def replace_match(m):
+        diacritic = m.group(1)
+        letter = m.group(2)
+        composed = DIACRITIC_COMPOSITIONS.get((diacritic, letter))
+        if composed:
+            return composed
+        # If no mapping, just return the letter (diacritic gets dropped)
+        return letter
+
+    return SEPARATED_DIACRITIC_PATTERN.sub(replace_match, text)
+
+
+# Author-list patterns for detecting when author names are extracted as titles
+# These ALL CAPS patterns with comma-separated initials should be rejected
+AUTHOR_LIST_PATTERNS = [
+    # SURNAME, I., SURNAME, I., AND SURNAME, I.
+    re.compile(r'^[A-Z]{2,}\s*,\s*[A-Z]\.\s*,\s*[A-Z]{2,}\s*,\s*[A-Z]\.'),
+    # SURNAME, I., AND SURNAME, I.,
+    re.compile(r'^[A-Z]{2,}\s*,\s*[A-Z]\.\s*,?\s*AND\s+[A-Z]'),
+    # SURNAME, AND I. SURNAME (like "HORESH, AND M. RIABZEV")
+    re.compile(r'^[A-Z]{2,}\s*,\s*AND\s+[A-Z]\.\s*[A-Z]'),
+    # TWO WORD SURNAME AND I. SURNAME (like "EL HOUSNI AND G. BOTREL")
+    re.compile(r'^[A-Z]{2,}\s+[A-Z]{2,}\s+AND\s+[A-Z]\.\s*[A-Z]'),
+    # SURNAME AND SURNAME,
+    re.compile(r'^[A-Z]{2,}\s+AND\s+[A-Z]\.\s*[A-Z]{2,}\s*,'),
+    # Broken umlaut + author pattern: B ¨UNZ, P. CAMACHO
+    re.compile(r'^[A-Z]\s*[¨´`]\s*[A-Z]+\s*,\s*[A-Z]\.'),
+]
+
+
+def is_likely_author_list(text):
+    """Check if text looks like an author list instead of a title.
+
+    Returns True if the text matches common author list patterns.
+    This is used to reject bad title extractions.
+    """
+    for pattern in AUTHOR_LIST_PATTERNS:
+        if pattern.match(text):
+            return True
+    return False
 
 
 def extract_doi(text):
@@ -1512,7 +1664,8 @@ def extract_title_from_reference(ref_text):
         title = re.sub(r'\.\s*$', '', title)
         # Allow 2-word titles for LNCS format (hyphenated titles count as 1 word)
         # e.g., "Accountable-subgroup multisignatures" is only 2 words
-        if len(title.split()) >= 2:
+        # Reject if it looks like an author list (ALL CAPS with initials)
+        if len(title.split()) >= 2 and not is_likely_author_list(title):
             return title, False
 
     # === Format 1c: Organization/Documentation - "Organization: Title (Year), URL" ===
@@ -1717,7 +1870,8 @@ def extract_title_from_reference(ref_text):
             if title_end > 0:
                 title = title_text[:title_end].strip()
                 title = re.sub(r'\.\s*$', '', title)
-                if len(title.split()) >= 3:
+                # Reject if it looks like an author list
+                if len(title.split()) >= 3 and not is_likely_author_list(title):
                     return title, False
 
     # === Format 6: Math paper style - "Authors, Title, Venue Vol (Year), Pages" ===
@@ -1758,7 +1912,8 @@ def extract_title_from_reference(ref_text):
                     title = and_author_match.group(2).strip()
                     title = re.sub(r',\s*$', '', title)
                     # Math papers often have shorter titles (e.g., "Faisceaux pervers")
-                    if len(title.split()) >= 2:
+                    # Reject if it looks like an author list
+                    if len(title.split()) >= 2 and not is_likely_author_list(title):
                         return title, False
 
             # Second try: Find where author list ends
@@ -1894,7 +2049,8 @@ def extract_title_from_reference(ref_text):
 
             title = after_authors[:title_end].strip()
             title = re.sub(r'\.\s*$', '', title)
-            if len(title.split()) >= 3:
+            # Reject if it looks like an author list
+            if len(title.split()) >= 3 and not is_likely_author_list(title):
                 return title, False
 
     # === Fallback: second sentence if it looks like a title ===
@@ -1918,8 +2074,8 @@ def extract_title_from_reference(ref_text):
                 if len(sentences) >= 3:
                     potential_title = sentences[2].strip()
 
-        # Skip if starts with "In " (venue)
-        if not re.match(r'^[Ii]n\s+', potential_title):
+        # Skip if starts with "In " (venue) or looks like an author list
+        if not re.match(r'^[Ii]n\s+', potential_title) and not is_likely_author_list(potential_title):
             if len(potential_title.split()) >= 3:
                 return potential_title, False  # from_quotes=False
 

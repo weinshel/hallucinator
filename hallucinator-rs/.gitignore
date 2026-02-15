@@ -5,3 +5,4 @@
 *.db-wal
 .tmp*
 test-output.txt
+crates/hallucinator-python/Cargo.lock

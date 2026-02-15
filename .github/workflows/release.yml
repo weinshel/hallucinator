@@ -219,10 +219,12 @@ jobs:
             new_hash=$(shasum -a 256 "$archive" | awk '{print $1}')
             echo "$new_hash" > "${archive}.sha256"
 
-            # Update the checksum in dist-manifest.json so the installer verifies correctly
+            # Update the checksum in dist-manifest.json so the installer verifies correctly.
+            # The .checksums.sha256 field is what gets baked into installer scripts
+            # by build-global-artifacts; .checksum is just a filename reference.
             archive_name=$(basename "$archive")
             jq --arg name "$archive_name" --arg hash "$new_hash" \
-              '(.artifacts[] | select(.name == $name) | .checksum) = $hash' \
+              '(.artifacts[] | select(.name == $name) | .checksums.sha256) = $hash' \
               dist-manifest.json > dist-manifest.json.tmp && mv dist-manifest.json.tmp dist-manifest.json
 
             # Submit for notarization and wait

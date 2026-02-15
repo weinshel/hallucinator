@@ -257,6 +257,17 @@ fn try_quoted_title_with_config(
     ref_text: &str,
     config: &PdfParsingConfig,
 ) -> Option<(String, bool)> {
+    // First, try greedy IEEE pattern for titles with nested/inner quotes.
+    // Matches from first " to last ," (IEEE convention: title ends with comma inside quotes)
+    // e.g. "Autoadmin "what-if" index analysis utility,"
+    static GREEDY_IEEE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#""(.+),"\s"#).unwrap());
+    if let Some(caps) = GREEDY_IEEE_RE.captures(ref_text) {
+        let title = caps.get(1).unwrap().as_str().trim();
+        if title.split_whitespace().count() >= 2 {
+            return Some((format!("{},", title), true));
+        }
+    }
+
     static DEFAULT_QUOTE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         vec![
             // Smart quotes (any combo of \u201c, \u201d, \u201c)
@@ -287,8 +298,10 @@ fn try_quoted_title_with_config(
                 continue;
             }
 
-            // Check for subtitle after the quote
-            if !after_quote.is_empty() {
+            // Check for subtitle after the quote — but only if quoted part is long enough
+            // (>= 2 words). Short inner quotes like "Proof-Carrying" are likely embedded
+            // in a longer title, not actual title delimiters.
+            if !after_quote.is_empty() && quoted_part.split_whitespace().count() >= 2 {
                 let subtitle_text = if after_quote.starts_with(':') || after_quote.starts_with('-')
                 {
                     Some(after_quote[1..].trim())
@@ -1780,5 +1793,43 @@ mod tests {
         assert!(!is_venue_only("A Survey of Machine Learning Techniques"));
         assert!(!is_venue_only("Attention Is All You Need"));
         assert!(!is_venue_only("Neural Networks for Image Recognition"));
+    }
+
+    #[test]
+    fn test_nested_quotes_ieee_what_if() {
+        // Issue #65: nested quotes in IEEE title
+        let ref_text = r#"S. Chaudhuri and V. Narasayya, "Autoadmin "what-if" index analysis utility," ACM SIGMOD Record, vol. 27, no. 2, pp. 367-378, 1998."#;
+        let (title, from_quotes) = extract_title_from_reference(ref_text);
+        assert!(from_quotes, "Should detect quoted title");
+        assert!(
+            title.contains("Autoadmin") && title.contains("what-if") && title.contains("index analysis"),
+            "Should extract full title including nested quotes: {}",
+            title,
+        );
+    }
+
+    #[test]
+    fn test_inner_quotes_acm_proof_carrying() {
+        // Issue #65: inner quotes should not be mistaken for title delimiters
+        let ref_text = r#"Jacopo Tagliabue and Ciro Greco. 2025. Safe, Untrusted, "Proof-Carrying" AI Agents: toward the agentic lakehouse."#;
+        let (title, _) = extract_title_from_reference(ref_text);
+        assert!(
+            title.contains("Safe, Untrusted"),
+            "Should include text before inner quotes in ACM format: {}",
+            title,
+        );
+    }
+
+    #[test]
+    fn test_author_particles_de_oliveira() {
+        // Issue #65: multi-particle author names like "de Oliveira Filho"
+        let ref_text = r#"P. R. X. do Carmo, E. Freitas, A. T. de Oliveira Filho, and D. F. H. Sadok, "A round-trip time and virtualization dataset," In Proceedings of ACM Conference, 2020."#;
+        let (title, from_quotes) = extract_title_from_reference(ref_text);
+        assert!(from_quotes, "Should detect quoted title");
+        assert!(
+            title.contains("round-trip time") && title.contains("virtualization"),
+            "Should extract title despite multi-particle author names: {}",
+            title,
+        );
     }
 }

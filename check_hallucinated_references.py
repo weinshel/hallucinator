@@ -1719,6 +1719,16 @@ def extract_title_from_reference(ref_text):
 
     # === Format 1: IEEE/USENIX - Quoted titles or titles with quoted portions ===
     # Handles: "Full Title" or "Quoted part": Subtitle
+    # First, try greedy IEEE pattern for titles with nested/inner quotes.
+    # Matches from first " to last ," (IEEE convention: title ends with comma inside quotes)
+    # e.g. "Autoadmin "what-if" index analysis utility," or "Safe, "Proof-Carrying" AI,"
+    greedy_ieee_match = re.search(r'"(.+),"\s', ref_text)
+    if greedy_ieee_match:
+        title = greedy_ieee_match.group(1).strip()
+        # Only accept if reasonably long (short matches may be false positives)
+        if len(title.split()) >= 2:
+            return title + ',', True
+
     quote_patterns = [
         r'""([^"]+)""',  # Double double-quotes (escaped quotes in some formats)
         r'["\u201c\u201d]([^"\u201c\u201d]+)["\u201c\u201d]',  # Smart quotes (any combo)
@@ -1743,7 +1753,10 @@ def extract_title_from_reference(ref_text):
 
             # Check if there's a subtitle after the quote
             # Can start with : or - or directly with a capital letter
-            if after_quote:
+            # Skip subtitle detection for very short quoted parts (< 2 words) —
+            # these are likely inner quotes (e.g. "Proof-Carrying" inside a longer title),
+            # not the actual title delimiter.
+            if after_quote and len(quoted_part.split()) >= 2:
                 # Determine if there's a subtitle and extract it
                 subtitle_text = None
                 if after_quote[0] in ':-':
@@ -2058,7 +2071,8 @@ def extract_title_from_reference(ref_text):
 
             # Try to find "and Lastname, Title" pattern first
             # IMPORTANT: "and" must be followed by a proper name, not articles like "and the"
-            and_author_match = re.search(r',?\s+and\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*(.+)', before_venue)
+            # Supports name particles: von, van, de, del, di, da, dos, du, le, la, der, den, ten, ter
+            and_author_match = re.search(r',?\s+and\s+((?:(?:von|van|de|del|della|di|da|dos|das|du|le|la|les|den|der|ten|ter|op|het)\s+)*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*(.+)', before_venue)
             if and_author_match:
                 potential_lastname = and_author_match.group(1).split()[0].lower()
                 # Make sure it's not a common word that appears in titles
@@ -2085,26 +2099,33 @@ def extract_title_from_reference(ref_text):
                 if not part:
                     continue
 
+                # Name particles that appear in multi-part surnames
+                _name_particles = {'von', 'van', 'de', 'del', 'della', 'di', 'da', 'dos', 'das',
+                                   'du', 'le', 'la', 'les', 'den', 'der', 'ten', 'ter', 'op', 'het', 'do'}
+
                 # Skip "and Firstname Lastname" or "and I. Surname" parts - they're authors
-                if re.match(r'^and\s+(?:[A-Z]\.?\s*)+[A-Z][a-z]+$', part):
+                # Also handles particles: "and de Oliveira Filho"
+                if re.match(r'^and\s+(?:(?:von|van|de|del|della|di|da|dos|das|du|le|la|les|den|der|ten|ter|op|het|do)\s+)*(?:[A-Z]\.?\s*)+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*$', part):
                     continue
 
                 # Check if this part looks like a name
                 # Pattern 1: "Firstname Lastname" - 1-3 capitalized words (may be hyphenated)
                 # Pattern 2: "I. Surname" or "I. I. Surname" - initials + surname
+                # Pattern 3: "de Oliveira Filho" - particle + surname(s)
                 words = part.split()
 
                 # Check for initial-based author: "I. I. Surname" or "I. Surname-Hyphen"
-                # Pattern: one or more "X." followed by a capitalized surname (possibly hyphenated)
-                if re.match(r'^(?:[A-Z]\.?\s*)+[A-Z][a-z]+(?:-[A-Z][a-z]+)*$', part.replace(' ', '')):
+                # Pattern: one or more "X." followed by optional particle + capitalized surname
+                if re.match(r'^(?:[A-Z]\.?\s*)+(?:(?:von|van|de|del|della|di|da|dos|das|du|le|la|les|den|der|ten|ter|op|het|do)\s+)*[A-Z][a-z]+(?:-[A-Z][a-z]+)*(?:\s+[A-Z][a-z]+)*$', part):
                     continue  # This is an author with initials
 
-                if len(words) <= 3:
-                    # Check if all words look like names (Capitalized, possibly hyphenated) or initials
+                if len(words) <= 4:
+                    # Check if all words look like names, initials, or name particles
                     looks_like_name = all(
                         re.match(r'^[A-Z][a-z]+(?:-[A-Z][a-z]+)*$', w) or  # Capitalized name (hyphenated ok)
                         re.match(r'^[A-Z]\.$', w) or      # Single initial with dot
-                        re.match(r'^[A-Z]$', w)           # Single initial without dot
+                        re.match(r'^[A-Z]$', w) or         # Single initial without dot
+                        w.lower() in _name_particles        # Name particle (de, van, von, etc.)
                         for w in words
                     )
                     if looks_like_name:

@@ -2,6 +2,43 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
 
+/// Strip unbalanced trailing parentheses, brackets, and braces from a DOI.
+fn clean_doi(doi: &str) -> String {
+    let mut doi = doi.trim_end_matches(['.', ',', ';', ':']);
+
+    // Strip unbalanced trailing )
+    loop {
+        if doi.ends_with(')') && doi.matches(')').count() > doi.matches('(').count() {
+            doi = &doi[..doi.len() - 1];
+            doi = doi.trim_end_matches(['.', ',', ';', ':']);
+        } else {
+            break;
+        }
+    }
+
+    // Strip unbalanced trailing ]
+    loop {
+        if doi.ends_with(']') && doi.matches(']').count() > doi.matches('[').count() {
+            doi = &doi[..doi.len() - 1];
+            doi = doi.trim_end_matches(['.', ',', ';', ':']);
+        } else {
+            break;
+        }
+    }
+
+    // Strip unbalanced trailing }
+    loop {
+        if doi.ends_with('}') && doi.matches('}').count() > doi.matches('{').count() {
+            doi = &doi[..doi.len() - 1];
+            doi = doi.trim_end_matches(['.', ',', ';', ':']);
+        } else {
+            break;
+        }
+    }
+
+    doi.to_string()
+}
+
 /// Extract DOI from reference text.
 ///
 /// Handles formats like:
@@ -10,30 +47,31 @@ use std::collections::HashSet;
 /// - `https://doi.org/10.1234/example`
 /// - `http://dx.doi.org/10.1234/example`
 ///
-/// Also handles DOIs split across lines (common in PDFs).
+/// Also handles DOIs split across lines (common in PDFs) and DOIs
+/// containing parentheses (e.g., `10.1016/0021-9681(87)90171-8`).
 pub fn extract_doi(text: &str) -> Option<String> {
     // Fix DOIs that are split across lines
 
     // Pattern 1: DOI ending with period + newline + 3+ digits
     static FIX1: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(10\.\d{4,}/[^\s\]>)}\x{007D}]+\.)\s*\n\s*(\d{3,})").unwrap());
+        Lazy::new(|| Regex::new(r"(10\.\d{4,}/[^\s\]>,]+\.)\s*\n\s*(\d{3,})").unwrap());
     let text_fixed = FIX1.replace_all(text, "$1$2");
 
     // Pattern 1b: DOI ending with digits + newline + DOI continuation
     static FIX1B: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(10\.\d{4,}/[^\s\]>)}\x{007D}]+\d)\s*\n\s*(\d+(?:\.\d+)*)").unwrap()
+        Regex::new(r"(10\.\d{4,}/[^\s\]>,]+\d)\s*\n\s*(\d+(?:\.\d+)*)").unwrap()
     });
     let text_fixed = FIX1B.replace_all(&text_fixed, "$1$2");
 
     // Pattern 2: DOI ending with dash + newline + continuation
     static FIX2: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(10\.\d{4,}/[^\s\]>)}\x{007D}]+-)\s*\n\s*(\S+)").unwrap());
+        Lazy::new(|| Regex::new(r"(10\.\d{4,}/[^\s\]>,]+-)\s*\n\s*(\S+)").unwrap());
     let text_fixed = FIX2.replace_all(&text_fixed, "$1$2");
 
     // Pattern 3: URL split across lines (period variant)
     static FIX3: Lazy<Regex> = Lazy::new(|| {
         Regex::new(
-            r"(?i)(https?://(?:dx\.)?doi\.org/10\.\d{4,}/[^\s\]>)}\x{007D}]+\.)\s*\n\s*(\d+)",
+            r"(?i)(https?://(?:dx\.)?doi\.org/10\.\d{4,}/[^\s\]>,]+\.)\s*\n\s*(\d+)",
         )
         .unwrap()
     });
@@ -42,7 +80,7 @@ pub fn extract_doi(text: &str) -> Option<String> {
     // Pattern 3b: URL split mid-number
     static FIX3B: Lazy<Regex> = Lazy::new(|| {
         Regex::new(
-            r"(?i)(https?://(?:dx\.)?doi\.org/10\.\d{4,}/[^\s\]>)}\x{007D}]+\d)\s*\n\s*(\d[^\s\]>)}\x{007D}]*)",
+            r"(?i)(https?://(?:dx\.)?doi\.org/10\.\d{4,}/[^\s\]>,]+\d)\s*\n\s*(\d[^\s\]>,]*)",
         )
         .unwrap()
     });
@@ -50,19 +88,19 @@ pub fn extract_doi(text: &str) -> Option<String> {
 
     // Priority 1: Extract from URL format (most reliable)
     static URL_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)https?://(?:dx\.)?doi\.org/(10\.\d{4,}/[^\s\]>)},]+)").unwrap()
+        Regex::new(r"(?i)https?://(?:dx\.)?doi\.org/(10\.\d{4,}/[^\s\]>},]+)").unwrap()
     });
     if let Some(caps) = URL_RE.captures(&text_fixed) {
         let doi = caps.get(1).unwrap().as_str();
-        return Some(doi.trim_end_matches(['.', ',', ';', ':']).to_string());
+        return Some(clean_doi(doi));
     }
 
     // Priority 2: DOI pattern without URL prefix
     static DOI_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"10\.\d{4,}/[^\s\]>)}\x{007D}]+").unwrap());
+        Lazy::new(|| Regex::new(r"10\.\d{4,}/[^\s\]>},]+").unwrap());
     if let Some(m) = DOI_RE.find(&text_fixed) {
         let doi = m.as_str();
-        return Some(doi.trim_end_matches(['.', ',', ';', ':']).to_string());
+        return Some(clean_doi(doi));
     }
 
     None
@@ -201,6 +239,79 @@ mod tests {
     #[test]
     fn test_extract_doi_none() {
         assert_eq!(extract_doi("No DOI here"), None);
+    }
+
+    #[test]
+    fn test_extract_doi_with_balanced_parentheses() {
+        // DOIs like 10.1016/0021-9681(87)90171-8 contain parentheses
+        assert_eq!(
+            extract_doi("10.1016/0021-9681(87)90171-8"),
+            Some("10.1016/0021-9681(87)90171-8".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_doi_with_unbalanced_trailing_paren() {
+        // DOI inside parentheses: "(10.1016/0021-9681(87)90171-8)"
+        // The trailing ) is unbalanced relative to the DOI itself
+        assert_eq!(
+            extract_doi("(doi: 10.1016/0021-9681(87)90171-8)"),
+            Some("10.1016/0021-9681(87)90171-8".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_doi_url_with_parentheses() {
+        assert_eq!(
+            extract_doi("https://doi.org/10.1016/0021-9681(87)90171-8"),
+            Some("10.1016/0021-9681(87)90171-8".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_doi_url_with_unbalanced_paren() {
+        // URL in parenthetical context
+        assert_eq!(
+            extract_doi("(https://doi.org/10.1016/0021-9681(87)90171-8)"),
+            Some("10.1016/0021-9681(87)90171-8".into())
+        );
+    }
+
+    #[test]
+    fn test_clean_doi_no_parens() {
+        assert_eq!(clean_doi("10.1145/3442381.3450048"), "10.1145/3442381.3450048");
+    }
+
+    #[test]
+    fn test_clean_doi_balanced_parens() {
+        assert_eq!(
+            clean_doi("10.1016/0021-9681(87)90171-8"),
+            "10.1016/0021-9681(87)90171-8"
+        );
+    }
+
+    #[test]
+    fn test_clean_doi_unbalanced_trailing_paren() {
+        assert_eq!(
+            clean_doi("10.1016/0021-9681(87)90171-8)"),
+            "10.1016/0021-9681(87)90171-8"
+        );
+    }
+
+    #[test]
+    fn test_clean_doi_unbalanced_trailing_bracket() {
+        assert_eq!(
+            clean_doi("10.1234/test[1]extra]"),
+            "10.1234/test[1]extra"
+        );
+    }
+
+    #[test]
+    fn test_clean_doi_trailing_punct_after_paren() {
+        assert_eq!(
+            clean_doi("10.1016/0021-9681(87)90171-8)."),
+            "10.1016/0021-9681(87)90171-8"
+        );
     }
 
     #[test]

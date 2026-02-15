@@ -185,6 +185,18 @@ pub(crate) fn clean_title_with_config(
         title = title[..=punct_pos].to_string();
     }
 
+    // FIX 1 (NeurIPS): Broader venue/conference names after ?/! punctuation
+    static VENUE_AFTER_PUNCTUATION_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"[?!]\s+(?:International|Proceedings|Conference|Workshop|Symposium|Association|The\s+\d{4}\s+Conference|Nations|Annual|IEEE|ACM|USENIX|AAAI|NeurIPS|ICML|ICLR|CVPR|ICCV|ECCV|ACL|EMNLP|NAACL)",
+        )
+        .unwrap()
+    });
+    if let Some(m) = VENUE_AFTER_PUNCTUATION_RE.find(&title) {
+        let punct_pos = title[..m.end()].rfind(['?', '!']).unwrap();
+        title = title[..=punct_pos].to_string();
+    }
+
     // Remove editor lists: ". In Name, Name, and Name, editors, Venue"
     static EDITOR_LIST_RE: Lazy<Regex> = Lazy::new(|| {
         let name = r"[A-Za-z\u{00C0}-\u{024F}]+(?:\s+[A-Z]\.)*(?:\s+[A-Za-z\u{00C0}-\u{024F}]+)?";
@@ -200,6 +212,37 @@ pub(crate) fn clean_title_with_config(
 
     // Apply cutoff patterns to remove trailing venue/metadata
     title = apply_cutoff_patterns_with_config(&title, config);
+
+    // FIX 2 (NeurIPS): Reject venue-only titles
+    if is_venue_only(&title) {
+        return String::new();
+    }
+
+    // FIX 3 (NeurIPS): Reject author initials lists ("AL, Name Name, Name Name")
+    static AUTHOR_INITIALS_LIST_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"^[A-Z]{1,3},\s+[A-Z][a-z]+\s+[A-Z][a-z]+,\s+[A-Z][a-z]+\s+[A-Z][a-z]+")
+            .unwrap()
+    });
+    if AUTHOR_INITIALS_LIST_RE.is_match(&title) {
+        return String::new();
+    }
+
+    // FIX 4 (NeurIPS): Reject non-reference content (checklists, acknowledgments)
+    static NON_REFERENCE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+        vec![
+            Regex::new(r"(?i)^[•\-]\s+(?:The answer|Released models|If you are using)").unwrap(),
+            Regex::new(r"(?i)^We gratefully acknowledge").unwrap(),
+        ]
+    });
+    if NON_REFERENCE_PATTERNS.iter().any(|re| re.is_match(&title)) {
+        return String::new();
+    }
+
+    // FIX 5 (NeurIPS): Reject titles exceeding maximum reasonable length
+    const MAX_TITLE_LENGTH: usize = 300;
+    if title.len() > MAX_TITLE_LENGTH {
+        return String::new();
+    }
 
     title = title.trim().to_string();
     static TRAILING_PUNCT: Lazy<Regex> = Lazy::new(|| Regex::new(r"[.,;:]+$").unwrap());
@@ -398,6 +441,24 @@ fn is_journal_metadata(text: &str) -> bool {
     });
 
     PATTERNS.iter().any(|re| re.is_match(text))
+}
+
+/// Check if extracted text is just a venue/journal name, not a paper title.
+fn is_venue_only(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+
+    static VENUE_ONLY_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+        vec![
+            Regex::new(r"(?i)^(?:SIAM|IEEE|ACM|PNAS)\s+(?:Journal|Transactions|Review)").unwrap(),
+            Regex::new(r"(?i)^(?:Journal|Transactions|Proceedings)\s+(?:of|on)\s+").unwrap(),
+            Regex::new(r"(?i)^Advances\s+in\s+Neural").unwrap(),
+        ]
+    });
+
+    VENUE_ONLY_PATTERNS.iter().any(|re| re.is_match(text))
 }
 
 fn try_org_doc(ref_text: &str) -> Option<(String, bool)> {
@@ -1573,5 +1634,151 @@ mod tests {
         assert!(!is_journal_metadata(
             "A survey on deep learning for cybersecurity"
         ));
+    }
+
+    // ───────────────── NeurIPS validation fix tests ─────────────────
+
+    #[test]
+    fn test_venue_after_punctuation_conference() {
+        // FIX 1: Conference/workshop venue after ?/! should be truncated
+        let title = "Can transformers sort? International Conference on AI and Statistics";
+        let cleaned = clean_title(title, false);
+        assert_eq!(cleaned, "Can transformers sort?");
+    }
+
+    #[test]
+    fn test_venue_after_punctuation_association() {
+        let title = "Can unconfident llm annotations be used? Nations of the Americas Chapter of the Association for Computational Linguistics";
+        let cleaned = clean_title(title, false);
+        assert_eq!(cleaned, "Can unconfident llm annotations be used?");
+    }
+
+    #[test]
+    fn test_venue_after_punctuation_year_conference() {
+        let title = "Is this the answer! The 2023 Conference on Empirical Methods";
+        let cleaned = clean_title(title, false);
+        assert_eq!(cleaned, "Is this the answer!");
+    }
+
+    #[test]
+    fn test_venue_after_punctuation_no_venue() {
+        // Should NOT be truncated — no venue keyword after ?
+        let title = "Can LLMs keep a secret? Testing privacy implications";
+        let cleaned = clean_title(title, true); // from_quotes to skip sentence truncation
+        assert!(
+            cleaned.contains("Testing privacy"),
+            "Should not truncate when no venue follows: {}",
+            cleaned,
+        );
+    }
+
+    #[test]
+    fn test_venue_only_rejection() {
+        // FIX 2: Venue-only titles should be rejected (empty string returned)
+        assert_eq!(clean_title("SIAM Journal on Scientific Computing", false), "");
+        assert_eq!(clean_title("IEEE Transactions on Pattern Analysis", false), "");
+        assert_eq!(
+            clean_title("Journal of Machine Learning Research", false),
+            ""
+        );
+        assert_eq!(
+            clean_title("Proceedings of the International Conference", false),
+            ""
+        );
+        assert_eq!(
+            clean_title("Advances in Neural Information Processing Systems", false),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_venue_only_valid_titles_not_rejected() {
+        // Valid titles should NOT be rejected
+        assert_ne!(
+            clean_title("A Survey of Machine Learning Techniques", false),
+            ""
+        );
+        assert_ne!(
+            clean_title("Attention Is All You Need", false),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_author_initials_list_rejection() {
+        // FIX 3: Author initials lists should be rejected
+        assert_eq!(
+            clean_title("AL, Andrew Ahn, Nic Becker, Stephanie Carroll, Nico Christie", false),
+            ""
+        );
+        assert_eq!(
+            clean_title("AB, John Smith, Jane Doe, Bob Wilson", false),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_author_initials_valid_titles_not_rejected() {
+        // Titles starting with acronyms should NOT be rejected
+        assert_ne!(
+            clean_title("AI, Machine Learning, and Deep Networks: A Survey", false),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_non_reference_content_rejection() {
+        // FIX 4: NeurIPS checklists and acknowledgments should be rejected
+        assert_eq!(
+            clean_title(
+                "\u{2022} The answer NA means that the paper has no limitation",
+                false
+            ),
+            ""
+        );
+        assert_eq!(
+            clean_title("- Released models that have a high risk for misuse", false),
+            ""
+        );
+        assert_eq!(
+            clean_title(
+                "We gratefully acknowledge the support of the OpenReview sponsors",
+                false
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_non_reference_valid_titles_not_rejected() {
+        // Valid titles should NOT be rejected
+        assert_ne!(
+            clean_title("The Answer to Everything: A Survey", false),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_title_max_length_rejection() {
+        // FIX 5: Titles >300 chars should be rejected
+        let long_title = "A".repeat(301);
+        assert_eq!(clean_title(&long_title, false), "");
+
+        let ok_title = "A".repeat(250);
+        assert_ne!(clean_title(&ok_title, false), "");
+    }
+
+    #[test]
+    fn test_is_venue_only_detection() {
+        assert!(is_venue_only("SIAM Journal on Scientific Computing"));
+        assert!(is_venue_only("IEEE Transactions on Pattern Analysis"));
+        assert!(is_venue_only("ACM Journal on Computing Surveys"));
+        assert!(is_venue_only("Journal of Machine Learning Research"));
+        assert!(is_venue_only("Proceedings of the International Conference"));
+        assert!(is_venue_only("Advances in Neural Information Processing Systems"));
+
+        assert!(!is_venue_only("A Survey of Machine Learning Techniques"));
+        assert!(!is_venue_only("Attention Is All You Need"));
+        assert!(!is_venue_only("Neural Networks for Image Recognition"));
     }
 }

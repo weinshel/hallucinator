@@ -363,9 +363,14 @@ jobs:
           merge-multiple: true
       - name: Cleanup
         run: |
-          # Remove the granular manifests and any stray directories
+          # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
+          # Flatten: move files from subdirectories to top level
+          find artifacts/ -mindepth 2 -type f -exec mv {} artifacts/ \;
+          # Remove now-empty subdirectories
           find artifacts/ -mindepth 1 -type d -exec rm -rf {} + 2>/dev/null || true
+          echo "Release assets:"
+          ls -la artifacts/
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"

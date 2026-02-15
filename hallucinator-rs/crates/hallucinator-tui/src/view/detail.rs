@@ -132,38 +132,59 @@ pub fn render_in(
         if let Some(source) = &result.source {
             labeled_line(&mut lines, "Source", source, theme);
         }
-        if !result.found_authors.is_empty() {
-            // Show overlap count if ref_authors are available
-            let overlap = if !result.ref_authors.is_empty() {
-                let ref_set: std::collections::HashSet<_> = result
-                    .ref_authors
-                    .iter()
-                    .map(|a| a.to_lowercase())
-                    .collect();
-                let found_set: std::collections::HashSet<_> = result
-                    .found_authors
-                    .iter()
-                    .map(|a| a.to_lowercase())
-                    .collect();
-                let overlap_count = ref_set.intersection(&found_set).count();
-                format!(" ({}/{})", overlap_count, result.ref_authors.len())
-            } else {
-                String::new()
-            };
-            labeled_line(
-                &mut lines,
-                "Found Authors",
-                &format!("{}{}", result.found_authors.join(", "), overlap),
-                theme,
-            );
-        }
+        // Author comparison for mismatches: always show both rows
+        if result.status == Status::AuthorMismatch {
+            // PDF Authors (what was extracted from the paper)
+            if !result.ref_authors.is_empty() {
+                labeled_line(
+                    &mut lines,
+                    "PDF Authors",
+                    &result.ref_authors.join(", "),
+                    theme,
+                );
+            }
 
-        // Author mismatch detail
-        if result.status == Status::AuthorMismatch && !result.ref_authors.is_empty() {
+            // DB Authors (what the database returned) — always show, even if empty
+            if !result.found_authors.is_empty() {
+                let overlap = if !result.ref_authors.is_empty() {
+                    let ref_set: std::collections::HashSet<_> = result
+                        .ref_authors
+                        .iter()
+                        .map(|a| a.to_lowercase())
+                        .collect();
+                    let found_set: std::collections::HashSet<_> = result
+                        .found_authors
+                        .iter()
+                        .map(|a| a.to_lowercase())
+                        .collect();
+                    let overlap_count = ref_set.intersection(&found_set).count();
+                    format!(" ({}/{})", overlap_count, result.ref_authors.len())
+                } else {
+                    String::new()
+                };
+                labeled_line(
+                    &mut lines,
+                    "DB Authors",
+                    &format!("{}{}", result.found_authors.join(", "), overlap),
+                    theme,
+                );
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("  DB Authors        ", Style::default().fg(theme.dim)),
+                    Span::styled(
+                        "(no authors returned)",
+                        Style::default()
+                            .fg(theme.dim)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+            }
+        } else if !result.found_authors.is_empty() {
+            // For Verified status, just show DB Authors if present
             labeled_line(
                 &mut lines,
-                "Expected",
-                &result.ref_authors.join(", "),
+                "DB Authors",
+                &result.found_authors.join(", "),
                 theme,
             );
         }
@@ -222,6 +243,16 @@ pub fn render_in(
                     Span::styled(format!("{:<8}", time_str), Style::default().fg(theme.dim)),
                     Span::styled(notes, Style::default().fg(theme.dim)),
                 ]));
+
+                // Show per-DB found authors for mismatch rows
+                if db_result.status == DbStatus::AuthorMismatch
+                    && !db_result.found_authors.is_empty()
+                {
+                    lines.push(Line::from(Span::styled(
+                        format!("    Authors: {}", db_result.found_authors.join(", ")),
+                        Style::default().fg(theme.dim),
+                    )));
+                }
             }
         }
 

@@ -257,17 +257,40 @@ fn print_author_mismatch_block(
     }
     writeln!(w)?;
 
-    // We don't have ref_authors stored in ValidationResult directly,
-    // so we show only the found (DB) authors.
+    // PDF Authors (from the parsed reference)
+    if !result.ref_authors.is_empty() {
+        if color.enabled() {
+            writeln!(w, "{}", "PDF Authors:".bold())?;
+            for author in &result.ref_authors {
+                writeln!(w, "  {}", format!("• {}", author).cyan())?;
+            }
+        } else {
+            writeln!(w, "PDF Authors:")?;
+            for author in &result.ref_authors {
+                writeln!(w, "  • {}", author)?;
+            }
+        }
+        writeln!(w)?;
+    }
+
+    // DB Authors (from the database)
     if color.enabled() {
-        writeln!(w, "{}", format!("Authors in {}:", source).bold())?;
-        for author in &result.found_authors {
-            writeln!(w, "  {}", format!("• {}", author).magenta())?;
+        writeln!(w, "{}", format!("DB Authors ({}):", source).bold())?;
+        if result.found_authors.is_empty() {
+            writeln!(w, "  {}", "(no authors returned)".dimmed())?;
+        } else {
+            for author in &result.found_authors {
+                writeln!(w, "  {}", format!("• {}", author).magenta())?;
+            }
         }
     } else {
-        writeln!(w, "Authors in {}:", source)?;
-        for author in &result.found_authors {
-            writeln!(w, "  • {}", author)?;
+        writeln!(w, "DB Authors ({}):", source)?;
+        if result.found_authors.is_empty() {
+            writeln!(w, "  (no authors returned)")?;
+        } else {
+            for author in &result.found_authors {
+                writeln!(w, "  • {}", author)?;
+            }
         }
     }
 

@@ -618,6 +618,8 @@ fn write_md_ref(out: &mut String, ref_num: usize, r: &ValidationResult) {
                 "- **DB authors:** {}\n",
                 r.found_authors.join(", ")
             ));
+        } else {
+            out.push_str("- **DB authors:** *(no authors returned)*\n");
         }
         if let Some(src) = &r.source {
             out.push_str(&format!("- **Source:** {}\n", src));
@@ -732,11 +734,15 @@ fn export_text(papers: &[&PaperState], ref_states: &[&[RefState]]) -> String {
                     r.ref_authors.join(", ")
                 ));
             }
-            if r.status == Status::AuthorMismatch && !r.found_authors.is_empty() {
-                out.push_str(&format!(
-                    "       Authors (DB):  {}\n",
-                    r.found_authors.join(", ")
-                ));
+            if r.status == Status::AuthorMismatch {
+                if !r.found_authors.is_empty() {
+                    out.push_str(&format!(
+                        "       Authors (DB):  {}\n",
+                        r.found_authors.join(", ")
+                    ));
+                } else {
+                    out.push_str("       Authors (DB):  (no authors returned)\n");
+                }
             }
 
             // DOI / arXiv
@@ -1146,17 +1152,20 @@ fn write_html_ref(out: &mut String, ref_num: usize, r: &ValidationResult, fp: Op
     }
 
     // Author comparison for mismatches
-    if r.status == Status::AuthorMismatch
-        && (!r.ref_authors.is_empty() || !r.found_authors.is_empty())
-    {
+    if r.status == Status::AuthorMismatch {
         out.push_str("<div class=\"author-compare\">\n");
         out.push_str(&format!(
             "<div class=\"pdf-authors\"><strong>PDF:</strong> {}</div>\n",
             html_escape(&r.ref_authors.join(", "))
         ));
+        let db_authors_text = if r.found_authors.is_empty() {
+            "<em>(no authors returned)</em>".to_string()
+        } else {
+            html_escape(&r.found_authors.join(", "))
+        };
         out.push_str(&format!(
             "<div class=\"db-authors\"><strong>DB:</strong> {}</div>\n",
-            html_escape(&r.found_authors.join(", "))
+            db_authors_text
         ));
         out.push_str("</div>\n");
     }

@@ -1491,6 +1491,13 @@ impl App {
             }
             Action::SaveConfig => {
                 self.save_config();
+                if matches!(self.screen, Screen::Config) {
+                    if let Some(prev) = self.config_state.prev_screen.clone() {
+                        self.screen = prev;
+                    } else {
+                        self.screen = Screen::Queue;
+                    }
+                }
             }
             Action::BuildDatabase => {
                 self.handle_build_database();

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use hallucinator_core::{CheckStats, DbStatus, Status, ValidationResult};
 
-use crate::model::paper::{RefPhase, RefState};
+use crate::model::paper::{FpReason, RefPhase, RefState};
 use crate::model::queue::{PaperState, PaperVerdict};
 use crate::view::export::ExportFormat;
 
@@ -50,6 +50,68 @@ fn verdict_str(v: Option<PaperVerdict>) -> &'static str {
 
 fn is_retracted(r: &ValidationResult) -> bool {
     r.retraction_info.as_ref().is_some_and(|ri| ri.is_retracted)
+}
+
+/// Whether a verified reference has an invalid DOI or arXiv ID.
+fn has_doi_arxiv_issue(r: &ValidationResult) -> bool {
+    r.status == Status::Verified
+        && (r.doi_info.as_ref().is_some_and(|d| !d.valid)
+            || r.arxiv_info.as_ref().is_some_and(|a| !a.valid))
+}
+
+/// Sort bucket for export ordering.
+///
+/// 0 = Retracted, 1 = Not Found, 2 = Author Mismatch,
+/// 3 = DOI/arXiv issues (verified but invalid DOI/arXiv),
+/// 4 = FP-overridden, 5 = Clean verified, 6 = Skipped.
+fn export_sort_key(r: &ValidationResult, fp: Option<FpReason>) -> u8 {
+    if fp.is_some() {
+        return 4;
+    }
+    if is_retracted(r) {
+        return 0;
+    }
+    match r.status {
+        Status::NotFound => 1,
+        Status::AuthorMismatch => 2,
+        Status::Verified => {
+            if has_doi_arxiv_issue(r) {
+                3
+            } else {
+                5
+            }
+        }
+    }
+}
+
+/// Entry for the sorted reference index used across all export formats.
+struct SortedRef<'a> {
+    /// Index into paper.results
+    ri: usize,
+    result: &'a ValidationResult,
+    fp: Option<FpReason>,
+    ref_num: usize,
+}
+
+/// Build a sorted list of refs for export: retracted → not found → mismatch →
+/// DOI/arXiv issues → FP-overridden → clean verified, with original ref number
+/// as tiebreaker within each bucket.
+fn build_sorted_refs<'a>(paper: &'a PaperState, paper_refs: &[RefState]) -> Vec<SortedRef<'a>> {
+    let mut entries: Vec<SortedRef<'a>> = Vec::new();
+    for (ri, result) in paper.results.iter().enumerate() {
+        if let Some(r) = result {
+            let fp = paper_refs.get(ri).and_then(|rs| rs.fp_reason);
+            let ref_num = paper_refs.get(ri).map(|rs| rs.index + 1).unwrap_or(ri + 1);
+            entries.push(SortedRef {
+                ri,
+                result: r,
+                fp,
+                ref_num,
+            });
+        }
+    }
+    entries.sort_by_key(|e| (export_sort_key(e.result, e.fp), e.ref_num));
+    entries
 }
 
 fn problematic_pct(stats: &CheckStats) -> f64 {
@@ -143,116 +205,126 @@ pub fn export_json(papers: &[&PaperState], ref_states: &[&[RefState]]) -> String
             problematic_pct(&s),
         ));
 
-        // Collect all entries to write: normal results + skipped refs
+        // Collect all entries to write: sorted results + skipped refs
         let mut entries: Vec<String> = Vec::new();
+        let sorted = build_sorted_refs(paper, paper_refs);
 
-        for (ri, result) in paper.results.iter().enumerate() {
-            if let Some(r) = result {
-                let fp_json = paper_refs
-                    .get(ri)
-                    .and_then(|rs| rs.fp_reason)
-                    .map(|fp| json_str(fp.as_str()))
-                    .unwrap_or_else(|| "null".to_string());
-                let orig_num = paper_refs.get(ri).map(|rs| rs.index + 1).unwrap_or(ri + 1);
-                let mut entry = String::new();
-                entry.push_str("      {\n");
-                entry.push_str(&format!("        \"index\": {},\n", ri));
-                entry.push_str(&format!("        \"original_number\": {},\n", orig_num));
-                entry.push_str(&format!("        \"title\": {},\n", json_str(&r.title)));
-                entry.push_str(&format!(
-                    "        \"raw_citation\": {},\n",
-                    json_str(&r.raw_citation)
-                ));
-                entry.push_str(&format!(
-                    "        \"status\": {},\n",
-                    json_str(status_str(&r.status))
-                ));
-                entry.push_str(&format!("        \"fp_reason\": {},\n", fp_json));
-                entry.push_str(&format!(
-                    "        \"source\": {},\n",
-                    json_opt_str(&r.source)
-                ));
-                entry.push_str(&format!(
-                    "        \"ref_authors\": {},\n",
-                    json_str_array(&r.ref_authors)
-                ));
-                entry.push_str(&format!(
-                    "        \"found_authors\": {},\n",
-                    json_str_array(&r.found_authors)
-                ));
-                entry.push_str(&format!(
-                    "        \"paper_url\": {},\n",
-                    json_opt_str(&r.paper_url)
-                ));
-                entry.push_str(&format!(
-                    "        \"failed_dbs\": {},\n",
-                    json_str_array(&r.failed_dbs)
-                ));
-
-                // DOI info
-                if let Some(doi) = &r.doi_info {
-                    entry.push_str(&format!(
-                        "        \"doi_info\": {{\"doi\": {}, \"valid\": {}, \"title\": {}}},\n",
-                        json_str(&doi.doi),
-                        doi.valid,
-                        json_opt_str(&doi.title)
-                    ));
-                } else {
-                    entry.push_str("        \"doi_info\": null,\n");
+        for sref in &sorted {
+            let r = sref.result;
+            let ri = sref.ri;
+            let fp_json = sref
+                .fp
+                .map(|fp| json_str(fp.as_str()))
+                .unwrap_or_else(|| "null".to_string());
+            let orig_num = sref.ref_num;
+            let effective = if sref.fp.is_some() {
+                "\"verified\""
+            } else {
+                match r.status {
+                    Status::Verified => "\"verified\"",
+                    Status::NotFound => "\"not_found\"",
+                    Status::AuthorMismatch => "\"author_mismatch\"",
                 }
+            };
+            let mut entry = String::new();
+            entry.push_str("      {\n");
+            entry.push_str(&format!("        \"index\": {},\n", ri));
+            entry.push_str(&format!("        \"original_number\": {},\n", orig_num));
+            entry.push_str(&format!("        \"title\": {},\n", json_str(&r.title)));
+            entry.push_str(&format!(
+                "        \"raw_citation\": {},\n",
+                json_str(&r.raw_citation)
+            ));
+            entry.push_str(&format!(
+                "        \"status\": {},\n",
+                json_str(status_str(&r.status))
+            ));
+            entry.push_str(&format!("        \"effective_status\": {},\n", effective));
+            entry.push_str(&format!("        \"fp_reason\": {},\n", fp_json));
+            entry.push_str(&format!(
+                "        \"source\": {},\n",
+                json_opt_str(&r.source)
+            ));
+            entry.push_str(&format!(
+                "        \"ref_authors\": {},\n",
+                json_str_array(&r.ref_authors)
+            ));
+            entry.push_str(&format!(
+                "        \"found_authors\": {},\n",
+                json_str_array(&r.found_authors)
+            ));
+            entry.push_str(&format!(
+                "        \"paper_url\": {},\n",
+                json_opt_str(&r.paper_url)
+            ));
+            entry.push_str(&format!(
+                "        \"failed_dbs\": {},\n",
+                json_str_array(&r.failed_dbs)
+            ));
 
-                // arXiv info
-                if let Some(ax) = &r.arxiv_info {
-                    entry.push_str(&format!(
-                        "        \"arxiv_info\": {{\"arxiv_id\": {}, \"valid\": {}, \"title\": {}}},\n",
-                        json_str(&ax.arxiv_id),
-                        ax.valid,
-                        json_opt_str(&ax.title)
-                    ));
-                } else {
-                    entry.push_str("        \"arxiv_info\": null,\n");
-                }
-
-                // Retraction info
-                if let Some(ret) = &r.retraction_info {
-                    entry.push_str(&format!(
-                        "        \"retraction_info\": {{\"is_retracted\": {}, \"retraction_doi\": {}, \"retraction_source\": {}}},\n",
-                        ret.is_retracted,
-                        json_opt_str(&ret.retraction_doi),
-                        json_opt_str(&ret.retraction_source)
-                    ));
-                } else {
-                    entry.push_str("        \"retraction_info\": null,\n");
-                }
-
-                // Per-DB results
-                entry.push_str("        \"db_results\": [");
-                for (di, db) in r.db_results.iter().enumerate() {
-                    let db_status = match db.status {
-                        DbStatus::Match => "match",
-                        DbStatus::NoMatch => "no_match",
-                        DbStatus::AuthorMismatch => "author_mismatch",
-                        DbStatus::Timeout => "timeout",
-                        DbStatus::Error => "error",
-                        DbStatus::Skipped => "skipped",
-                    };
-                    let elapsed_ms = db.elapsed.map(|d| d.as_millis()).unwrap_or(0);
-                    entry.push_str(&format!(
-                        "{{\"db\": {}, \"status\": {}, \"elapsed_ms\": {}, \"authors\": {}, \"url\": {}}}",
-                        json_str(&db.db_name),
-                        json_str(db_status),
-                        elapsed_ms,
-                        json_str_array(&db.found_authors),
-                        json_opt_str(&db.paper_url),
-                    ));
-                    if di + 1 < r.db_results.len() {
-                        entry.push_str(", ");
-                    }
-                }
-                entry.push_str("]\n");
-                entry.push_str("      }");
-                entries.push(entry);
+            // DOI info
+            if let Some(doi) = &r.doi_info {
+                entry.push_str(&format!(
+                    "        \"doi_info\": {{\"doi\": {}, \"valid\": {}, \"title\": {}}},\n",
+                    json_str(&doi.doi),
+                    doi.valid,
+                    json_opt_str(&doi.title)
+                ));
+            } else {
+                entry.push_str("        \"doi_info\": null,\n");
             }
+
+            // arXiv info
+            if let Some(ax) = &r.arxiv_info {
+                entry.push_str(&format!(
+                    "        \"arxiv_info\": {{\"arxiv_id\": {}, \"valid\": {}, \"title\": {}}},\n",
+                    json_str(&ax.arxiv_id),
+                    ax.valid,
+                    json_opt_str(&ax.title)
+                ));
+            } else {
+                entry.push_str("        \"arxiv_info\": null,\n");
+            }
+
+            // Retraction info
+            if let Some(ret) = &r.retraction_info {
+                entry.push_str(&format!(
+                    "        \"retraction_info\": {{\"is_retracted\": {}, \"retraction_doi\": {}, \"retraction_source\": {}}},\n",
+                    ret.is_retracted,
+                    json_opt_str(&ret.retraction_doi),
+                    json_opt_str(&ret.retraction_source)
+                ));
+            } else {
+                entry.push_str("        \"retraction_info\": null,\n");
+            }
+
+            // Per-DB results
+            entry.push_str("        \"db_results\": [");
+            for (di, db) in r.db_results.iter().enumerate() {
+                let db_status = match db.status {
+                    DbStatus::Match => "match",
+                    DbStatus::NoMatch => "no_match",
+                    DbStatus::AuthorMismatch => "author_mismatch",
+                    DbStatus::Timeout => "timeout",
+                    DbStatus::Error => "error",
+                    DbStatus::Skipped => "skipped",
+                };
+                let elapsed_ms = db.elapsed.map(|d| d.as_millis()).unwrap_or(0);
+                entry.push_str(&format!(
+                    "{{\"db\": {}, \"status\": {}, \"elapsed_ms\": {}, \"authors\": {}, \"url\": {}}}",
+                    json_str(&db.db_name),
+                    json_str(db_status),
+                    elapsed_ms,
+                    json_str_array(&db.found_authors),
+                    json_opt_str(&db.paper_url),
+                ));
+                if di + 1 < r.db_results.len() {
+                    entry.push_str(", ");
+                }
+            }
+            entry.push_str("]\n");
+            entry.push_str("      }");
+            entries.push(entry);
         }
 
         // Add skipped refs from ref_states
@@ -265,6 +337,7 @@ pub fn export_json(papers: &[&PaperState], ref_states: &[&[RefState]]) -> String
                 entry.push_str(&format!("        \"title\": {},\n", json_str(&rs.title)));
                 entry.push_str("        \"raw_citation\": \"\",\n");
                 entry.push_str("        \"status\": \"skipped\",\n");
+                entry.push_str("        \"effective_status\": \"skipped\",\n");
                 entry.push_str(&format!("        \"skip_reason\": {},\n", json_str(reason)));
                 entry.push_str("        \"fp_reason\": null,\n");
                 entry.push_str("        \"source\": null,\n");
@@ -308,54 +381,55 @@ fn csv_escape(s: &str) -> String {
 
 fn export_csv(papers: &[&PaperState], ref_states: &[&[RefState]]) -> String {
     let mut out = String::from(
-        "Filename,Verdict,Ref#,Title,Status,FpReason,Source,Retracted,Authors,FoundAuthors,PaperURL,DOI,ArxivID,FailedDBs\n",
+        "Filename,Verdict,Ref#,Title,Status,EffectiveStatus,FpReason,Source,Retracted,Authors,FoundAuthors,PaperURL,DOI,ArxivID,FailedDBs\n",
     );
     for (pi, paper) in papers.iter().enumerate() {
         let verdict = verdict_str(paper.verdict);
         let paper_refs = ref_states.get(pi).copied().unwrap_or(&[]);
-        for (ri, result) in paper.results.iter().enumerate() {
-            if let Some(r) = result {
-                let retracted = is_retracted(r);
-                let fp = paper_refs
-                    .get(ri)
-                    .and_then(|rs| rs.fp_reason)
-                    .map(|fp| fp.as_str())
-                    .unwrap_or("");
-                let ref_num = paper_refs.get(ri).map(|rs| rs.index + 1).unwrap_or(ri + 1);
-                let authors = r.ref_authors.join("; ");
-                let found = r.found_authors.join("; ");
-                let url = r.paper_url.as_deref().unwrap_or("");
-                let doi = r.doi_info.as_ref().map(|d| d.doi.as_str()).unwrap_or("");
-                let arxiv = r
-                    .arxiv_info
-                    .as_ref()
-                    .map(|a| a.arxiv_id.as_str())
-                    .unwrap_or("");
-                let failed = r.failed_dbs.join("; ");
-                out.push_str(&format!(
-                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
-                    csv_escape(&paper.filename),
-                    csv_escape(verdict),
-                    ref_num,
-                    csv_escape(&r.title),
-                    status_str(&r.status),
-                    csv_escape(fp),
-                    csv_escape(r.source.as_deref().unwrap_or("")),
-                    retracted,
-                    csv_escape(&authors),
-                    csv_escape(&found),
-                    csv_escape(url),
-                    csv_escape(doi),
-                    csv_escape(arxiv),
-                    csv_escape(&failed),
-                ));
-            }
+        let sorted = build_sorted_refs(paper, paper_refs);
+        for sref in &sorted {
+            let r = sref.result;
+            let retracted = is_retracted(r);
+            let fp = sref.fp.map(|fp| fp.as_str()).unwrap_or("");
+            let effective = if sref.fp.is_some() {
+                "verified"
+            } else {
+                status_str(&r.status)
+            };
+            let authors = r.ref_authors.join("; ");
+            let found = r.found_authors.join("; ");
+            let url = r.paper_url.as_deref().unwrap_or("");
+            let doi = r.doi_info.as_ref().map(|d| d.doi.as_str()).unwrap_or("");
+            let arxiv = r
+                .arxiv_info
+                .as_ref()
+                .map(|a| a.arxiv_id.as_str())
+                .unwrap_or("");
+            let failed = r.failed_dbs.join("; ");
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                csv_escape(&paper.filename),
+                csv_escape(verdict),
+                sref.ref_num,
+                csv_escape(&r.title),
+                status_str(&r.status),
+                effective,
+                csv_escape(fp),
+                csv_escape(r.source.as_deref().unwrap_or("")),
+                retracted,
+                csv_escape(&authors),
+                csv_escape(&found),
+                csv_escape(url),
+                csv_escape(doi),
+                csv_escape(arxiv),
+                csv_escape(&failed),
+            ));
         }
         // Add skipped refs
         for rs in paper_refs {
             if let RefPhase::Skipped(reason) = &rs.phase {
                 out.push_str(&format!(
-                    "{},{},{},{},skipped,{},,,,,,,,\n",
+                    "{},{},{},{},skipped,skipped,{},,,,,,,,\n",
                     csv_escape(&paper.filename),
                     csv_escape(verdict),
                     rs.index + 1,
@@ -399,57 +473,76 @@ fn export_markdown(papers: &[&PaperState], ref_states: &[&[RefState]]) -> String
             problematic_pct(&s),
         ));
 
-        // Group: problems first, then verified
-        let mut problems: Vec<(usize, &ValidationResult)> = Vec::new();
-        let mut verified: Vec<(usize, &ValidationResult)> = Vec::new();
-        for (ri, result) in paper.results.iter().enumerate() {
-            if let Some(r) = result {
-                if r.status != Status::Verified || is_retracted(r) {
-                    problems.push((ri, r));
-                } else {
-                    verified.push((ri, r));
-                }
+        // Build sorted refs and split into buckets
+        let sorted = build_sorted_refs(paper, paper_refs);
+        let mut problems: Vec<&SortedRef> = Vec::new();
+        let mut doi_arxiv_issues: Vec<&SortedRef> = Vec::new();
+        let mut fp_overrides: Vec<&SortedRef> = Vec::new();
+        let mut verified: Vec<&SortedRef> = Vec::new();
+        for sref in &sorted {
+            match export_sort_key(sref.result, sref.fp) {
+                0..=2 => problems.push(sref),
+                3 => doi_arxiv_issues.push(sref),
+                4 => fp_overrides.push(sref),
+                _ => verified.push(sref),
             }
         }
 
         if !problems.is_empty() {
             out.push_str("### Problematic References\n\n");
-            for (ri, r) in &problems {
-                let ref_num = paper_refs.get(*ri).map(|rs| rs.index + 1).unwrap_or(ri + 1);
-                write_md_ref(&mut out, ref_num, r);
-                if let Some(fp) = paper_refs.get(*ri).and_then(|rs| rs.fp_reason) {
-                    out.push_str(&format!(
-                        "- **User override:** Marked safe ({})\n\n",
-                        fp.description()
-                    ));
+            for sref in &problems {
+                write_md_ref(&mut out, sref.ref_num, sref.result);
+            }
+        }
+
+        if !doi_arxiv_issues.is_empty() {
+            out.push_str("### DOI/arXiv Issues\n\n");
+            for sref in &doi_arxiv_issues {
+                write_md_ref(&mut out, sref.ref_num, sref.result);
+            }
+        }
+
+        if !fp_overrides.is_empty() {
+            out.push_str("### User-Verified References (FP Overrides)\n\n");
+            for sref in &fp_overrides {
+                let fp = sref.fp.unwrap();
+                out.push_str(&format!(
+                    "**[{}]** {} \u{2014} \u{2713} Verified (FP: {})\n\n",
+                    sref.ref_num,
+                    md_escape(&sref.result.title),
+                    fp.description(),
+                ));
+                if let Some(src) = &sref.result.source {
+                    out.push_str(&format!("- **Source:** {}\n", src));
                 }
+                if let Some(url) = &sref.result.paper_url {
+                    out.push_str(&format!("- [Paper URL]({})\n", url));
+                }
+                out.push_str(&format!(
+                    "- [Google Scholar]({})\n\n",
+                    scholar_url(&sref.result.title)
+                ));
             }
         }
 
         if !verified.is_empty() {
             out.push_str("### Verified References\n\n");
-            out.push_str("| # | Title | Source | URL | FP Override |\n");
-            out.push_str("|---|-------|--------|-----|-------------|\n");
-            for (ri, r) in &verified {
-                let ref_num = paper_refs.get(*ri).map(|rs| rs.index + 1).unwrap_or(ri + 1);
+            out.push_str("| # | Title | Source | URL |\n");
+            out.push_str("|---|-------|--------|-----|\n");
+            for sref in &verified {
+                let r = sref.result;
                 let source = r.source.as_deref().unwrap_or("\u{2014}");
                 let url = r
                     .paper_url
                     .as_ref()
                     .map(|u| format!("[link]({})", u))
                     .unwrap_or_default();
-                let fp_col = paper_refs
-                    .get(*ri)
-                    .and_then(|rs| rs.fp_reason)
-                    .map(|fp| fp.short_label().to_string())
-                    .unwrap_or_default();
                 out.push_str(&format!(
-                    "| {} | {} | {} | {} | {} |\n",
-                    ref_num,
+                    "| {} | {} | {} | {} |\n",
+                    sref.ref_num,
                     md_escape(&r.title),
                     source,
                     url,
-                    fp_col,
                 ));
             }
             out.push('\n');
@@ -605,76 +698,82 @@ fn export_text(papers: &[&PaperState], ref_states: &[&[RefState]]) -> String {
             problematic_pct(&s),
         ));
 
-        for (ri, result) in paper.results.iter().enumerate() {
-            if let Some(r) = result {
-                let ref_num = paper_refs.get(ri).map(|rs| rs.index + 1).unwrap_or(ri + 1);
-                let status = match r.status {
-                    Status::Verified => "Verified",
-                    Status::NotFound => "NOT FOUND",
-                    Status::AuthorMismatch => "Author Mismatch",
-                };
-                let retracted = if is_retracted(r) { " [RETRACTED]" } else { "" };
-                let source = r.source.as_deref().unwrap_or("-");
+        let sorted = build_sorted_refs(paper, paper_refs);
+        for sref in &sorted {
+            let r = sref.result;
+            let status = if sref.fp.is_some() {
+                format!("Verified (FP: {})", sref.fp.unwrap().short_label())
+            } else if is_retracted(r) {
+                "RETRACTED".to_string()
+            } else {
+                match r.status {
+                    Status::Verified => "Verified".to_string(),
+                    Status::NotFound => "NOT FOUND".to_string(),
+                    Status::AuthorMismatch => "Author Mismatch".to_string(),
+                }
+            };
+            // When FP is set, status already shows "Verified (FP: ...)",
+            // but still tag retracted papers so the info isn't lost.
+            let retracted_tag = if is_retracted(r) && sref.fp.is_some() {
+                " [RETRACTED]"
+            } else {
+                ""
+            };
+            let source = r.source.as_deref().unwrap_or("-");
+            out.push_str(&format!(
+                "  [{}] {} - {} ({}){}\n",
+                sref.ref_num, r.title, status, source, retracted_tag,
+            ));
+
+            // Authors
+            if !r.ref_authors.is_empty() {
                 out.push_str(&format!(
-                    "  [{}] {} - {} ({}){}\n",
-                    ref_num, r.title, status, source, retracted,
+                    "       Authors (PDF): {}\n",
+                    r.ref_authors.join(", ")
                 ));
+            }
+            if r.status == Status::AuthorMismatch && !r.found_authors.is_empty() {
+                out.push_str(&format!(
+                    "       Authors (DB):  {}\n",
+                    r.found_authors.join(", ")
+                ));
+            }
 
-                // Authors
-                if !r.ref_authors.is_empty() {
-                    out.push_str(&format!(
-                        "       Authors (PDF): {}\n",
-                        r.ref_authors.join(", ")
-                    ));
-                }
-                if r.status == Status::AuthorMismatch && !r.found_authors.is_empty() {
-                    out.push_str(&format!(
-                        "       Authors (DB):  {}\n",
-                        r.found_authors.join(", ")
-                    ));
-                }
+            // DOI / arXiv
+            if let Some(doi) = &r.doi_info {
+                let valid = if doi.valid { "valid" } else { "INVALID" };
+                out.push_str(&format!("       DOI: {} ({})\n", doi.doi, valid));
+            }
+            if let Some(ax) = &r.arxiv_info {
+                let valid = if ax.valid { "valid" } else { "INVALID" };
+                out.push_str(&format!("       arXiv: {} ({})\n", ax.arxiv_id, valid));
+            }
 
-                // DOI / arXiv
-                if let Some(doi) = &r.doi_info {
-                    let valid = if doi.valid { "valid" } else { "INVALID" };
-                    out.push_str(&format!("       DOI: {} ({})\n", doi.doi, valid));
+            // Retraction details
+            if let Some(ret) = &r.retraction_info
+                && ret.is_retracted
+            {
+                if let Some(rdoi) = &ret.retraction_doi {
+                    out.push_str(&format!("       Retraction DOI: {}\n", rdoi));
                 }
-                if let Some(ax) = &r.arxiv_info {
-                    let valid = if ax.valid { "valid" } else { "INVALID" };
-                    out.push_str(&format!("       arXiv: {} ({})\n", ax.arxiv_id, valid));
+                if let Some(src) = &ret.retraction_source {
+                    out.push_str(&format!("       Retraction source: {}\n", src));
                 }
+            }
 
-                // Retraction details
-                if let Some(ret) = &r.retraction_info
-                    && ret.is_retracted
-                {
-                    if let Some(rdoi) = &ret.retraction_doi {
-                        out.push_str(&format!("       Retraction DOI: {}\n", rdoi));
-                    }
-                    if let Some(src) = &ret.retraction_source {
-                        out.push_str(&format!("       Retraction source: {}\n", src));
-                    }
-                }
+            // Paper URL
+            if let Some(url) = &r.paper_url {
+                out.push_str(&format!("       URL: {}\n", url));
+            }
 
-                // Paper URL
-                if let Some(url) = &r.paper_url {
-                    out.push_str(&format!("       URL: {}\n", url));
-                }
+            // Failed DBs
+            if !r.failed_dbs.is_empty() {
+                out.push_str(&format!("       Timed out: {}\n", r.failed_dbs.join(", ")));
+            }
 
-                // Failed DBs
-                if !r.failed_dbs.is_empty() {
-                    out.push_str(&format!("       Timed out: {}\n", r.failed_dbs.join(", ")));
-                }
-
-                // Raw citation
-                if !r.raw_citation.is_empty() {
-                    out.push_str(&format!("       Citation: {}\n", r.raw_citation));
-                }
-
-                // FP override
-                if let Some(fp) = paper_refs.get(ri).and_then(|rs| rs.fp_reason) {
-                    out.push_str(&format!("       FP override: {}\n", fp.description()));
-                }
+            // Raw citation
+            if !r.raw_citation.is_empty() {
+                out.push_str(&format!("       Citation: {}\n", r.raw_citation));
             }
         }
 
@@ -935,12 +1034,9 @@ footer {
             s.total, s.verified, s.not_found, s.author_mismatch, s.retracted, s.skipped, pp,
         ));
 
-        for (ri, result) in paper.results.iter().enumerate() {
-            if let Some(r) = result {
-                let fp = paper_refs.get(ri).and_then(|rs| rs.fp_reason);
-                let ref_num = paper_refs.get(ri).map(|rs| rs.index + 1).unwrap_or(ri + 1);
-                write_html_ref(&mut out, ref_num, r, fp);
-            }
+        let sorted = build_sorted_refs(paper, paper_refs);
+        for sref in &sorted {
+            write_html_ref(&mut out, sref.ref_num, sref.result, sref.fp);
         }
 
         // Skipped refs
@@ -1008,14 +1104,11 @@ fn write_stat_card(out: &mut String, class: &str, value: usize, label: &str) {
     ));
 }
 
-fn write_html_ref(
-    out: &mut String,
-    ref_num: usize,
-    r: &ValidationResult,
-    fp: Option<crate::model::paper::FpReason>,
-) {
+fn write_html_ref(out: &mut String, ref_num: usize, r: &ValidationResult, fp: Option<FpReason>) {
     let retracted = is_retracted(r);
-    let (badge_class, badge_text) = if retracted {
+    let (badge_class, badge_text) = if fp.is_some() {
+        ("verified", "Verified")
+    } else if retracted {
         ("retracted", "RETRACTED")
     } else {
         match r.status {

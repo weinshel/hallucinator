@@ -334,11 +334,20 @@ def get_db_metadata(db_path):
 def get_db_age_days(db_path):
     """Get age of database in days, or None if can't determine."""
     metadata = get_db_metadata(db_path)
-    if not metadata or 'build_date' not in metadata:
+    if not metadata:
         return None
 
     try:
-        build_date = datetime.fromisoformat(metadata['build_date'])
+        # Try Rust format first (Unix timestamp in 'last_updated')
+        if 'last_updated' in metadata:
+            timestamp = int(metadata['last_updated'])
+            build_date = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        # Fall back to Python format (ISO string in 'build_date')
+        elif 'build_date' in metadata:
+            build_date = datetime.fromisoformat(metadata['build_date'])
+        else:
+            return None
+
         now = datetime.now(timezone.utc)
         age = now - build_date
         return age.days
@@ -358,8 +367,84 @@ def check_staleness(db_path):
     return None
 
 
+def normalize_fts5_query(words):
+    """Normalize words for FTS5 queries.
+
+    Handles:
+    - Splitting hyphenated words
+    - Filtering merged compounds (>12 chars)
+    - Filtering merged acronyms (all-caps >4 chars)
+    - Removing punctuation from word ends
+    - Deduplicating words
+    - Scoring words by distinctiveness
+    - Quoting for FTS5 syntax
+
+    Returns list of quoted FTS5 terms.
+    """
+    # Split hyphenated words and filter problematic terms
+    normalized = []
+    seen = set()  # Track seen words (case-insensitive) to avoid duplicates
+
+    for w in words:
+        # Remove trailing punctuation (?, !, etc.)
+        w = w.rstrip('?!.,;:')
+        if not w:
+            continue
+
+        if '-' in w:
+            # Split hyphenated compounds, keep valid parts
+            parts = [p for p in w.split('-') if 3 <= len(p) <= 12]
+            for part in parts:
+                lower = part.lower()
+                if lower not in seen:
+                    seen.add(lower)
+                    normalized.append(part)
+        elif len(w) > 12:
+            # Skip merged compounds like "Crossprivilege"
+            continue
+        elif len(w) > 10 and any(c.isupper() for c in w[1:]):
+            # Skip long camelCase words like "CrossPrivilege"
+            continue
+        else:
+            lower = w.lower()
+            if lower not in seen:
+                seen.add(lower)
+                normalized.append(w)
+
+    if not normalized:
+        return []
+
+    # Score words by distinctiveness
+    def word_score(w, idx):
+        score = len(w)
+        if w[0].isupper():
+            score += 10  # Capitalized words are more distinctive
+        if w.isupper() and len(w) >= 3:
+            score += 5   # Valid acronyms get extra boost
+        score -= idx * 0.5  # Earlier position slightly preferred
+        return score
+
+    scored = [(word_score(w, i), w) for i, w in enumerate(normalized)]
+    scored.sort(key=lambda x: -x[0])
+
+    # Select top words, skipping merged acronyms
+    top_words = []
+    for _, w in scored:
+        if len(top_words) >= 4:
+            break
+        # Skip merged acronyms (all-caps > 4 chars, e.g., "CFLAT", "SGXDUMP")
+        if w.isupper() and len(w) > 4:
+            continue
+        top_words.append(w)
+
+    # Quote each word for FTS5 (prevents operator interpretation)
+    return ['"' + w.replace('"', '""') + '"' for w in top_words]
+
+
 def query_offline(title, db_path):
     """Query the offline DBLP database for a title.
+
+    Supports both Rust schema v3 (normalized authors) and legacy Python schema.
 
     Args:
         title: Title to search for
@@ -378,31 +463,74 @@ def query_offline(title, db_path):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
+    # Detect schema version
+    try:
+        cur.execute("SELECT value FROM metadata WHERE key = 'schema_version'")
+        row = cur.fetchone()
+        schema_version = int(row[0]) if row else 0
+    except Exception:
+        schema_version = 0
+
     # Use FTS to find candidates
     words = get_query_words(title, 6)
-    query = ' '.join(words)
+    if not words:
+        conn.close()
+        return None, [], None
 
-    # FTS5 query - search for publications containing these words
-    cur.execute('''
-        SELECT p.title, p.authors, p.url
-        FROM publications_fts fts
-        JOIN publications p ON fts.rowid = p.id
-        WHERE publications_fts MATCH ?
-        LIMIT 20
-    ''', (query,))
+    # Normalize words for FTS5 query
+    quoted_words = normalize_fts5_query(words)
+    if not quoted_words:
+        conn.close()
+        return None, [], None
 
-    results = cur.fetchall()
-    conn.close()
+    query = ' '.join(quoted_words)
+
+    # Query based on schema version
+    if schema_version >= 3:
+        # Rust schema v3: normalized authors
+        cur.execute('''
+            SELECT p.id, p.key, p.title
+            FROM publications p
+            WHERE p.id IN (SELECT rowid FROM publications_fts WHERE title MATCH ?)
+            LIMIT 20
+        ''', (query,))
+        results = cur.fetchall()
+    else:
+        # Legacy Python schema: denormalized authors
+        cur.execute('''
+            SELECT p.id, p.uri, p.title, p.authors, p.url
+            FROM publications p
+            WHERE p.id IN (SELECT rowid FROM publications_fts WHERE title MATCH ?)
+            LIMIT 20
+        ''', (query,))
+        results = cur.fetchall()
 
     # Find best fuzzy match
     normalized_input = normalize_title(title)
 
-    for found_title, authors_str, url in results:
-        if fuzz.ratio(normalized_input, normalize_title(found_title)) >= 95:
-            # Parse authors string back to list
-            authors = [a.strip() for a in authors_str.split(';') if a.strip()]
-            return found_title, authors, url
+    for row in results:
+        if schema_version >= 3:
+            pub_id, key, found_title = row
+            if fuzz.ratio(normalized_input, normalize_title(found_title)) >= 95:
+                # Fetch authors via JOIN
+                cur.execute('''
+                    SELECT a.name FROM authors a
+                    JOIN publication_authors pa ON a.id = pa.author_id
+                    WHERE pa.pub_id = ?
+                ''', (pub_id,))
+                authors = [a[0] for a in cur.fetchall()]
+                url = f"https://dblp.org/rec/{key}"
+                conn.close()
+                return found_title, authors, url
+        else:
+            pub_id, uri, found_title, authors_str, url = row
+            if fuzz.ratio(normalized_input, normalize_title(found_title)) >= 95:
+                # Parse authors string back to list
+                authors = [a.strip() for a in authors_str.split(';') if a.strip()]
+                conn.close()
+                return found_title, authors, url
 
+    conn.close()
     return None, [], None
 
 

@@ -16,6 +16,8 @@ pub struct DbSearchResult {
     pub paper_url: Option<String>,
     pub failed_dbs: Vec<String>,
     pub db_results: Vec<DbResult>,
+    /// If non-empty, a cache write error occurred during this query.
+    pub cache_warning: Option<String>,
 }
 
 /// Query all databases for a single reference, with early exit on match.
@@ -57,6 +59,7 @@ pub async fn query_all_databases(
             paper_url: None,
             failed_dbs: vec![],
             db_results: vec![],
+            cache_warning: None,
         };
     }
 
@@ -118,6 +121,7 @@ pub async fn query_all_databases(
                                 paper_url,
                                 failed_dbs: vec![],
                                 db_results,
+                                cache_warning: None,
                             };
                         } else {
                             // Author mismatch from cache
@@ -143,6 +147,7 @@ pub async fn query_all_databases(
                                     paper_url,
                                     failed_dbs: vec![],
                                     db_results: vec![],
+                                    cache_warning: None,
                                 });
                             }
                         }
@@ -174,6 +179,7 @@ pub async fn query_all_databases(
 
     let mut failed_dbs = Vec::new();
     let mut completed_db_names: HashSet<String> = cached_db_names.clone();
+    let mut cache_warning: Option<String> = None;
 
     // Phase 1: Query offline databases (no rate limiting needed)
     if !offline_dbs.is_empty() {
@@ -192,6 +198,7 @@ pub async fn query_all_databases(
             &mut db_results,
             None, // no rate limiter for offline
             cache,
+            &mut cache_warning,
         )
         .await;
 
@@ -217,6 +224,7 @@ pub async fn query_all_databases(
             &mut db_results,
             Some(rate_limiter),
             cache,
+            &mut cache_warning,
         )
         .await;
 
@@ -227,6 +235,7 @@ pub async fn query_all_databases(
 
     if let Some(mut mismatch) = first_mismatch {
         mismatch.db_results = db_results;
+        mismatch.cache_warning = cache_warning;
         return mismatch;
     }
 
@@ -237,6 +246,7 @@ pub async fn query_all_databases(
         paper_url: None,
         failed_dbs,
         db_results,
+        cache_warning,
     }
 }
 
@@ -260,6 +270,7 @@ async fn run_db_phase(
     db_results: &mut Vec<DbResult>,
     rate_limiter: Option<&Arc<RateLimiter>>,
     cache: Option<&Arc<QueryCache>>,
+    cache_warning: &mut Option<String>,
 ) -> Option<DbSearchResult> {
     let mut join_set = tokio::task::JoinSet::new();
 
@@ -295,11 +306,16 @@ async fn run_db_phase(
             Ok((ref found_title, ref found_authors, ref paper_url)) => {
                 // Cache the successful result (found or not-found)
                 if let Some(qc) = cache {
-                    qc.put(
+                    if let Err(e) = qc.put(
                         &name,
                         title,
                         &(found_title.clone(), found_authors.clone(), paper_url.clone()),
-                    );
+                    ) {
+                        // Only record the first cache warning per query run
+                        if cache_warning.is_none() {
+                            *cache_warning = Some(e);
+                        }
+                    }
                 }
 
                 if let Some(_ft) = found_title {
@@ -346,6 +362,7 @@ async fn run_db_phase(
                             paper_url: paper_url.clone(),
                             failed_dbs: vec![],
                             db_results: db_results.clone(),
+                            cache_warning: cache_warning.clone(),
                         });
                     } else {
                         let db_result = DbResult {
@@ -370,6 +387,7 @@ async fn run_db_phase(
                                 paper_url: paper_url.clone(),
                                 failed_dbs: vec![],
                                 db_results: vec![], // filled in at return
+                                cache_warning: None,
                             });
                         }
                     }

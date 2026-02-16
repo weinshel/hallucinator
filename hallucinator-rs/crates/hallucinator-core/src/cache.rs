@@ -104,7 +104,9 @@ impl QueryCache {
     }
 
     /// Store a result in the cache. Only call for `Ok(...)` results — never cache errors.
-    pub fn put(&self, db_name: &str, title: &str, result: &DbQueryResult) {
+    ///
+    /// Returns `Err` with a description if the write fails (e.g. permissions, disk full).
+    pub fn put(&self, db_name: &str, title: &str, result: &DbQueryResult) -> Result<(), String> {
         let norm = normalize_title(title);
         let now = now_epoch();
         let (found_title, authors, paper_url) = result;
@@ -116,16 +118,20 @@ impl QueryCache {
 
         let authors_json = serde_json::to_string(authors).unwrap_or_else(|_| "[]".to_string());
 
-        let Ok(conn) = self.conn.lock() else {
-            return;
-        };
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("cache mutex poisoned: {}", e))?;
 
-        let _ = conn.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO query_cache
              (db_name, norm_title, found_title, authors, paper_url, cached_at, ttl_secs)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![db_name, norm, found_title, authors_json, paper_url, now, ttl],
-        );
+        )
+        .map_err(|e| format!("cache write failed: {}", e))?;
+
+        Ok(())
     }
 
     /// Remove all entries from the cache.
@@ -187,7 +193,7 @@ mod tests {
             Some("https://example.com/paper".to_string()),
         );
 
-        cache.put("CrossRef", "Some Paper Title", &result);
+        cache.put("CrossRef", "Some Paper Title", &result).unwrap();
 
         let cached = cache.get("CrossRef", "Some Paper Title");
         assert!(cached.is_some());
@@ -202,7 +208,7 @@ mod tests {
         let cache = temp_cache();
         let result: DbQueryResult = (None, vec![], None);
 
-        cache.put("arXiv", "Nonexistent Paper", &result);
+        cache.put("arXiv", "Nonexistent Paper", &result).unwrap();
 
         let cached = cache.get("arXiv", "Nonexistent Paper");
         assert!(cached.is_some());
@@ -218,8 +224,8 @@ mod tests {
         let found: DbQueryResult = (Some("Paper".to_string()), vec![], None);
         let not_found: DbQueryResult = (None, vec![], None);
 
-        cache.put("CrossRef", "Paper", &found);
-        cache.put("arXiv", "Paper", &not_found);
+        cache.put("CrossRef", "Paper", &found).unwrap();
+        cache.put("arXiv", "Paper", &not_found).unwrap();
 
         let cr = cache.get("CrossRef", "Paper").unwrap();
         assert!(cr.0.is_some());
@@ -238,7 +244,7 @@ mod tests {
     fn test_clear() {
         let cache = temp_cache();
         let result: DbQueryResult = (Some("Paper".to_string()), vec![], None);
-        cache.put("CrossRef", "Paper", &result);
+        cache.put("CrossRef", "Paper", &result).unwrap();
         assert!(!cache.is_empty());
 
         cache.clear();
@@ -252,7 +258,7 @@ mod tests {
         let result: DbQueryResult = (Some("Paper Title".to_string()), vec![], None);
 
         // Store with one casing, retrieve with another
-        cache.put("CrossRef", "Paper Title!", &result);
+        cache.put("CrossRef", "Paper Title!", &result).unwrap();
         let cached = cache.get("CrossRef", "paper title");
         assert!(cached.is_some());
     }
@@ -263,10 +269,10 @@ mod tests {
         assert_eq!(cache.len(), 0);
 
         let result: DbQueryResult = (Some("Paper".to_string()), vec![], None);
-        cache.put("CrossRef", "Paper", &result);
+        cache.put("CrossRef", "Paper", &result).unwrap();
         assert_eq!(cache.len(), 1);
 
-        cache.put("arXiv", "Paper", &result);
+        cache.put("arXiv", "Paper", &result).unwrap();
         assert_eq!(cache.len(), 2);
     }
 }

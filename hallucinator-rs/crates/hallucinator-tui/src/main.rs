@@ -350,6 +350,32 @@ async fn main() -> anyhow::Result<()> {
             .log(format!("Config loaded from {}", path.display()));
     }
 
+    // Open query cache
+    {
+        let cache_path = std::env::var("HALLUCINATOR_CACHE_PATH")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::cache_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+                    .join("hallucinator")
+                    .join("query_cache.db")
+            });
+        match hallucinator_core::cache::QueryCache::open(&cache_path) {
+            Ok(cache) => {
+                cache.evict_expired();
+                app.query_cache = Some(Arc::new(cache));
+            }
+            Err(e) => {
+                startup_warnings.push(format!(
+                    "Could not open query cache at {}: {}",
+                    cache_path.display(),
+                    e
+                ));
+            }
+        }
+    }
+
     // Show any startup warnings from failed DB opens
     for warn in &startup_warnings {
         app.activity.log_warn(warn.clone());

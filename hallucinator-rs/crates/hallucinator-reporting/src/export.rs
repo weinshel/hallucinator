@@ -1284,6 +1284,7 @@ mod tests {
             doi_info: None,
             arxiv_info: None,
             retraction_info: None,
+            cache_warning: None,
         }
     }
 

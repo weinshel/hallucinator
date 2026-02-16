@@ -353,6 +353,7 @@ impl PyProgressEvent {
             ProgressEvent::Warning { .. } => "warning",
             ProgressEvent::RetryPass { .. } => "retry_pass",
             ProgressEvent::DatabaseQueryComplete { .. } => "db_query_complete",
+            ProgressEvent::CacheWarning { .. } => "cache_warning",
         }
     }
 
@@ -406,11 +407,12 @@ impl PyProgressEvent {
         }
     }
 
-    /// Warning message (for warning events).
+    /// Warning message (for warning and cache_warning events).
     #[getter]
     fn message(&self) -> Option<&str> {
         match &self.inner {
             ProgressEvent::Warning { message, .. } => Some(message),
+            ProgressEvent::CacheWarning { message } => Some(message),
             _ => None,
         }
     }
@@ -514,6 +516,9 @@ impl PyProgressEvent {
                 db_name,
                 db_status_str(status),
             ),
+            ProgressEvent::CacheWarning { message } => {
+                format!("ProgressEvent(type='cache_warning', message={:?})", message)
+            }
         }
     }
 }

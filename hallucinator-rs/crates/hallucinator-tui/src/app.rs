@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -297,6 +298,8 @@ pub struct App {
     last_fps_instant: Instant,
     /// Measured FPS for display.
     pub measured_fps: f32,
+    /// Shared query cache handle (opened in main.rs).
+    pub query_cache: Option<Arc<hallucinator_core::cache::QueryCache>>,
 }
 
 impl App {
@@ -358,6 +361,7 @@ impl App {
             frame_count: 0,
             last_fps_instant: Instant::now(),
             measured_fps: 0.0,
+            query_cache: None,
         }
     }
 
@@ -581,7 +585,7 @@ impl App {
             },
             rate_limits: hallucinator_core::rate_limit::default_rate_limits(),
             cache_path: None,
-            query_cache: None,
+            query_cache: self.query_cache.clone(),
         }
     }
 
@@ -2073,6 +2077,10 @@ impl App {
                 self.throughput_since_last += 1;
             }
             ProgressEvent::Warning { .. } => {}
+            ProgressEvent::CacheWarning { message } => {
+                self.activity
+                    .log_warn(format!("Query cache: {}", message));
+            }
             ProgressEvent::RetryPass { count, .. } => {
                 if let Some(paper) = self.papers.get_mut(paper_index) {
                     paper.phase = PaperPhase::Retrying;

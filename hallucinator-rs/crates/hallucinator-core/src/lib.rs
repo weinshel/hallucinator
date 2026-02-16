@@ -101,6 +101,8 @@ pub struct ValidationResult {
     pub doi_info: Option<DoiInfo>,
     pub arxiv_info: Option<ArxivInfo>,
     pub retraction_info: Option<RetractionInfo>,
+    /// If non-empty, a cache write error occurred during DB queries for this reference.
+    pub cache_warning: Option<String>,
 }
 
 /// Progress events emitted during validation.
@@ -132,6 +134,9 @@ pub enum ProgressEvent {
         db_name: String,
         status: DbStatus,
         elapsed: Duration,
+    },
+    CacheWarning {
+        message: String,
     },
 }
 

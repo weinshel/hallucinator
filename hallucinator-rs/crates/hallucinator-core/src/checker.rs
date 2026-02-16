@@ -7,6 +7,7 @@ use crate::{
     Status, ValidationResult,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -31,6 +32,7 @@ pub async fn check_references(
 
     let mut results: Vec<Option<ValidationResult>> = vec![None; total];
     let mut retry_candidates: Vec<(usize, Reference)> = Vec::new();
+    let cache_warned = Arc::new(AtomicBool::new(false));
 
     // First pass: check all references
     let mut handles = Vec::new();
@@ -47,6 +49,7 @@ pub async fn check_references(
         let progress = Arc::clone(&progress);
         let cancel = cancel.clone();
         let rate_limiter = Arc::clone(&rate_limiter);
+        let cache_warned = Arc::clone(&cache_warned);
 
         let handle = tokio::spawn(async move {
             let _permit = permit; // Hold until done
@@ -84,6 +87,15 @@ pub async fn check_references(
                 &rate_limiter,
             )
             .await;
+
+            // Emit cache warning (once per batch)
+            if let Some(ref warning) = result.cache_warning {
+                if !cache_warned.swap(true, Ordering::Relaxed) {
+                    progress(ProgressEvent::CacheWarning {
+                        message: warning.clone(),
+                    });
+                }
+            }
 
             // Emit warning if some databases failed/timed out
             if !result.failed_dbs.is_empty() {
@@ -270,6 +282,7 @@ pub async fn check_single_reference(
                     doi_info,
                     arxiv_info: None,
                     retraction_info,
+                    cache_warning: None,
                 };
             }
             DoiMatchResult::AuthorMismatch {
@@ -295,6 +308,7 @@ pub async fn check_single_reference(
                     doi_info,
                     arxiv_info: None,
                     retraction_info: None,
+                    cache_warning: None,
                 };
             }
             _ => {
@@ -351,6 +365,7 @@ pub async fn check_single_reference(
             title: None,
         }),
         retraction_info,
+        cache_warning: db_result.cache_warning,
     }
 }
 
@@ -390,5 +405,6 @@ pub async fn check_single_reference_retry(
         doi_info: None,
         arxiv_info: None,
         retraction_info: None,
+        cache_warning: db_result.cache_warning,
     }
 }

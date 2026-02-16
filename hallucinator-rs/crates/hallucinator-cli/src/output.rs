@@ -131,6 +131,13 @@ pub fn print_progress(
         ProgressEvent::DatabaseQueryComplete { .. } => {
             // Not displayed in CLI output
         }
+        ProgressEvent::CacheWarning { message } => {
+            if color.enabled() {
+                writeln!(w, "{} {}", "CACHE WARNING:".yellow(), message)?;
+            } else {
+                writeln!(w, "CACHE WARNING: {}", message)?;
+            }
+        }
     }
     Ok(())
 }

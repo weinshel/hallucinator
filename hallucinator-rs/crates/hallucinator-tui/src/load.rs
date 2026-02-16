@@ -282,6 +282,7 @@ fn convert_loaded(loaded: LoadedFile) -> (PaperState, Vec<RefState>, Vec<Referen
             doi_info: doi_info.clone(),
             arxiv_info: arxiv_info.clone(),
             retraction_info,
+            cache_warning: None,
         };
 
         paper.record_result(loaded_ref.index, result.clone());

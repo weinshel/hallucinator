@@ -580,6 +580,8 @@ impl App {
                 Some(self.config_state.crossref_mailto.clone())
             },
             rate_limits: hallucinator_core::rate_limit::default_rate_limits(),
+            cache_path: None,
+            query_cache: None,
         }
     }
 

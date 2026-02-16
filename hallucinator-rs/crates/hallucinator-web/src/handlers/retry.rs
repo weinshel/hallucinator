@@ -36,6 +36,7 @@ pub async fn retry(
         dblp_offline_path: state.dblp_offline_path.clone(),
         dblp_offline_db: state.dblp_offline_db.clone(),
         check_openalex_authors: req.check_openalex_authors,
+        query_cache: state.query_cache.clone(),
         ..Config::default()
     };
 

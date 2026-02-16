@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
+use hallucinator_core::cache::QueryCache;
 use tokio_util::sync::CancellationToken;
 
 mod output;
@@ -59,6 +60,21 @@ enum Command {
         /// Dry run: extract and print references without querying databases
         #[arg(long)]
         dry_run: bool,
+
+        /// Path to the query cache database (default: ~/.cache/hallucinator/query_cache.db)
+        #[arg(long)]
+        cache_path: Option<PathBuf>,
+
+        /// Disable the query cache
+        #[arg(long)]
+        no_cache: bool,
+    },
+
+    /// Clear the query result cache
+    ClearCache {
+        /// Path to the cache database (default: ~/.cache/hallucinator/query_cache.db)
+        #[arg(long)]
+        cache_path: Option<PathBuf>,
     },
 
     /// Download and build the offline DBLP database
@@ -82,6 +98,17 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::UpdateDblp { path } => update_dblp(&path).await,
         Command::UpdateAcl { path } => update_acl(&path).await,
+        Command::ClearCache { cache_path } => {
+            let path = resolve_cache_path(cache_path);
+            if path.exists() {
+                let cache = QueryCache::open(&path)?;
+                cache.clear();
+                println!("Cache cleared: {}", path.display());
+            } else {
+                println!("No cache found at: {}", path.display());
+            }
+            Ok(())
+        }
         Command::Check {
             file_path,
             no_color,
@@ -93,6 +120,8 @@ async fn main() -> anyhow::Result<()> {
             disable_dbs,
             check_openalex_authors,
             dry_run,
+            cache_path,
+            no_cache,
         } => {
             if dry_run {
                 dry_run_check(file_path, no_color, output).await
@@ -107,11 +136,25 @@ async fn main() -> anyhow::Result<()> {
                     acl_offline,
                     disable_dbs,
                     check_openalex_authors,
+                    cache_path,
+                    no_cache,
                 )
                 .await
             }
         }
     }
+}
+
+/// Resolve the cache database path from CLI flag, env var, or default.
+fn resolve_cache_path(explicit: Option<PathBuf>) -> PathBuf {
+    explicit
+        .or_else(|| std::env::var("HALLUCINATOR_CACHE_PATH").ok().map(PathBuf::from))
+        .unwrap_or_else(|| {
+            dirs::cache_dir()
+                .unwrap_or_else(|| PathBuf::from(".cache"))
+                .join("hallucinator")
+                .join("query_cache.db")
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -125,6 +168,8 @@ async fn check(
     acl_offline: Option<PathBuf>,
     disable_dbs: Vec<String>,
     check_openalex_authors: bool,
+    cache_path_arg: Option<PathBuf>,
+    no_cache: bool,
 ) -> anyhow::Result<()> {
     // Resolve configuration: CLI flags > env vars > defaults
     let openalex_key = openalex_key.or_else(|| std::env::var("OPENALEX_KEY").ok());
@@ -275,6 +320,24 @@ async fn check(
         return Ok(());
     }
 
+    // Open query cache
+    let (cache_path, query_cache) = if no_cache {
+        (None, None)
+    } else {
+        let path = resolve_cache_path(cache_path_arg);
+        match QueryCache::open(&path) {
+            Ok(cache) => {
+                // Evict expired entries on startup
+                cache.evict_expired();
+                (Some(path), Some(Arc::new(cache)))
+            }
+            Err(e) => {
+                eprintln!("Warning: could not open query cache: {}", e);
+                (None, None)
+            }
+        }
+    };
+
     // Build config
     let config = hallucinator_core::Config {
         openalex_key: openalex_key.clone(),
@@ -290,6 +353,8 @@ async fn check(
         check_openalex_authors,
         crossref_mailto: None,
         rate_limits: hallucinator_core::rate_limit::default_rate_limits(),
+        cache_path,
+        query_cache,
     };
 
     // Set up progress callback

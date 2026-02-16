@@ -28,6 +28,7 @@ pub struct PyValidatorConfig {
     pub(crate) disabled_dbs: Vec<String>,
     pub(crate) check_openalex_authors: bool,
     pub(crate) crossref_mailto: Option<String>,
+    pub(crate) cache_path: Option<String>,
 }
 
 impl PyValidatorConfig {
@@ -56,6 +57,20 @@ impl PyValidatorConfig {
             None => None,
         };
 
+        let (cache_path, query_cache) = match &self.cache_path {
+            Some(path) => {
+                let p = PathBuf::from(path);
+                match hallucinator_core::cache::QueryCache::open(&p) {
+                    Ok(cache) => {
+                        cache.evict_expired();
+                        (Some(p), Some(Arc::new(cache)))
+                    }
+                    Err(_) => (None, None),
+                }
+            }
+            None => (None, None),
+        };
+
         Ok(Config {
             openalex_key: self.openalex_key.clone(),
             s2_api_key: self.s2_api_key.clone(),
@@ -70,6 +85,8 @@ impl PyValidatorConfig {
             check_openalex_authors: self.check_openalex_authors,
             crossref_mailto: self.crossref_mailto.clone(),
             rate_limits: hallucinator_core::rate_limit::default_rate_limits(),
+            cache_path,
+            query_cache,
         })
     }
 }
@@ -89,6 +106,7 @@ impl PyValidatorConfig {
             disabled_dbs: vec![],
             check_openalex_authors: false,
             crossref_mailto: None,
+            cache_path: None,
         }
     }
 
@@ -200,6 +218,17 @@ impl PyValidatorConfig {
     #[setter]
     fn set_crossref_mailto(&mut self, value: Option<String>) {
         self.crossref_mailto = value;
+    }
+
+    /// Path to query result cache database (optional).
+    #[getter]
+    fn get_cache_path(&self) -> Option<&str> {
+        self.cache_path.as_deref()
+    }
+
+    #[setter]
+    fn set_cache_path(&mut self, value: Option<String>) {
+        self.cache_path = value;
     }
 
     fn __repr__(&self) -> String {

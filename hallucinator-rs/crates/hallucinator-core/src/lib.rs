@@ -6,6 +6,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 pub mod authors;
+pub mod cache;
 pub mod checker;
 pub mod db;
 pub mod doi;
@@ -162,6 +163,8 @@ pub struct Config {
     pub crossref_mailto: Option<String>,
     /// Per-database minimum intervals between requests (rate limiting).
     pub rate_limits: HashMap<String, Duration>,
+    pub cache_path: Option<PathBuf>,
+    pub query_cache: Option<Arc<cache::QueryCache>>,
 }
 
 impl std::fmt::Debug for Config {
@@ -189,6 +192,11 @@ impl std::fmt::Debug for Config {
                 &self.crossref_mailto.as_ref().map(|_| "***"),
             )
             .field("rate_limits", &self.rate_limits)
+            .field("cache_path", &self.cache_path)
+            .field(
+                "query_cache",
+                &self.query_cache.as_ref().map(|_| "<open>"),
+            )
             .finish()
     }
 }
@@ -209,6 +217,8 @@ impl Default for Config {
             check_openalex_authors: false,
             crossref_mailto: None,
             rate_limits: rate_limit::default_rate_limits(),
+            cache_path: None,
+            query_cache: None,
         }
     }
 }

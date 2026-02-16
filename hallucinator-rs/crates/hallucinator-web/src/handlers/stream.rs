@@ -348,6 +348,7 @@ fn build_config(state: &AppState, fields: &FormFields) -> Config {
         dblp_offline_db: state.dblp_offline_db.clone(),
         disabled_dbs: fields.disabled_dbs.clone(),
         check_openalex_authors: fields.check_openalex_authors,
+        query_cache: state.query_cache.clone(),
         ..Config::default()
     }
 }

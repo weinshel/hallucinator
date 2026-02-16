@@ -1,4 +1,5 @@
 use crate::authors::validate_authors;
+use crate::cache::QueryCache;
 use crate::db::DatabaseBackend;
 use crate::rate_limit::{query_with_backoff, RateLimiter};
 use crate::{Config, DbResult, DbStatus, Status};
@@ -19,8 +20,9 @@ pub struct DbSearchResult {
 
 /// Query all databases for a single reference, with early exit on match.
 ///
-/// Offline databases are queried first. If any returns a verified match,
-/// online databases are skipped entirely. Otherwise, online databases are
+/// Cached results are checked first. Then offline databases are queried
+/// (no rate limiting needed). If any returns a verified match, online
+/// databases are skipped entirely. Otherwise, online databases are
 /// queried concurrently with rate limiting and exponential backoff on 429s.
 ///
 /// If `on_db_complete` is provided, it is called for each database as it finishes.
@@ -58,21 +60,120 @@ pub async fn query_all_databases(
         };
     }
 
-    // Partition into offline and online databases
-    let (offline_dbs, online_dbs): (Vec<_>, Vec<_>) =
-        databases.into_iter().partition(|db| db.is_offline());
+    let cache: Option<&Arc<QueryCache>> = config.query_cache.as_ref();
 
     // Collect all DB names upfront for tracking skipped on early exit
-    let all_db_names: HashSet<String> = offline_dbs
-        .iter()
-        .chain(online_dbs.iter())
-        .map(|db| db.name().to_string())
-        .collect();
+    let all_db_names: HashSet<String> = databases.iter().map(|db| db.name().to_string()).collect();
 
+    // Phase 0: Check cache for each DB. On verified cache hit, return early.
+    let mut cached_db_names: HashSet<String> = HashSet::new();
     let mut first_mismatch: Option<DbSearchResult> = None;
-    let mut failed_dbs = Vec::new();
     let mut db_results: Vec<DbResult> = Vec::new();
-    let mut completed_db_names: HashSet<String> = HashSet::new();
+
+    if let Some(qc) = cache {
+        for db in &databases {
+            let name = db.name().to_string();
+            if let Some((found_title, found_authors, paper_url)) = qc.get(&name, title) {
+                cached_db_names.insert(name.clone());
+
+                match found_title {
+                    Some(_ft) => {
+                        if ref_authors.is_empty()
+                            || validate_authors(ref_authors, &found_authors)
+                        {
+                            // Verified from cache — build result and return
+                            let db_result = DbResult {
+                                db_name: name.clone(),
+                                status: DbStatus::Match,
+                                elapsed: Some(Duration::ZERO),
+                                found_authors: found_authors.clone(),
+                                paper_url: paper_url.clone(),
+                            };
+                            if let Some(cb) = on_db_complete {
+                                cb(db_result.clone());
+                            }
+                            db_results.push(db_result);
+
+                            // Mark remaining DBs as Skipped
+                            for db_name in &all_db_names {
+                                if db_name != &name {
+                                    let skipped = DbResult {
+                                        db_name: db_name.clone(),
+                                        status: DbStatus::Skipped,
+                                        elapsed: None,
+                                        found_authors: vec![],
+                                        paper_url: None,
+                                    };
+                                    if let Some(cb) = on_db_complete {
+                                        cb(skipped.clone());
+                                    }
+                                    db_results.push(skipped);
+                                }
+                            }
+
+                            return DbSearchResult {
+                                status: Status::Verified,
+                                source: Some(name),
+                                found_authors,
+                                paper_url,
+                                failed_dbs: vec![],
+                                db_results,
+                            };
+                        } else {
+                            // Author mismatch from cache
+                            let db_result = DbResult {
+                                db_name: name.clone(),
+                                status: DbStatus::AuthorMismatch,
+                                elapsed: Some(Duration::ZERO),
+                                found_authors: found_authors.clone(),
+                                paper_url: paper_url.clone(),
+                            };
+                            if let Some(cb) = on_db_complete {
+                                cb(db_result.clone());
+                            }
+                            db_results.push(db_result);
+
+                            if first_mismatch.is_none()
+                                && (name != "OpenAlex" || check_openalex_authors)
+                            {
+                                first_mismatch = Some(DbSearchResult {
+                                    status: Status::AuthorMismatch,
+                                    source: Some(name),
+                                    found_authors,
+                                    paper_url,
+                                    failed_dbs: vec![],
+                                    db_results: vec![],
+                                });
+                            }
+                        }
+                    }
+                    None => {
+                        // Cached not-found
+                        let db_result = DbResult {
+                            db_name: name.clone(),
+                            status: DbStatus::NoMatch,
+                            elapsed: Some(Duration::ZERO),
+                            found_authors: vec![],
+                            paper_url: None,
+                        };
+                        if let Some(cb) = on_db_complete {
+                            cb(db_result.clone());
+                        }
+                        db_results.push(db_result);
+                    }
+                }
+            }
+        }
+    }
+
+    // Partition into offline and online databases, excluding cached ones
+    let (offline_dbs, online_dbs): (Vec<_>, Vec<_>) = databases
+        .into_iter()
+        .filter(|db| !cached_db_names.contains(db.name()))
+        .partition(|db| db.is_offline());
+
+    let mut failed_dbs = Vec::new();
+    let mut completed_db_names: HashSet<String> = cached_db_names.clone();
 
     // Phase 1: Query offline databases (no rate limiting needed)
     if !offline_dbs.is_empty() {
@@ -90,6 +191,7 @@ pub async fn query_all_databases(
             &mut failed_dbs,
             &mut db_results,
             None, // no rate limiter for offline
+            cache,
         )
         .await;
 
@@ -114,6 +216,7 @@ pub async fn query_all_databases(
             &mut failed_dbs,
             &mut db_results,
             Some(rate_limiter),
+            cache,
         )
         .await;
 
@@ -156,6 +259,7 @@ async fn run_db_phase(
     failed_dbs: &mut Vec<String>,
     db_results: &mut Vec<DbResult>,
     rate_limiter: Option<&Arc<RateLimiter>>,
+    cache: Option<&Arc<QueryCache>>,
 ) -> Option<DbSearchResult> {
     let mut join_set = tokio::task::JoinSet::new();
 
@@ -188,87 +292,101 @@ async fn run_db_phase(
         completed_db_names.insert(name.clone());
 
         match query_result {
-            Ok((Some(_found_title), found_authors, paper_url)) => {
-                if ref_authors.is_empty() || validate_authors(&ref_authors, &found_authors) {
-                    // Found and verified — record this DB, mark remaining as Skipped
-                    let db_result = DbResult {
-                        db_name: name.clone(),
-                        status: DbStatus::Match,
-                        elapsed: Some(elapsed),
-                        found_authors: found_authors.clone(),
-                        paper_url: paper_url.clone(),
-                    };
-                    if let Some(cb) = on_db_complete {
-                        cb(db_result.clone());
-                    }
-                    db_results.push(db_result);
+            Ok((ref found_title, ref found_authors, ref paper_url)) => {
+                // Cache the successful result (found or not-found)
+                if let Some(qc) = cache {
+                    qc.put(
+                        &name,
+                        title,
+                        &(found_title.clone(), found_authors.clone(), paper_url.clone()),
+                    );
+                }
 
-                    // Abort remaining tasks
-                    join_set.abort_all();
+                if let Some(_ft) = found_title {
+                    if ref_authors.is_empty()
+                        || validate_authors(&ref_authors, found_authors)
+                    {
+                        // Found and verified — record this DB, mark remaining as Skipped
+                        let db_result = DbResult {
+                            db_name: name.clone(),
+                            status: DbStatus::Match,
+                            elapsed: Some(elapsed),
+                            found_authors: found_authors.clone(),
+                            paper_url: paper_url.clone(),
+                        };
+                        if let Some(cb) = on_db_complete {
+                            cb(db_result.clone());
+                        }
+                        db_results.push(db_result);
 
-                    // Mark unfinished DBs as Skipped
-                    for db_name in all_db_names {
-                        if !completed_db_names.contains(db_name) {
-                            let skipped = DbResult {
-                                db_name: db_name.clone(),
-                                status: DbStatus::Skipped,
-                                elapsed: None,
-                                found_authors: vec![],
-                                paper_url: None,
-                            };
-                            if let Some(cb) = on_db_complete {
-                                cb(skipped.clone());
+                        // Abort remaining tasks
+                        join_set.abort_all();
+
+                        // Mark unfinished DBs as Skipped
+                        for db_name in all_db_names {
+                            if !completed_db_names.contains(db_name) {
+                                let skipped = DbResult {
+                                    db_name: db_name.clone(),
+                                    status: DbStatus::Skipped,
+                                    elapsed: None,
+                                    found_authors: vec![],
+                                    paper_url: None,
+                                };
+                                if let Some(cb) = on_db_complete {
+                                    cb(skipped.clone());
+                                }
+                                db_results.push(skipped);
                             }
-                            db_results.push(skipped);
+                        }
+
+                        return Some(DbSearchResult {
+                            status: Status::Verified,
+                            source: Some(name),
+                            found_authors: found_authors.clone(),
+                            paper_url: paper_url.clone(),
+                            failed_dbs: vec![],
+                            db_results: db_results.clone(),
+                        });
+                    } else {
+                        let db_result = DbResult {
+                            db_name: name.clone(),
+                            status: DbStatus::AuthorMismatch,
+                            elapsed: Some(elapsed),
+                            found_authors: found_authors.clone(),
+                            paper_url: paper_url.clone(),
+                        };
+                        if let Some(cb) = on_db_complete {
+                            cb(db_result.clone());
+                        }
+                        db_results.push(db_result);
+
+                        if first_mismatch.is_none()
+                            && (name != "OpenAlex" || check_openalex_authors)
+                        {
+                            *first_mismatch = Some(DbSearchResult {
+                                status: Status::AuthorMismatch,
+                                source: Some(name),
+                                found_authors: found_authors.clone(),
+                                paper_url: paper_url.clone(),
+                                failed_dbs: vec![],
+                                db_results: vec![], // filled in at return
+                            });
                         }
                     }
-
-                    return Some(DbSearchResult {
-                        status: Status::Verified,
-                        source: Some(name),
-                        found_authors,
-                        paper_url,
-                        failed_dbs: vec![],
-                        db_results: db_results.clone(),
-                    });
                 } else {
+                    // Not found in this DB
                     let db_result = DbResult {
                         db_name: name.clone(),
-                        status: DbStatus::AuthorMismatch,
+                        status: DbStatus::NoMatch,
                         elapsed: Some(elapsed),
-                        found_authors: found_authors.clone(),
-                        paper_url: paper_url.clone(),
+                        found_authors: vec![],
+                        paper_url: None,
                     };
                     if let Some(cb) = on_db_complete {
                         cb(db_result.clone());
                     }
                     db_results.push(db_result);
-
-                    if first_mismatch.is_none() && (name != "OpenAlex" || check_openalex_authors) {
-                        *first_mismatch = Some(DbSearchResult {
-                            status: Status::AuthorMismatch,
-                            source: Some(name),
-                            found_authors,
-                            paper_url,
-                            failed_dbs: vec![],
-                            db_results: vec![], // filled in at return
-                        });
-                    }
                 }
-            }
-            Ok((None, _, _)) => {
-                // Not found in this DB
-                let db_result = DbResult {
-                    db_name: name.clone(),
-                    status: DbStatus::NoMatch,
-                    elapsed: Some(elapsed),
-                    found_authors: vec![],
-                    paper_url: None,
-                };
-                if let Some(cb) = on_db_complete {
-                    cb(db_result.clone());
-                }
-                db_results.push(db_result);
             }
             Err(_e) => {
                 let db_result = DbResult {

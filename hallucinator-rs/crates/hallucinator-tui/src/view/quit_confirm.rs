@@ -11,10 +11,16 @@ pub fn render(f: &mut Frame, theme: &Theme) {
     let area = f.area();
     let popup = centered_rect(40, 5, area);
 
+    let (title, prompt) = if theme.is_t800() {
+        (" Abort Mission ", "  Terminate scan protocol?")
+    } else {
+        (" Confirm Quit ", "  Quit hallucinator?")
+    };
+
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  Quit hallucinator?",
+            prompt,
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         )),
         Line::from(vec![
@@ -39,7 +45,7 @@ pub fn render(f: &mut Frame, theme: &Theme) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.not_found))
-            .title(" Confirm Quit "),
+            .title(title),
     );
 
     f.render_widget(Clear, popup);

@@ -249,13 +249,18 @@ pub struct App {
     pub config_state: ConfigState,
     pub export_state: ExportState,
 
-    /// Tick at which the banner should auto-transition.
-    pub banner_dismiss_tick: Option<usize>,
+    /// Wall-clock instant when the banner was first shown.
+    pub banner_start: Option<Instant>,
     /// Whether to emit terminal bell (set on batch complete, consumed on next view).
     pub pending_bell: bool,
 
     /// Current pro-tip index (rotated by a timer in the main loop).
     pub tip_index: usize,
+    /// Tick when the tip last changed (for typewriter reset).
+    pub tip_change_tick: usize,
+
+    /// Persistent T-800 seeking crosshair state (only when T-800 theme active).
+    pub t800_splash: Option<crate::view::banner::T800Splash>,
 
     // Phase 4 state
     /// Whether backend processing has been started (manual start).
@@ -331,9 +336,11 @@ impl App {
             activity: ActivityState::default(),
             config_state: ConfigState::default(),
             export_state: ExportState::default(),
-            banner_dismiss_tick: None, // set after config_state is applied
+            banner_start: None, // set in main.rs after config is applied
             pending_bell: false,
             tip_index: 0,
+            tip_change_tick: 0,
+            t800_splash: None,
             processing_started: false,
             backend_cmd_tx: None,
             file_paths: Vec::new(),
@@ -1029,8 +1036,13 @@ impl App {
             return false;
         }
 
-        // Banner auto-dismiss on any key
+        // Banner screen input handling
         if self.screen == Screen::Banner {
+            let elapsed = self
+                .banner_start
+                .map(|s| s.elapsed())
+                .unwrap_or(std::time::Duration::ZERO);
+
             match action {
                 Action::Quit => {
                     self.should_quit = true;
@@ -1038,9 +1050,9 @@ impl App {
                 }
                 Action::Tick => {
                     self.tick = self.tick.wrapping_add(1);
-                    if let Some(dismiss) = self.banner_dismiss_tick
-                        && self.tick >= dismiss
-                    {
+                    // hacker/modern: auto-dismiss after 2 seconds
+                    // T-800: interactive (user presses Enter), no auto-dismiss
+                    if !self.theme.is_t800() && elapsed >= std::time::Duration::from_secs(2) {
                         self.dismiss_banner();
                     }
                 }
@@ -1049,7 +1061,19 @@ impl App {
                 }
                 Action::None => {}
                 _ => {
-                    self.dismiss_banner();
+                    if self.theme.is_t800() {
+                        // During boot phases (< 3.5s), any key skips to phase 4 (awaiting)
+                        // At phase 4 (>= 3.5s), any key dismisses
+                        if elapsed >= std::time::Duration::from_millis(3500) {
+                            self.dismiss_banner();
+                        } else {
+                            // Skip to phase 4 by rewinding banner_start
+                            self.banner_start =
+                                Some(Instant::now() - std::time::Duration::from_millis(3500));
+                        }
+                    } else {
+                        self.dismiss_banner();
+                    }
                 }
             }
             return false;
@@ -1666,15 +1690,8 @@ impl App {
             }
             ConfigSection::Display => match self.config_state.item_cursor {
                 0 => {
-                    // Cycle theme — update both the name and the live theme struct
-                    if self.config_state.theme_name == "hacker" {
-                        self.config_state.theme_name = "modern".to_string();
-                        self.theme = Theme::modern();
-                    } else {
-                        self.config_state.theme_name = "hacker".to_string();
-                        self.theme = Theme::hacker();
-                    }
-                    self.config_state.dirty = true;
+                    // Cycle theme: hacker → modern → t800 → hacker
+                    self.cycle_theme();
                 }
                 1 => {
                     // Edit FPS
@@ -1719,15 +1736,7 @@ impl App {
             }
             ConfigSection::Display => {
                 if self.config_state.item_cursor == 0 {
-                    // Space on theme cycles it
-                    if self.config_state.theme_name == "hacker" {
-                        self.config_state.theme_name = "modern".to_string();
-                        self.theme = Theme::modern();
-                    } else {
-                        self.config_state.theme_name = "hacker".to_string();
-                        self.theme = Theme::hacker();
-                    }
-                    self.config_state.dirty = true;
+                    self.cycle_theme();
                 }
             }
             _ => {}
@@ -2127,9 +2136,21 @@ impl App {
         }
     }
 
+    /// Cycle theme: hacker → modern → gnr → hacker.
+    fn cycle_theme(&mut self) {
+        let (name, theme) = match self.config_state.theme_name.as_str() {
+            "hacker" => ("modern", Theme::modern()),
+            "modern" => ("gnr", Theme::t800()),
+            _ => ("hacker", Theme::hacker()),
+        };
+        self.config_state.theme_name = name.to_string();
+        self.theme = theme;
+        self.config_state.dirty = true;
+    }
+
     /// Dismiss the banner and navigate to the appropriate first screen.
     fn dismiss_banner(&mut self) {
-        self.banner_dismiss_tick = None;
+        self.banner_start = None;
         if self.single_paper_mode {
             self.screen = Screen::Paper(0);
         } else if self.papers.is_empty() {
@@ -2297,7 +2318,17 @@ impl App {
 
         // Banner screen renders as centered overlay with no activity panel
         if self.screen == Screen::Banner {
-            crate::view::banner::render(f, &self.theme, self.tick);
+            let elapsed = self
+                .banner_start
+                .map(|s| s.elapsed())
+                .unwrap_or(std::time::Duration::ZERO);
+            crate::view::banner::render(
+                f,
+                &self.theme,
+                self.tick,
+                elapsed,
+                self.t800_splash.as_mut(),
+            );
             return;
         }
 
@@ -2311,8 +2342,14 @@ impl App {
         }
 
         // Persistent logo bar at top of every content screen
-        let content_area =
-            crate::view::banner::render_logo_bar(f, area, &self.theme, self.tip_index);
+        let content_area = crate::view::banner::render_logo_bar(
+            f,
+            area,
+            &self.theme,
+            self.tip_index,
+            self.tick,
+            self.tip_change_tick,
+        );
 
         // Split footer row out first so it spans the full terminal width.
         // Use direct Rect arithmetic instead of Layout to avoid constraint solver overhead.

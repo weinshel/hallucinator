@@ -63,9 +63,9 @@ struct Cli {
     #[arg(long)]
     check_openalex_authors: bool,
 
-    /// Color theme: hacker (default) or modern
-    #[arg(long, default_value = "hacker")]
-    theme: String,
+    /// Color theme: hacker (default), modern, or gnr
+    #[arg(long)]
+    theme: Option<String>,
 
     /// Load previously saved results (.json) instead of processing PDFs
     #[arg(long)]
@@ -76,8 +76,8 @@ struct Cli {
     mouse: bool,
 
     /// Target frames per second (default: 30)
-    #[arg(long, default_value = "30")]
-    fps: u32,
+    #[arg(long)]
+    fps: Option<u32>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -174,8 +174,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref path) = cli.acl_offline {
         config_state.acl_offline_path = path.display().to_string();
     }
-    config_state.theme_name = cli.theme.clone();
-    config_state.fps = cli.fps.clamp(1, 120);
+    if let Some(ref theme) = cli.theme {
+        config_state.theme_name = theme.clone();
+    }
+    if let Some(fps) = cli.fps {
+        config_state.fps = fps.clamp(1, 120);
+    }
 
     // Mark disabled DBs from CLI args
     for (name, enabled) in &mut config_state.disabled_dbs {
@@ -264,6 +268,7 @@ async fn main() -> anyhow::Result<()> {
     // Select theme
     let theme = match config_state.theme_name.as_str() {
         "modern" => theme::Theme::modern(),
+        "gnr" | "t800" => theme::Theme::t800(),
         _ => theme::Theme::hacker(),
     };
 
@@ -328,8 +333,14 @@ async fn main() -> anyhow::Result<()> {
     // Apply the fully-resolved config state
     app.config_state = config_state;
 
-    // Auto-dismiss the splash banner after 2 seconds (fps * 2 ticks)
-    app.banner_dismiss_tick = Some(app.config_state.fps.max(1) as usize * 2);
+    // Record banner start time for Instant-based auto-dismiss
+    app.banner_start = Some(std::time::Instant::now());
+
+    // Initialize T-800 seeking crosshair if theme is active
+    if app.theme.is_t800() {
+        // Use max container inner dims; positions get clamped each tick
+        app.t800_splash = Some(view::banner::T800Splash::new(66, 22));
+    }
 
     // Show config file path if one was loaded
     if let Some(path) = config_file::config_path()
@@ -634,6 +645,7 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = tip_timer.tick() => {
                 app.tip_index = (app.tip_index + 1) % tip_count;
+                app.tip_change_tick = app.tick;
             }
         }
 

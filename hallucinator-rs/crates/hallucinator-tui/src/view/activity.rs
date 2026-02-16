@@ -1,7 +1,7 @@
 use crate::app::App;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
@@ -55,11 +55,21 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         } else {
             name.clone()
         };
+        let name_color = if theme.is_t800() {
+            theme.dim
+        } else {
+            theme.text
+        };
+        let hits_color = if theme.is_t800() {
+            Color::White
+        } else {
+            theme.active
+        };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", indicator), Style::default().fg(theme.text)),
+            Span::styled(format!(" {} ", indicator), Style::default().fg(name_color)),
             Span::styled(
                 format!("{:<14} ", display_name),
-                Style::default().fg(theme.text),
+                Style::default().fg(name_color),
             ),
             Span::styled(
                 format!("{:>4} ", health.total_queries),
@@ -67,7 +77,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(
                 format!("{:>4} ", health.hits),
-                Style::default().fg(theme.active),
+                Style::default().fg(hits_color),
             ),
             Span::styled(format!("{:>6}", avg), Style::default().fg(theme.dim)),
         ]));
@@ -101,9 +111,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .rev()
         .collect();
     if !sparkline.trim().is_empty() {
+        let spark_color = if theme.is_t800() {
+            Color::White
+        } else {
+            theme.active
+        };
         lines.push(Line::from(Span::styled(
             format!(" {}", sparkline),
-            Style::default().fg(theme.active),
+            Style::default().fg(spark_color),
         )));
         let rate = if activity.throughput_buckets.len() >= 2 {
             let recent: u16 = activity.throughput_buckets.iter().rev().take(5).sum();

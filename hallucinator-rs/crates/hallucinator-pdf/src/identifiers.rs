@@ -166,11 +166,14 @@ static STOP_WORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 /// Skips stop words and very short words, but keeps short alphanumeric
 /// terms like "L2", "3D", "AI", "5G".
 pub fn get_query_words(title: &str, n: usize) -> Vec<String> {
+    // Strip BibTeX capitalization braces: {BERT} → BERT, {M}ixup → Mixup
+    let title = title.replace(['{', '}'], "");
+
     static WORD_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"[a-zA-Z0-9]+(?:['\u{2019}\u{2018}\-][a-zA-Z0-9]+)*[?!]?").unwrap()
     });
 
-    let all_words: Vec<&str> = WORD_RE.find_iter(title).map(|m| m.as_str()).collect();
+    let all_words: Vec<&str> = WORD_RE.find_iter(&title).map(|m| m.as_str()).collect();
 
     let significant: Vec<&str> = all_words
         .iter()
@@ -378,5 +381,23 @@ mod tests {
         let words = get_query_words("A B C", 6);
         // Less than 3 significant words, falls back to all_words
         assert_eq!(words, vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn test_get_query_words_bibtex_braces() {
+        let words = get_query_words("{BERT}: Pre-training of Deep Bidirectional Transformers", 6);
+        assert!(words.contains(&"BERT".to_string()));
+    }
+
+    #[test]
+    fn test_get_query_words_bibtex_partial_braces() {
+        let words = get_query_words("{M}ixup Training for Robust Models", 6);
+        assert!(words.contains(&"Mixup".to_string()));
+    }
+
+    #[test]
+    fn test_get_query_words_bibtex_hyphenated() {
+        let words = get_query_words("{COVID}-19 Detection with Deep Learning", 6);
+        assert!(words.contains(&"COVID-19".to_string()));
     }
 }

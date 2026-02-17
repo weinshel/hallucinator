@@ -18,8 +18,15 @@ fn normalize_title(title: &str) -> String {
 }
 
 /// Extract meaningful query words for FTS5 MATCH (4+ chars, no stop words).
+///
+/// Handles digits (`L2`, `3D`), hyphens (`Machine-Learning`), and apostrophes (`What's`).
+/// Also strips BibTeX braces (`{BERT}` → `BERT`).
 fn get_query_words(title: &str) -> Vec<String> {
-    static WORD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[a-zA-Z]+").unwrap());
+    // Strip BibTeX capitalization braces
+    let title = title.replace(['{', '}'], "");
+
+    static WORD_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"[a-zA-Z0-9]+(?:['\u{2019}\u{2018}\-][a-zA-Z0-9]+)*").unwrap());
     static STOP_WORDS: Lazy<std::collections::HashSet<&'static str>> = Lazy::new(|| {
         [
             "the", "and", "for", "with", "from", "that", "this", "have", "are", "was", "were",
@@ -34,7 +41,7 @@ fn get_query_words(title: &str) -> Vec<String> {
     });
 
     WORD_RE
-        .find_iter(title)
+        .find_iter(&title)
         .map(|m| m.as_str().to_lowercase())
         .filter(|w| w.len() >= 4 && !STOP_WORDS.contains(w.as_str()))
         .collect()
@@ -169,6 +176,26 @@ mod tests {
         assert!(words.contains(&"patterns".to_string()));
         assert!(words.contains(&"transformer".to_string()));
         assert!(words.contains(&"models".to_string()));
+    }
+
+    #[test]
+    fn test_get_query_words_bibtex_braces() {
+        let words = get_query_words("{BERT}: Pre-training of Deep Bidirectional Transformers");
+        assert!(words.contains(&"bert".to_string()));
+        assert!(words.contains(&"pre-training".to_string()));
+    }
+
+    #[test]
+    fn test_get_query_words_hyphenated() {
+        let words = get_query_words("Machine-Learning Approaches for Natural Language");
+        assert!(words.contains(&"machine-learning".to_string()));
+    }
+
+    #[test]
+    fn test_get_query_words_digits() {
+        let words = get_query_words("L2 Regularization for 3D Point Cloud Models");
+        assert!(words.contains(&"point".to_string()));
+        assert!(words.contains(&"regularization".to_string()));
     }
 
     #[test]

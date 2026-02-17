@@ -1084,6 +1084,8 @@ fn split_sentences_skip_initials(text: &str) -> Vec<String> {
             Regex::new(&format!(r"(?i)^([A-Z]{}+)\s+and\s+[A-Z]", sc)).unwrap(),
             // Multi-part surname: "Van Goethem,"
             Regex::new(&format!(r"^([A-Z]{}+)\s+([A-Z]{}+)\s*,", sc, sc)).unwrap(),
+            // Middle initial without period: "D Kaplan,"
+            Regex::new(&format!(r"^[A-Z]\s+({}+)\s*,", sc)).unwrap(),
         ]
     });
 
@@ -1281,6 +1283,35 @@ mod tests {
         assert_eq!(parts.len(), 3);
         assert!(parts[0].contains("Smith"));
         assert!(parts[1].contains("Novel Detection"));
+    }
+
+    #[test]
+    fn test_split_sentences_middle_initial_no_period() {
+        // "D Kaplan" has a middle initial without its period — should stay in author section
+        let text = "J. D Kaplan, P. Dhariwal. Title here.";
+        let parts = split_sentences_skip_initials(text);
+        assert!(
+            parts[0].contains("Kaplan"),
+            "Kaplan should be in author segment: {:?}",
+            parts
+        );
+        assert!(
+            parts[0].contains("Dhariwal"),
+            "Dhariwal should be in author segment: {:?}",
+            parts
+        );
+    }
+
+    #[test]
+    fn test_split_sentences_middle_initial_no_period_variant() {
+        // Multiple authors with missing-period initials, separated by commas
+        let text = "A. B Smith, C. D Jones, E. Brown. Some interesting research.";
+        let parts = split_sentences_skip_initials(text);
+        assert!(
+            parts[0].contains("Jones"),
+            "Jones should be in author segment: {:?}",
+            parts
+        );
     }
 
     #[test]

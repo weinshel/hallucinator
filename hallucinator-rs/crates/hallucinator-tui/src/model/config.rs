@@ -64,8 +64,8 @@ pub struct ConfigState {
     pub disabled_dbs: Vec<(String, bool)>, // (name, enabled)
     pub dblp_offline_path: String,
     pub acl_offline_path: String,
-    pub max_concurrent_papers: usize,
-    pub max_concurrent_refs: usize,
+    pub num_workers: usize,
+    pub max_rate_limit_retries: u32,
     pub db_timeout_secs: u64,
     pub db_timeout_short_secs: u64,
     pub max_archive_size_mb: u32, // 0 = unlimited
@@ -108,8 +108,8 @@ impl Default for ConfigState {
             disabled_dbs: all_dbs,
             dblp_offline_path: String::new(),
             acl_offline_path: String::new(),
-            max_concurrent_papers: 1,
-            max_concurrent_refs: 4,
+            num_workers: 4,
+            max_rate_limit_retries: 3,
             db_timeout_secs: 10,
             db_timeout_short_secs: 5,
             max_archive_size_mb: 0, // unlimited

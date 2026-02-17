@@ -1,5 +1,6 @@
 use crate::doi::{DoiMatchResult, check_doi_match, validate_doi};
 use crate::orchestrator::query_all_databases;
+use crate::pool::{RefJob, ValidationPool};
 use crate::retraction::{check_retraction, check_retraction_by_title};
 use crate::{
     ArxivInfo, Config, DbResult, DbStatus, DoiInfo, ProgressEvent, Reference, RetractionInfo,
@@ -7,13 +8,12 @@ use crate::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 /// Check a list of references against academic databases.
 ///
-/// Validates each reference concurrently (up to `max_concurrent_refs` at a time),
-/// querying multiple databases in parallel per reference.
+/// Creates an internal ValidationPool with `num_workers` workers.
+/// Submits all refs, collects results via oneshot channels.
 /// Progress events are emitted via the callback. Cancellation is supported.
 pub async fn check_references(
     refs: Vec<Reference>,
@@ -22,178 +22,46 @@ pub async fn check_references(
     cancel: CancellationToken,
 ) -> Vec<ValidationResult> {
     let total = refs.len();
-    let client = reqwest::Client::new();
-    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_refs));
+    if total == 0 {
+        return vec![];
+    }
+
+    let num_workers = config.num_workers.max(1);
     let config = Arc::new(config);
     let progress = Arc::new(progress);
 
-    let mut results: Vec<Option<ValidationResult>> = vec![None; total];
-    let mut retry_candidates: Vec<(usize, Reference)> = Vec::new();
+    // Create the pool
+    let pool = ValidationPool::new(config.clone(), cancel.clone(), num_workers);
 
-    // First pass: check all references
-    let mut handles = Vec::new();
-
+    // Submit all refs and collect oneshot receivers
+    let mut receivers = Vec::with_capacity(total);
     for (i, reference) in refs.iter().enumerate() {
         if cancel.is_cancelled() {
             break;
         }
 
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-        let reference = reference.clone();
-        let client = client.clone();
-        let config = Arc::clone(&config);
-        let progress = Arc::clone(&progress);
-        let cancel = cancel.clone();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let job = RefJob {
+            reference: reference.clone(),
+            result_tx,
+            ref_index: i,
+            total,
+            progress: progress.clone(),
+        };
 
-        let handle = tokio::spawn(async move {
-            let _permit = permit; // Hold until done
-
-            if cancel.is_cancelled() {
-                return (i, None);
-            }
-
-            let title = reference.title.as_deref().unwrap_or("");
-            progress(ProgressEvent::Checking {
-                index: i,
-                total,
-                title: title.to_string(),
-            });
-
-            // Build DB-complete callback that emits ProgressEvent::DatabaseQueryComplete
-            let progress_for_db = Arc::clone(&progress);
-            let ref_index = i;
-            let on_db_complete = move |db_result: DbResult| {
-                progress_for_db(ProgressEvent::DatabaseQueryComplete {
-                    paper_index: 0, // filled in by the TUI layer via BackendEvent
-                    ref_index,
-                    db_name: db_result.db_name.clone(),
-                    status: db_result.status.clone(),
-                    elapsed: db_result.elapsed.unwrap_or_default(),
-                });
-            };
-
-            let result =
-                check_single_reference(&reference, &config, &client, false, Some(&on_db_complete))
-                    .await;
-
-            // Emit warning if some databases failed/timed out
-            if !result.failed_dbs.is_empty() {
-                let context = match result.status {
-                    Status::NotFound => "not found in other DBs (will retry)".to_string(),
-                    Status::Verified => format!(
-                        "verified via {}",
-                        result.source.as_deref().unwrap_or("unknown")
-                    ),
-                    Status::AuthorMismatch => format!(
-                        "author mismatch via {}",
-                        result.source.as_deref().unwrap_or("unknown")
-                    ),
-                };
-                progress(ProgressEvent::Warning {
-                    index: i,
-                    total,
-                    title: title.to_string(),
-                    failed_dbs: result.failed_dbs.clone(),
-                    message: format!("{} timed out; {}", result.failed_dbs.join(", "), context),
-                });
-            }
-
-            progress(ProgressEvent::Result {
-                index: i,
-                total,
-                result: Box::new(result.clone()),
-            });
-
-            (i, Some(result))
-        });
-
-        handles.push(handle);
+        pool.submit(job).await;
+        receivers.push((i, result_rx));
     }
 
     // Collect results
-    for handle in handles {
-        if let Ok((i, Some(result))) = handle.await {
-            // Track retry candidates
-            if result.status == Status::NotFound && !result.failed_dbs.is_empty() {
-                retry_candidates.push((i, refs[i].clone()));
-            }
+    let mut results: Vec<Option<ValidationResult>> = vec![None; total];
+    for (i, rx) in receivers {
+        if let Ok(result) = rx.await {
             results[i] = Some(result);
         }
     }
 
-    // Retry pass: re-check references that had failed DBs (concurrent)
-    if !retry_candidates.is_empty() && !cancel.is_cancelled() {
-        progress(ProgressEvent::RetryPass {
-            count: retry_candidates.len(),
-        });
-
-        let mut retry_handles = Vec::new();
-
-        for (i, reference) in retry_candidates {
-            if cancel.is_cancelled() {
-                break;
-            }
-
-            let prev_result = results[i].as_ref().unwrap();
-            let failed_dbs = prev_result.failed_dbs.clone();
-
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let config = Arc::clone(&config);
-            let client = client.clone();
-            let progress = Arc::clone(&progress);
-            let cancel = cancel.clone();
-
-            let handle = tokio::spawn(async move {
-                let _permit = permit;
-
-                if cancel.is_cancelled() {
-                    return (i, None);
-                }
-
-                let progress_for_db = Arc::clone(&progress);
-                let ref_index = i;
-                let on_db_complete = move |db_result: DbResult| {
-                    progress_for_db(ProgressEvent::DatabaseQueryComplete {
-                        paper_index: 0,
-                        ref_index,
-                        db_name: db_result.db_name.clone(),
-                        status: db_result.status.clone(),
-                        elapsed: db_result.elapsed.unwrap_or_default(),
-                    });
-                };
-
-                let result = check_single_reference_retry(
-                    &reference,
-                    &config,
-                    &client,
-                    &failed_dbs,
-                    Some(&on_db_complete),
-                )
-                .await;
-
-                // Only emit update if retry found something better
-                if result.status != Status::NotFound {
-                    progress(ProgressEvent::Result {
-                        index: i,
-                        total,
-                        result: Box::new(result.clone()),
-                    });
-                    (i, Some(result))
-                } else {
-                    (i, None)
-                }
-            });
-
-            retry_handles.push(handle);
-        }
-
-        // Collect retry results
-        for handle in retry_handles {
-            if let Ok((i, Some(result))) = handle.await {
-                results[i] = Some(result);
-            }
-        }
-    }
+    pool.shutdown().await;
 
     results.into_iter().flatten().collect()
 }
@@ -254,6 +122,7 @@ pub async fn check_single_reference(
                         elapsed: None,
                         found_authors: vec![],
                         paper_url: Some(format!("https://doi.org/{}", doi)),
+                        error_message: None,
                     }],
                     doi_info,
                     arxiv_info: None,
@@ -279,6 +148,7 @@ pub async fn check_single_reference(
                         elapsed: None,
                         found_authors: vec![],
                         paper_url: Some(format!("https://doi.org/{}", doi)),
+                        error_message: None,
                     }],
                     doi_info,
                     arxiv_info: None,

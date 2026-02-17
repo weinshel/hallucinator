@@ -30,10 +30,10 @@ pub struct DatabasesConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConcurrencyConfig {
-    pub max_concurrent_papers: Option<usize>,
-    pub max_concurrent_refs: Option<usize>,
+    pub num_workers: Option<usize>,
     pub db_timeout_secs: Option<u64>,
     pub db_timeout_short_secs: Option<u64>,
+    pub max_rate_limit_retries: Option<u32>,
     pub max_archive_size_mb: Option<u32>,
 }
 
@@ -117,24 +117,11 @@ fn merge(base: ConfigFile, overlay: ConfigFile) -> ConfigFile {
                 .or_else(|| base.databases.as_ref().and_then(|d| d.disabled.clone())),
         }),
         concurrency: Some(ConcurrencyConfig {
-            max_concurrent_papers: overlay
+            num_workers: overlay
                 .concurrency
                 .as_ref()
-                .and_then(|c| c.max_concurrent_papers)
-                .or_else(|| {
-                    base.concurrency
-                        .as_ref()
-                        .and_then(|c| c.max_concurrent_papers)
-                }),
-            max_concurrent_refs: overlay
-                .concurrency
-                .as_ref()
-                .and_then(|c| c.max_concurrent_refs)
-                .or_else(|| {
-                    base.concurrency
-                        .as_ref()
-                        .and_then(|c| c.max_concurrent_refs)
-                }),
+                .and_then(|c| c.num_workers)
+                .or_else(|| base.concurrency.as_ref().and_then(|c| c.num_workers)),
             db_timeout_secs: overlay
                 .concurrency
                 .as_ref()
@@ -148,6 +135,15 @@ fn merge(base: ConfigFile, overlay: ConfigFile) -> ConfigFile {
                     base.concurrency
                         .as_ref()
                         .and_then(|c| c.db_timeout_short_secs)
+                }),
+            max_rate_limit_retries: overlay
+                .concurrency
+                .as_ref()
+                .and_then(|c| c.max_rate_limit_retries)
+                .or_else(|| {
+                    base.concurrency
+                        .as_ref()
+                        .and_then(|c| c.max_rate_limit_retries)
                 }),
             max_archive_size_mb: overlay
                 .concurrency
@@ -227,17 +223,17 @@ pub fn apply_to_config_state(file_cfg: &ConfigFile, state: &mut ConfigState) {
         }
     }
     if let Some(conc) = &file_cfg.concurrency {
-        if let Some(v) = conc.max_concurrent_papers {
-            state.max_concurrent_papers = v.max(1);
-        }
-        if let Some(v) = conc.max_concurrent_refs {
-            state.max_concurrent_refs = v.max(1);
+        if let Some(v) = conc.num_workers {
+            state.num_workers = v.max(1);
         }
         if let Some(v) = conc.db_timeout_secs {
             state.db_timeout_secs = v.max(1);
         }
         if let Some(v) = conc.db_timeout_short_secs {
             state.db_timeout_short_secs = v.max(1);
+        }
+        if let Some(v) = conc.max_rate_limit_retries {
+            state.max_rate_limit_retries = v;
         }
         if let Some(v) = conc.max_archive_size_mb {
             state.max_archive_size_mb = v;
@@ -300,10 +296,10 @@ pub fn from_config_state(state: &ConfigState) -> ConfigFile {
             },
         }),
         concurrency: Some(ConcurrencyConfig {
-            max_concurrent_papers: Some(state.max_concurrent_papers),
-            max_concurrent_refs: Some(state.max_concurrent_refs),
+            num_workers: Some(state.num_workers),
             db_timeout_secs: Some(state.db_timeout_secs),
             db_timeout_short_secs: Some(state.db_timeout_short_secs),
+            max_rate_limit_retries: Some(state.max_rate_limit_retries),
             max_archive_size_mb: Some(state.max_archive_size_mb),
         }),
         display: Some(DisplayConfig {

@@ -231,10 +231,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Open DBLP database if configured (fall back to None if file missing or corrupt)
     let mut startup_warnings: Vec<String> = Vec::new();
+    let mut startup_info: Vec<String> = Vec::new();
     let dblp_offline_db: Option<Arc<Mutex<hallucinator_dblp::DblpDatabase>>> =
         if let Some(ref path) = dblp_offline_path {
             match backend::open_dblp_db(path) {
-                Ok(db) => Some(db),
+                Ok(db) => {
+                    startup_info.push(format!("DBLP offline DB loaded: {}", path.display()));
+                    Some(db)
+                }
                 Err(e) => {
                     startup_warnings.push(format!("{e}"));
                     None
@@ -255,7 +259,10 @@ async fn main() -> anyhow::Result<()> {
     let acl_offline_db: Option<Arc<Mutex<hallucinator_acl::AclDatabase>>> =
         if let Some(ref path) = acl_offline_path {
             match backend::open_acl_db(path) {
-                Ok(db) => Some(db),
+                Ok(db) => {
+                    startup_info.push(format!("ACL offline DB loaded: {}", path.display()));
+                    Some(db)
+                }
                 Err(e) => {
                     startup_warnings.push(format!("{e}"));
                     None
@@ -354,6 +361,10 @@ async fn main() -> anyhow::Result<()> {
     for warn in &startup_warnings {
         app.activity.log_warn(warn.clone());
     }
+    // Show success messages for loaded offline DBs
+    for info in &startup_info {
+        app.activity.log(info.clone());
+    }
 
     // Startup hints if no offline DBs configured (logged last so they show first)
     if app.config_state.acl_offline_path.is_empty() {
@@ -437,7 +448,6 @@ async fn main() -> anyhow::Result<()> {
                 tui_event::BackendCommand::ProcessFiles {
                     files,
                     starting_index,
-                    max_concurrent_papers,
                     mut config,
                 } => {
                     // Fresh token for this batch
@@ -473,15 +483,8 @@ async fn main() -> anyhow::Result<()> {
                     let cancel = batch_cancel.clone();
                     // Spawn batch as a separate task so we can still receive commands
                     tokio::spawn(async move {
-                        backend::run_batch_with_offset(
-                            files,
-                            *config,
-                            tx,
-                            cancel,
-                            starting_index,
-                            max_concurrent_papers,
-                        )
-                        .await;
+                        backend::run_batch_with_offset(files, *config, tx, cancel, starting_index)
+                            .await;
                     });
                 }
                 tui_event::BackendCommand::RetryReferences {

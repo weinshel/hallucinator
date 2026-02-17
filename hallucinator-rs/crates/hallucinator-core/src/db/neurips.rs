@@ -1,4 +1,4 @@
-use super::{DatabaseBackend, DbQueryResult};
+use super::{DatabaseBackend, DbQueryError, DbQueryResult};
 use crate::matching::titles_match;
 use std::future::Future;
 use std::pin::Pin;
@@ -16,7 +16,7 @@ impl DatabaseBackend for NeurIPS {
         title: &'a str,
         client: &'a reqwest::Client,
         timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, DbQueryError>> + Send + 'a>> {
         Box::pin(async move {
             let years = [2023, 2022, 2021, 2020, 2019, 2018];
             let title_owned = title.to_string();
@@ -32,20 +32,23 @@ impl DatabaseBackend for NeurIPS {
                     .timeout(timeout)
                     .send()
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| DbQueryError::Other(e.to_string()))?;
 
                 if !resp.status().is_success() {
                     continue;
                 }
 
-                let body = resp.text().await.map_err(|e| e.to_string())?;
+                let body = resp
+                    .text()
+                    .await
+                    .map_err(|e| DbQueryError::Other(e.to_string()))?;
 
                 // Parse in spawn_blocking to avoid !Send scraper types in async context
                 let title_clone = title_owned.clone();
                 let match_result =
                     tokio::task::spawn_blocking(move || parse_neurips_index(&body, &title_clone))
                         .await
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| DbQueryError::Other(e.to_string()))?;
 
                 if let Some((found_title, href)) = match_result {
                     let paper_url = format!("https://papers.nips.cc{}", href);

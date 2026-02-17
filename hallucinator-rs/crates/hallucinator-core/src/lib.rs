@@ -10,11 +10,14 @@ pub mod db;
 pub mod doi;
 pub mod matching;
 pub mod orchestrator;
+pub mod pool;
+pub mod rate_limit;
 pub mod retraction;
 
 // Re-export for convenience
 pub use hallucinator_pdf::{ExtractionResult, Reference, SkipStats};
 pub use orchestrator::{DbSearchResult, query_all_databases};
+pub use rate_limit::{DbQueryError, RateLimitedResult, RateLimiters};
 
 /// Status of a single database query within an orchestrator run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +38,7 @@ pub struct DbResult {
     pub elapsed: Option<Duration>,
     pub found_authors: Vec<String>,
     pub paper_url: Option<String>,
+    pub error_message: Option<String>,
 }
 
 #[derive(Error, Debug)]
@@ -123,12 +127,29 @@ pub enum ProgressEvent {
     RetryPass {
         count: usize,
     },
+    /// A ref is being retried (handed off from main worker to retry worker).
+    Retrying {
+        index: usize,
+        total: usize,
+        title: String,
+        failed_dbs: Vec<String>,
+    },
     DatabaseQueryComplete {
         paper_index: usize,
         ref_index: usize,
         db_name: String,
         status: DbStatus,
         elapsed: Duration,
+    },
+    RateLimitWait {
+        db_name: String,
+        wait_duration: Duration,
+    },
+    RateLimitRetry {
+        ref_index: usize,
+        db_name: String,
+        attempt: u32,
+        backoff: Duration,
     },
 }
 
@@ -152,12 +173,14 @@ pub struct Config {
     pub dblp_offline_db: Option<Arc<Mutex<hallucinator_dblp::DblpDatabase>>>,
     pub acl_offline_path: Option<PathBuf>,
     pub acl_offline_db: Option<Arc<Mutex<hallucinator_acl::AclDatabase>>>,
-    pub max_concurrent_refs: usize,
+    pub num_workers: usize,
     pub db_timeout_secs: u64,
     pub db_timeout_short_secs: u64,
     pub disabled_dbs: Vec<String>,
     pub check_openalex_authors: bool,
     pub crossref_mailto: Option<String>,
+    pub max_rate_limit_retries: u32,
+    pub rate_limiters: Arc<RateLimiters>,
 }
 
 impl std::fmt::Debug for Config {
@@ -175,7 +198,7 @@ impl std::fmt::Debug for Config {
                 "acl_offline_db",
                 &self.acl_offline_db.as_ref().map(|_| "<open>"),
             )
-            .field("max_concurrent_refs", &self.max_concurrent_refs)
+            .field("num_workers", &self.num_workers)
             .field("db_timeout_secs", &self.db_timeout_secs)
             .field("db_timeout_short_secs", &self.db_timeout_short_secs)
             .field("disabled_dbs", &self.disabled_dbs)
@@ -184,6 +207,7 @@ impl std::fmt::Debug for Config {
                 "crossref_mailto",
                 &self.crossref_mailto.as_ref().map(|_| "***"),
             )
+            .field("max_rate_limit_retries", &self.max_rate_limit_retries)
             .finish()
     }
 }
@@ -197,12 +221,14 @@ impl Default for Config {
             dblp_offline_db: None,
             acl_offline_path: None,
             acl_offline_db: None,
-            max_concurrent_refs: 4,
+            num_workers: 4,
             db_timeout_secs: 10,
             db_timeout_short_secs: 5,
             disabled_dbs: vec![],
             check_openalex_authors: false,
             crossref_mailto: None,
+            max_rate_limit_retries: 3,
+            rate_limiters: Arc::new(RateLimiters::default()),
         }
     }
 }

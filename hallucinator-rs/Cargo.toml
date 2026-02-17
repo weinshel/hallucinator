@@ -91,6 +91,11 @@ tempfile = "3"
 # Channels
 async-channel = "2"
 
+# Rate limiting
+governor = "0.8"
+arc-swap = "1"
+fastrand = "2"
+
 # TUI
 ratatui = "0.29"
 

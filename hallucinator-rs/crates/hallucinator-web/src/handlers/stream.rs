@@ -405,7 +405,8 @@ fn send_progress_event(
         ProgressEvent::RetryPass { count } => {
             sse_event("retry_pass", &RetryPassEvent { count: *count })
         }
-        ProgressEvent::DatabaseQueryComplete { .. } => {
+        ProgressEvent::Retrying { .. }
+        | ProgressEvent::DatabaseQueryComplete { .. } => {
             // Not sent via SSE (detail only needed in TUI)
             return;
         }

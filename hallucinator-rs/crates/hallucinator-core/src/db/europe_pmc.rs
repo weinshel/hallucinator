@@ -1,5 +1,6 @@
-use super::{DatabaseBackend, DbQueryResult};
+use super::{DatabaseBackend, DbQueryError, DbQueryResult};
 use crate::matching::titles_match;
+use crate::rate_limit::check_rate_limit_response;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::future::Future;
@@ -18,7 +19,7 @@ impl DatabaseBackend for EuropePmc {
         title: &'a str,
         client: &'a reqwest::Client,
         timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, DbQueryError>> + Send + 'a>> {
         Box::pin(async move {
             // Clean title for search
             static SPECIAL: Lazy<Regex> = Lazy::new(|| Regex::new(r#"["\'\[\](){}:;]"#).unwrap());
@@ -40,17 +41,17 @@ impl DatabaseBackend for EuropePmc {
                 .timeout(timeout)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
 
-            let status = resp.status();
-            if status.as_u16() == 429 {
-                return Err("Rate limited (429)".into());
-            }
-            if !status.is_success() {
-                return Err(format!("HTTP {}", status));
+            check_rate_limit_response(&resp)?;
+            if !resp.status().is_success() {
+                return Err(DbQueryError::Other(format!("HTTP {}", resp.status())));
             }
 
-            let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let data: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
             let results = data["resultList"]["result"]
                 .as_array()
                 .cloned()

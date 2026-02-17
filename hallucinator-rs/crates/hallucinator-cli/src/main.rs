@@ -56,6 +56,14 @@ enum Command {
         #[arg(long)]
         check_openalex_authors: bool,
 
+        /// Number of concurrent reference checks (default: 4)
+        #[arg(long)]
+        num_workers: Option<usize>,
+
+        /// Max 429 retries per database query (default: 3)
+        #[arg(long)]
+        max_rate_limit_retries: Option<u32>,
+
         /// Dry run: extract and print references without querying databases
         #[arg(long)]
         dry_run: bool,
@@ -92,6 +100,8 @@ async fn main() -> anyhow::Result<()> {
             acl_offline,
             disable_dbs,
             check_openalex_authors,
+            num_workers,
+            max_rate_limit_retries,
             dry_run,
         } => {
             if dry_run {
@@ -107,6 +117,8 @@ async fn main() -> anyhow::Result<()> {
                     acl_offline,
                     disable_dbs,
                     check_openalex_authors,
+                    num_workers,
+                    max_rate_limit_retries,
                 )
                 .await
             }
@@ -125,6 +137,8 @@ async fn check(
     acl_offline: Option<PathBuf>,
     disable_dbs: Vec<String>,
     check_openalex_authors: bool,
+    num_workers: Option<usize>,
+    max_rate_limit_retries: Option<u32>,
 ) -> anyhow::Result<()> {
     // Resolve configuration: CLI flags > env vars > defaults
     let openalex_key = openalex_key.or_else(|| std::env::var("OPENALEX_KEY").ok());
@@ -275,7 +289,18 @@ async fn check(
         return Ok(());
     }
 
+    let crossref_mailto: Option<String> = std::env::var("CROSSREF_MAILTO")
+        .ok()
+        .filter(|s| !s.is_empty());
+
     // Build config
+    let num_workers = num_workers.unwrap_or(4);
+    let max_rate_limit_retries = max_rate_limit_retries.unwrap_or(3);
+    let rate_limiters = std::sync::Arc::new(hallucinator_core::RateLimiters::new(
+        crossref_mailto.is_some(),
+        s2_api_key.is_some(),
+    ));
+
     let config = hallucinator_core::Config {
         openalex_key: openalex_key.clone(),
         s2_api_key,
@@ -283,12 +308,14 @@ async fn check(
         dblp_offline_db,
         acl_offline_path: acl_offline_path.clone(),
         acl_offline_db,
-        max_concurrent_refs: 4,
+        num_workers,
         db_timeout_secs,
         db_timeout_short_secs,
         disabled_dbs: disable_dbs,
         check_openalex_authors,
-        crossref_mailto: None,
+        crossref_mailto,
+        max_rate_limit_retries,
+        rate_limiters,
     };
 
     // Set up progress callback

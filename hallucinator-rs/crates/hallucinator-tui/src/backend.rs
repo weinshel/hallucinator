@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use hallucinator_core::{Config, ProgressEvent};
+use hallucinator_core::pool::{RefJob, ValidationPool};
+use hallucinator_core::{Config, ProgressEvent, ValidationResult};
 use hallucinator_pdf::ExtractionResult;
 
 use crate::tui_event::BackendEvent;
@@ -64,69 +65,62 @@ fn remap_progress_index(event: ProgressEvent, index_map: &[usize]) -> ProgressEv
 
 /// Run batch validation with paper indices starting at `offset`.
 ///
-/// Spawns `max_concurrent_papers` worker tasks that pull from a shared work
-/// queue. Each worker processes one paper at a time, then grabs the next.
+/// Creates a single global `ValidationPool` shared by all papers.
+/// Each paper gets its own task for extraction + job submission, so all
+/// papers can feed refs into the pool concurrently. The `num_workers`
+/// setting controls the total number of concurrent reference validations.
 pub async fn run_batch_with_offset(
     pdfs: Vec<PathBuf>,
     config: Config,
     tx: mpsc::UnboundedSender<BackendEvent>,
     cancel: CancellationToken,
     offset: usize,
-    max_concurrent_papers: usize,
 ) {
+    let num_workers = config.num_workers.max(1);
     let config = Arc::new(config);
-    let num_workers = max_concurrent_papers.max(1);
 
-    // Work queue: each item is (paper_index, path)
-    let (work_tx, work_rx) = mpsc::channel::<(usize, PathBuf)>(pdfs.len().max(1));
+    // Create ONE global validation pool for all papers
+    let pool = ValidationPool::new(config.clone(), cancel.clone(), num_workers);
+    let pool_tx = pool.sender();
 
-    // Feed the queue upfront
-    for (i, pdf_path) in pdfs.into_iter().enumerate() {
-        let _ = work_tx.send((offset + i, pdf_path)).await;
-    }
-    drop(work_tx); // close sender so workers exit when queue is drained
-
-    // Wrap receiver in Arc<Mutex> so workers can share it
-    let work_rx = Arc::new(tokio::sync::Mutex::new(work_rx));
-
+    // Spawn one task per paper. Extraction is fast (CPU-bound via spawn_blocking),
+    // and each task then submits refs to the shared pool and awaits results.
+    // The ValidationPool is the sole concurrency bottleneck.
     let mut handles = Vec::new();
-    for _ in 0..num_workers {
-        let work_rx = work_rx.clone();
-        let config = config.clone();
+    for (i, pdf_path) in pdfs.into_iter().enumerate() {
+        let paper_index = offset + i;
+        let pool_tx = pool_tx.clone();
         let tx = tx.clone();
         let cancel = cancel.clone();
 
         handles.push(tokio::spawn(async move {
-            loop {
-                let item = {
-                    let mut rx = work_rx.lock().await;
-                    rx.recv().await
-                };
-                match item {
-                    Some((paper_index, pdf_path)) => {
-                        if cancel.is_cancelled() {
-                            break;
-                        }
-                        process_single_paper(paper_index, &pdf_path, &config, &tx, &cancel).await;
-                    }
-                    None => break, // queue drained
-                }
+            if cancel.is_cancelled() {
+                return;
             }
+            process_single_paper(paper_index, &pdf_path, &pool_tx, &tx, &cancel).await;
         }));
     }
+
+    // Drop our clone of the pool sender so shutdown can complete
+    // once all paper tasks finish submitting
+    drop(pool_tx);
 
     for handle in handles {
         let _ = handle.await;
     }
 
+    // All papers have been extracted and all jobs submitted.
+    // Shut down the pool and wait for remaining validations to finish.
+    pool.shutdown().await;
+
     let _ = tx.send(BackendEvent::BatchComplete);
 }
 
-/// Process a single paper: extract references, validate, send events.
+/// Process a single paper: extract references, submit to shared pool, collect results.
 async fn process_single_paper(
     paper_index: usize,
     pdf_path: &std::path::Path,
-    config: &Config,
+    pool_tx: &async_channel::Sender<RefJob>,
     tx: &mpsc::UnboundedSender<BackendEvent>,
     cancel: &CancellationToken,
 ) {
@@ -206,27 +200,51 @@ async fn process_single_paper(
         return;
     }
 
-    // Build per-paper config
-    let paper_config = (*config).clone();
+    let total = refs.len();
 
-    // Bridge sync progress callback → async channel via unbounded send.
-    // Remap the checker's filtered indices back to the full ref_states indices.
-    let tx_progress = tx.clone();
-    let progress_cb = move |event: ProgressEvent| {
-        let event = remap_progress_index(event, &index_map);
-        let _ = tx_progress.send(BackendEvent::Progress {
-            paper_index,
-            event: Box::new(event),
-        });
-    };
+    // Submit all refs to the shared pool and collect oneshot receivers
+    let mut receivers = Vec::with_capacity(total);
+    for (i, reference) in refs.iter().enumerate() {
+        if cancel.is_cancelled() {
+            break;
+        }
 
-    let paper_cancel = cancel.clone();
-    let results =
-        hallucinator_core::check_references(refs, paper_config, progress_cb, paper_cancel).await;
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        // Build per-ref progress callback that remaps indices and tags with paper_index
+        let tx_progress = tx.clone();
+        let index_map = index_map.clone();
+        let progress_cb = move |event: ProgressEvent| {
+            let event = remap_progress_index(event, &index_map);
+            let _ = tx_progress.send(BackendEvent::Progress {
+                paper_index,
+                event: Box::new(event),
+            });
+        };
+
+        let job = RefJob {
+            reference: reference.clone(),
+            result_tx,
+            ref_index: i,
+            total,
+            progress: Arc::new(progress_cb),
+        };
+
+        let _ = pool_tx.send(job).await;
+        receivers.push((i, result_rx));
+    }
+
+    // Collect results in order
+    let mut results: Vec<Option<ValidationResult>> = vec![None; total];
+    for (i, rx) in receivers {
+        if let Ok(result) = rx.await {
+            results[i] = Some(result);
+        }
+    }
 
     let _ = tx.send(BackendEvent::PaperComplete {
         paper_index,
-        results,
+        results: results.into_iter().flatten().collect(),
     });
 }
 
@@ -239,7 +257,7 @@ pub async fn retry_references(
 ) {
     let client = reqwest::Client::new();
     let config = Arc::new(config);
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_refs));
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.num_workers.max(1)));
     let total = refs_to_retry.len();
 
     let mut handles = Vec::new();

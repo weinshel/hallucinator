@@ -1,5 +1,6 @@
-use super::{DatabaseBackend, DbQueryResult};
+use super::{DatabaseBackend, DbQueryError, DbQueryResult};
 use crate::matching::titles_match;
+use crate::rate_limit::check_rate_limit_response;
 use hallucinator_pdf::identifiers::get_query_words;
 use std::future::Future;
 use std::pin::Pin;
@@ -17,7 +18,7 @@ impl DatabaseBackend for Ssrn {
         title: &'a str,
         client: &'a reqwest::Client,
         timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, DbQueryError>> + Send + 'a>> {
         Box::pin(async move {
             let words = get_query_words(title, 6);
             let query = words.join(" ");
@@ -30,28 +31,28 @@ impl DatabaseBackend for Ssrn {
                 .timeout(timeout)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
 
-            let status = resp.status();
-            if status.as_u16() == 429 {
-                return Err("Rate limited (429)".into());
-            }
-            if !status.is_success() {
-                return Err(format!("HTTP {}", status));
+            check_rate_limit_response(&resp)?;
+            if !resp.status().is_success() {
+                return Err(DbQueryError::Other(format!("HTTP {}", resp.status())));
             }
 
-            let body = resp.text().await.map_err(|e| e.to_string())?;
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
             let title_owned = title.to_string();
 
             // Parse in spawn_blocking to avoid !Send scraper types
             tokio::task::spawn_blocking(move || parse_ssrn_results(&body, &title_owned))
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| DbQueryError::Other(e.to_string()))?
         })
     }
 }
 
-fn parse_ssrn_results(html: &str, title: &str) -> Result<DbQueryResult, String> {
+fn parse_ssrn_results(html: &str, title: &str) -> Result<DbQueryResult, DbQueryError> {
     let document = scraper::Html::parse_document(html);
     let title_sel = scraper::Selector::parse("a.title").unwrap();
 

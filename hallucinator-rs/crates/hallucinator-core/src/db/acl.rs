@@ -1,5 +1,6 @@
-use super::{DatabaseBackend, DbQueryResult};
+use super::{DatabaseBackend, DbQueryError, DbQueryResult};
 use crate::matching::titles_match;
+use crate::rate_limit::check_rate_limit_response;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -17,21 +18,26 @@ impl DatabaseBackend for AclOffline {
         "ACL Anthology"
     }
 
+    fn is_local(&self) -> bool {
+        true
+    }
+
     fn query<'a>(
         &'a self,
         title: &'a str,
         _client: &'a reqwest::Client,
         _timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, DbQueryError>> + Send + 'a>> {
         let db = Arc::clone(&self.db);
         let title = title.to_string();
         Box::pin(async move {
             let result = tokio::task::spawn_blocking(move || {
-                let db = db.lock().map_err(|e| e.to_string())?;
-                db.query(&title).map_err(|e| e.to_string())
+                let db = db.lock().map_err(|e| DbQueryError::Other(e.to_string()))?;
+                db.query(&title)
+                    .map_err(|e| DbQueryError::Other(e.to_string()))
             })
             .await
-            .map_err(|e| e.to_string())??;
+            .map_err(|e| DbQueryError::Other(e.to_string()))??;
 
             match result {
                 Some(qr) => Ok((Some(qr.record.title), qr.record.authors, qr.record.url)),
@@ -51,7 +57,7 @@ impl DatabaseBackend for AclAnthology {
         title: &'a str,
         client: &'a reqwest::Client,
         timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, DbQueryError>> + Send + 'a>> {
         Box::pin(async move {
             let url = format!(
                 "https://aclanthology.org/search/?q={}",
@@ -63,28 +69,28 @@ impl DatabaseBackend for AclAnthology {
                 .timeout(timeout)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
 
-            let status = resp.status();
-            if status.as_u16() == 429 {
-                return Err("Rate limited (429)".into());
-            }
-            if !status.is_success() {
-                return Err(format!("HTTP {}", status));
+            check_rate_limit_response(&resp)?;
+            if !resp.status().is_success() {
+                return Err(DbQueryError::Other(format!("HTTP {}", resp.status())));
             }
 
-            let body = resp.text().await.map_err(|e| e.to_string())?;
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
             let title_owned = title.to_string();
 
             // Parse in spawn_blocking to avoid !Send scraper types
             tokio::task::spawn_blocking(move || parse_acl_results(&body, &title_owned))
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| DbQueryError::Other(e.to_string()))?
         })
     }
 }
 
-fn parse_acl_results(html: &str, title: &str) -> Result<DbQueryResult, String> {
+fn parse_acl_results(html: &str, title: &str) -> Result<DbQueryResult, DbQueryError> {
     let document = scraper::Html::parse_document(html);
 
     let entry_sel = scraper::Selector::parse(".d-sm-flex.align-items-stretch.p-2").unwrap();

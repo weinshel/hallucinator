@@ -123,8 +123,8 @@ impl PyValidator {
 
     fn __repr__(&self) -> String {
         format!(
-            "Validator(max_concurrent_refs={})",
-            self.config.max_concurrent_refs,
+            "Validator(num_workers={})",
+            self.config.num_workers,
         )
     }
 }

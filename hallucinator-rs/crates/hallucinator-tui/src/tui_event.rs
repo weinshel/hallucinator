@@ -9,7 +9,6 @@ pub enum BackendCommand {
     ProcessFiles {
         files: Vec<PathBuf>,
         starting_index: usize,
-        max_concurrent_papers: usize,
         config: Box<hallucinator_core::Config>,
     },
     /// Retry specific references for a paper.

@@ -1,4 +1,4 @@
-use super::{DatabaseBackend, DbQueryResult};
+use super::{DatabaseBackend, DbQueryError, DbQueryResult};
 use crate::matching::titles_match;
 use hallucinator_pdf::identifiers::get_query_words;
 use std::future::Future;
@@ -17,7 +17,7 @@ impl DatabaseBackend for Arxiv {
         title: &'a str,
         client: &'a reqwest::Client,
         timeout: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<DbQueryResult, DbQueryError>> + Send + 'a>> {
         Box::pin(async move {
             let words = get_query_words(title, 6);
             let query = words.join(" ");
@@ -31,13 +31,16 @@ impl DatabaseBackend for Arxiv {
                 .timeout(timeout)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
 
             if !resp.status().is_success() {
-                return Err(format!("HTTP {}", resp.status()));
+                return Err(DbQueryError::Other(format!("HTTP {}", resp.status())));
             }
 
-            let body = resp.text().await.map_err(|e| e.to_string())?;
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
 
             // Parse Atom XML feed
             parse_arxiv_response(&body, title)
@@ -46,7 +49,7 @@ impl DatabaseBackend for Arxiv {
 }
 
 /// Parse arXiv Atom XML response and find matching entries.
-fn parse_arxiv_response(xml: &str, title: &str) -> Result<DbQueryResult, String> {
+fn parse_arxiv_response(xml: &str, title: &str) -> Result<DbQueryResult, DbQueryError> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
 
@@ -144,7 +147,7 @@ fn parse_arxiv_response(xml: &str, title: &str) -> Result<DbQueryResult, String>
                 }
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("XML parse error: {}", e)),
+            Err(e) => return Err(DbQueryError::Other(format!("XML parse error: {}", e))),
             _ => {}
         }
         buf.clear();

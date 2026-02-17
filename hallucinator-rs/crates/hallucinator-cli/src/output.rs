@@ -128,7 +128,10 @@ pub fn print_progress(
                 count
             )?;
         }
-        ProgressEvent::DatabaseQueryComplete { .. } => {
+        ProgressEvent::Retrying { .. }
+        | ProgressEvent::DatabaseQueryComplete { .. }
+        | ProgressEvent::RateLimitWait { .. }
+        | ProgressEvent::RateLimitRetry { .. } => {
             // Not displayed in CLI output
         }
     }

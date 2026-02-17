@@ -257,6 +257,7 @@ fn convert_loaded(loaded: LoadedFile) -> (PaperState, Vec<RefState>, Vec<Referen
                         elapsed: db.elapsed_ms.map(Duration::from_millis),
                         found_authors: db.authors.clone().unwrap_or_default(),
                         paper_url: db.url.clone(),
+                        error_message: None,
                     })
                     .collect()
             })

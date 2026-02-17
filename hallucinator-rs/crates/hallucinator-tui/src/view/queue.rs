@@ -139,12 +139,12 @@ fn render_search_bar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
 fn render_table(f: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
-    let wide = area.width >= 75;
+    let wide = area.width >= 80;
 
     // Build header row
     let header_cells = if wide {
         vec![
-            "#", "Paper", "Refs", "OK", "Mis", "NF", "Ret", "%", "Status",
+            "#", "Paper", "Refs", "OK", "Mis", "NF", "Skip", "%", "Ret", "Status",
         ]
     } else {
         vec!["#", "Paper", "Refs", "Prob", "Status"]
@@ -220,6 +220,7 @@ fn render_table(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     Style::default().fg(theme.dim)
                 };
+                let skip_text = format!("{}", paper.stats.skipped);
                 Row::new(vec![
                     Cell::from(num),
                     Cell::from(name).style(name_style),
@@ -230,9 +231,10 @@ fn render_table(f: &mut Frame, area: Rect, app: &App) {
                         .style(Style::default().fg(theme.author_mismatch)),
                     Cell::from(format!("{}", paper.stats.not_found))
                         .style(Style::default().fg(theme.not_found)),
+                    Cell::from(skip_text).style(Style::default().fg(theme.dim)),
+                    Cell::from(pct_text).style(pct_style),
                     Cell::from(format!("{}", paper.stats.retracted))
                         .style(Style::default().fg(theme.retracted)),
-                    Cell::from(pct_text).style(pct_style),
                     Cell::from(status_text).style(phase_style),
                 ])
             } else {
@@ -259,15 +261,16 @@ fn render_table(f: &mut Frame, area: Rect, app: &App) {
 
     let widths = if wide {
         vec![
-            Constraint::Length(4),
-            Constraint::Min(15),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(14),
+            Constraint::Length(4),  // #
+            Constraint::Min(15),    // Paper
+            Constraint::Length(5),  // Refs
+            Constraint::Length(5),  // OK
+            Constraint::Length(5),  // Mis
+            Constraint::Length(5),  // NF
+            Constraint::Length(5),  // Skip
+            Constraint::Length(5),  // %
+            Constraint::Length(5),  // Ret
+            Constraint::Length(14), // Status
         ]
     } else {
         vec![
@@ -296,38 +299,10 @@ fn render_table(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
-    let total = app.papers.len();
-    let done = app.papers.iter().filter(|p| p.phase.is_terminal()).count();
 
-    let total_verified: usize = app.papers.iter().map(|p| p.stats.verified).sum();
-    let total_not_found: usize = app.papers.iter().map(|p| p.stats.not_found).sum();
-    let total_mismatch: usize = app.papers.iter().map(|p| p.stats.author_mismatch).sum();
-    let total_retracted: usize = app.papers.iter().map(|p| p.stats.retracted).sum();
+    let mut spans: Vec<Span> = Vec::new();
 
-    let mut spans = vec![
-        Span::styled(
-            format!(" {}/{} papers ", done, total),
-            Style::default().fg(theme.text),
-        ),
-        Span::styled(
-            format!("V:{} ", total_verified),
-            Style::default().fg(theme.verified),
-        ),
-        Span::styled(
-            format!("M:{} ", total_mismatch),
-            Style::default().fg(theme.author_mismatch),
-        ),
-        Span::styled(
-            format!("NF:{} ", total_not_found),
-            Style::default().fg(theme.not_found),
-        ),
-        Span::styled(
-            format!("R:{} ", total_retracted),
-            Style::default().fg(theme.retracted),
-        ),
-    ];
-
-    // Show [r] Start/Stop indicator
+    // Show [r] Start/Stop indicator + keybindings
     if !app.processing_started && !app.file_paths.is_empty() {
         spans.push(Span::styled(
             " [r] Start ",
@@ -354,7 +329,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         ));
     } else {
         spans.push(Span::styled(
-            " | Space:mark  Enter:open  s:sort  f:filter  o:add  c:config  e:export  ?:help  q:quit",
+            " Space:mark  Enter:open  s:sort  f:filter  o:add  c:config  e:export  ?:help  q:quit",
             theme.footer_style(),
         ));
     }

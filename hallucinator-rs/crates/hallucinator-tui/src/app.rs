@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use hallucinator_pdf::archive::ArchiveItem;
@@ -291,6 +293,8 @@ pub struct App {
     archive_streaming_name: Option<String>,
     /// Number of PDFs extracted so far from the current archive.
     pub extracted_count: usize,
+    /// Number of `run_batch_with_offset` tasks still running.
+    inflight_batches: usize,
     /// Frame counter for FPS measurement.
     frame_count: u32,
     /// Last time FPS was sampled.
@@ -355,6 +359,7 @@ impl App {
             archive_rx: None,
             archive_streaming_name: None,
             extracted_count: 0,
+            inflight_batches: 0,
             frame_count: 0,
             last_fps_instant: Instant::now(),
             measured_fps: 0.0,
@@ -500,6 +505,7 @@ impl App {
 
         self.processing_started = true;
         self.batch_complete = false;
+        self.inflight_batches = 0;
         self.start_time = Some(Instant::now());
         self.frozen_elapsed = None;
         self.activity = ActivityState::default();
@@ -526,9 +532,9 @@ impl App {
             let _ = tx.send(BackendCommand::ProcessFiles {
                 files: real_files,
                 starting_index: 0,
-                max_concurrent_papers: self.config_state.max_concurrent_papers,
                 config: Box::new(config),
             });
+            self.inflight_batches += 1;
         }
     }
 
@@ -569,7 +575,12 @@ impl App {
                 ))
             },
             acl_offline_db: None, // Populated from main.rs
-            max_concurrent_refs: self.config_state.max_concurrent_refs,
+            num_workers: self.config_state.num_workers,
+            max_rate_limit_retries: self.config_state.max_rate_limit_retries,
+            rate_limiters: std::sync::Arc::new(hallucinator_core::RateLimiters::new(
+                !self.config_state.crossref_mailto.is_empty(),
+                !self.config_state.s2_api_key.is_empty(),
+            )),
             db_timeout_secs: self.config_state.db_timeout_secs,
             db_timeout_short_secs: self.config_state.db_timeout_short_secs,
             disabled_dbs,
@@ -765,9 +776,9 @@ impl App {
             let _ = tx.send(BackendCommand::ProcessFiles {
                 files: new_pdfs,
                 starting_index,
-                max_concurrent_papers: self.config_state.max_concurrent_papers,
                 config: Box::new(config),
             });
+            self.inflight_batches += 1;
         }
 
         if got_new {
@@ -780,6 +791,13 @@ impl App {
             self.pending_archive_extractions.remove(0);
             if self.pending_archive_extractions.is_empty() {
                 self.extracting_archive = None;
+                // All archives extracted. If all sub-batches already completed,
+                // mark the entire run as done now.
+                if self.inflight_batches == 0 && self.processing_started && !self.batch_complete {
+                    self.frozen_elapsed = Some(self.elapsed());
+                    self.batch_complete = true;
+                    self.pending_bell = true;
+                }
             }
         }
 
@@ -1677,8 +1695,8 @@ impl App {
             }
             ConfigSection::Concurrency => {
                 let value = match self.config_state.item_cursor {
-                    0 => self.config_state.max_concurrent_papers.to_string(),
-                    1 => self.config_state.max_concurrent_refs.to_string(),
+                    0 => self.config_state.num_workers.to_string(),
+                    1 => self.config_state.max_rate_limit_retries.to_string(),
                     2 => self.config_state.db_timeout_secs.to_string(),
                     3 => self.config_state.db_timeout_short_secs.to_string(),
                     4 => self.config_state.max_archive_size_mb.to_string(),
@@ -1757,12 +1775,12 @@ impl App {
             ConfigSection::Concurrency => match self.config_state.item_cursor {
                 0 => {
                     if let Ok(v) = buf.parse::<usize>() {
-                        self.config_state.max_concurrent_papers = v.max(1);
+                        self.config_state.num_workers = v.max(1);
                     }
                 }
                 1 => {
-                    if let Ok(v) = buf.parse::<usize>() {
-                        self.config_state.max_concurrent_refs = v.max(1);
+                    if let Ok(v) = buf.parse::<u32>() {
+                        self.config_state.max_rate_limit_retries = v;
                     }
                 }
                 2 => {
@@ -1896,7 +1914,10 @@ impl App {
             } => {
                 if let Some(paper) = self.papers.get_mut(paper_index) {
                     paper.total_refs = ref_count;
-                    let skipped = references.iter().filter(|r| r.skip_reason.is_some()).count();
+                    let skipped = references
+                        .iter()
+                        .filter(|r| r.skip_reason.is_some())
+                        .count();
                     paper.stats.total = references.len();
                     paper.stats.skipped = skipped;
                     // Allocate result slots for ALL refs (including skipped) so
@@ -1952,9 +1973,17 @@ impl App {
                 }
             }
             BackendEvent::BatchComplete => {
-                self.frozen_elapsed = Some(self.elapsed());
-                self.batch_complete = true;
-                self.pending_bell = true;
+                self.inflight_batches = self.inflight_batches.saturating_sub(1);
+                // Only mark the whole run as complete (and ring the bell) when
+                // all sub-batches have finished AND no archives are still extracting.
+                let all_done = self.inflight_batches == 0
+                    && self.pending_archive_extractions.is_empty()
+                    && self.archive_rx.is_none();
+                if all_done {
+                    self.frozen_elapsed = Some(self.elapsed());
+                    self.batch_complete = true;
+                    self.pending_bell = true;
+                }
             }
             BackendEvent::DblpBuildProgress { event } => {
                 // Track parse phase start for records/s calculation
@@ -2044,7 +2073,17 @@ impl App {
                 self.activity.active_queries.push(ActiveQuery {
                     db_name: format!("ref #{}", index + 1),
                     ref_title: title,
+                    is_retry: false,
                 });
+                // Increment in-flight for all enabled DBs
+                let enabled: Vec<String> = self
+                    .config_state
+                    .disabled_dbs
+                    .iter()
+                    .filter(|(_, enabled)| *enabled)
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                self.activity.increment_in_flight(&enabled);
             }
             ProgressEvent::Result { index, result, .. } => {
                 let result = *result;
@@ -2070,6 +2109,20 @@ impl App {
                 self.throughput_since_last += 1;
             }
             ProgressEvent::Warning { .. } => {}
+            ProgressEvent::Retrying {
+                title, failed_dbs, ..
+            } => {
+                // Mark the existing active query as a retry
+                if let Some(q) = self
+                    .activity
+                    .active_queries
+                    .iter_mut()
+                    .find(|q| q.ref_title == title)
+                {
+                    q.is_retry = true;
+                    q.db_name = format!("retry ({})", failed_dbs.len());
+                }
+            }
             ProgressEvent::RetryPass { count, .. } => {
                 if let Some(paper) = self.papers.get_mut(paper_index) {
                     paper.phase = PaperPhase::Retrying;
@@ -2084,8 +2137,10 @@ impl App {
                 elapsed,
                 ..
             } => {
-                // Skip recording Skipped status — those are early-exit artifacts, not real queries
-                if status != DbStatus::Skipped {
+                if status == DbStatus::Skipped {
+                    // Early-exit artifact — just decrement in-flight
+                    self.activity.decrement_in_flight(&db_name);
+                } else {
                     let success = matches!(
                         status,
                         DbStatus::Match | DbStatus::NoMatch | DbStatus::AuthorMismatch
@@ -2113,6 +2168,10 @@ impl App {
                     }
                 }
             }
+            ProgressEvent::RateLimitWait { .. } | ProgressEvent::RateLimitRetry { .. } => {
+                // Rate limit events are handled internally by the pool;
+                // no TUI action needed (activity panel could log these in the future).
+            }
         }
     }
 
@@ -2137,6 +2196,56 @@ impl App {
         } else {
             std::time::Duration::ZERO
         }
+    }
+
+    /// Build the global stats line shown in the logo bar.
+    fn build_stats_line(&self) -> Line<'static> {
+        let theme = &self.theme;
+        let total = self.papers.len();
+        let done = self.papers.iter().filter(|p| p.phase.is_terminal()).count();
+        let total_refs: usize = self.papers.iter().map(|p| p.total_refs).sum();
+        let total_verified: usize = self.papers.iter().map(|p| p.stats.verified).sum();
+        let total_not_found: usize = self.papers.iter().map(|p| p.stats.not_found).sum();
+        let total_mismatch: usize = self.papers.iter().map(|p| p.stats.author_mismatch).sum();
+        let total_retracted: usize = self.papers.iter().map(|p| p.stats.retracted).sum();
+
+        let mut spans = vec![
+            Span::styled(
+                format!(" {}/{} papers ", done, total),
+                Style::default().fg(theme.text),
+            ),
+            Span::styled(
+                format!("Refs:{} ", total_refs),
+                Style::default().fg(theme.dim),
+            ),
+            Span::styled(
+                format!("V:{} ", total_verified),
+                Style::default().fg(theme.verified),
+            ),
+            Span::styled(
+                format!("M:{} ", total_mismatch),
+                Style::default().fg(theme.author_mismatch),
+            ),
+            Span::styled(
+                format!("NF:{} ", total_not_found),
+                Style::default().fg(theme.not_found),
+            ),
+            Span::styled(
+                format!("R:{}", total_retracted),
+                Style::default().fg(theme.retracted),
+            ),
+        ];
+
+        // Elapsed timer
+        let elapsed = self.elapsed();
+        if elapsed.as_secs() > 0 {
+            spans.push(Span::styled(
+                format!(" {}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60),
+                Style::default().fg(theme.dim),
+            ));
+        }
+
+        Line::from(spans)
     }
 
     /// Cycle theme: hacker → modern → gnr → hacker.
@@ -2344,6 +2453,9 @@ impl App {
             return;
         }
 
+        // Build global stats line for the logo bar
+        let stats_line = self.build_stats_line();
+
         // Persistent logo bar at top of every content screen
         let content_area = crate::view::banner::render_logo_bar(
             f,
@@ -2352,6 +2464,7 @@ impl App {
             self.tip_index,
             self.tick,
             self.tip_change_tick,
+            Some(stats_line),
         );
 
         // Split footer row out first so it spans the full terminal width.

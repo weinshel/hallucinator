@@ -297,13 +297,10 @@ fn render_concurrency(lines: &mut Vec<Line>, config: &ConfigState, theme: &Theme
         format!("{}", config.max_archive_size_mb)
     };
     let items = [
+        ("Ref Workers", config.num_workers.to_string()),
         (
-            "Concurrent Papers",
-            config.max_concurrent_papers.to_string(),
-        ),
-        (
-            "Concurrent Refs/Paper",
-            config.max_concurrent_refs.to_string(),
+            "Rate Limit Retries",
+            config.max_rate_limit_retries.to_string(),
         ),
         ("DB Timeout (s)", config.db_timeout_secs.to_string()),
         (

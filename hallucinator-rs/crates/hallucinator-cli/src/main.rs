@@ -409,7 +409,8 @@ fn dry_run_pdf(
 ) -> anyhow::Result<()> {
     use owo_colors::OwoColorize;
 
-    let text = hallucinator_pdf::extract::extract_text_from_pdf(file_path)?;
+    let config = hallucinator_pdf::config::PdfParsingConfig::default();
+    let text = hallucinator_pdf::extract::extract_text_from_pdf(file_path, &config)?;
     let ref_section = hallucinator_pdf::section::find_references_section(&text)
         .ok_or_else(|| anyhow::anyhow!("No references section found"))?;
     let raw_refs = hallucinator_pdf::section::segment_references(&ref_section);

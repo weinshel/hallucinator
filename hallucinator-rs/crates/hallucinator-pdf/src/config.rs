@@ -64,6 +64,19 @@ pub struct PdfParsingConfig {
     // ── text_processing.rs ──
     /// Compound-word suffixes that should preserve the hyphen.
     pub(crate) compound_suffixes: ListOverride<String>,
+
+    // ── extract.rs ──
+    /// Fraction of page height from bottom to exclude as footer (0.0–1.0).
+    /// For example, 0.1 excludes the bottom 10% of each page.
+    /// Default 0.05 (bottom 5%) removes footers like "USENIX Association
+    /// 34th USENIX Security Symposium 5281" that corrupt cross-page citations.
+    /// None means no footer exclusion.
+    pub(crate) footer_exclusion_height_ratio: Option<f64>,
+    /// Fraction of page height from top to exclude as header (0.0–1.0).
+    /// For example, 0.04 excludes the top 4% of each page.
+    /// Default 0.04 removes running headers at page tops.
+    /// None means no header exclusion.
+    pub(crate) header_exclusion_height_ratio: Option<f64>,
 }
 
 impl Default for PdfParsingConfig {
@@ -80,6 +93,8 @@ impl Default for PdfParsingConfig {
             min_title_words: 4,
             max_authors: 15,
             compound_suffixes: ListOverride::Default,
+            footer_exclusion_height_ratio: Some(0.05),
+            header_exclusion_height_ratio: Some(0.04),
         }
     }
 }
@@ -101,6 +116,8 @@ pub struct PdfParsingConfigBuilder {
     min_title_words: Option<usize>,
     max_authors: Option<usize>,
     compound_suffixes: ListOverridePlainBuilder,
+    footer_exclusion_height_ratio: Option<f64>,
+    header_exclusion_height_ratio: Option<f64>,
 }
 
 /// Helper for building `ListOverride<Regex>` from string patterns.
@@ -217,6 +234,18 @@ impl PdfParsingConfigBuilder {
         self
     }
 
+    // ── Footer exclusion ──
+
+    pub fn footer_exclusion_height_ratio(mut self, ratio: f64) -> Self {
+        self.footer_exclusion_height_ratio = Some(ratio);
+        self
+    }
+
+    pub fn header_exclusion_height_ratio(mut self, ratio: f64) -> Self {
+        self.header_exclusion_height_ratio = Some(ratio);
+        self
+    }
+
     /// Compile all string patterns into regexes and produce a [`PdfParsingConfig`].
     pub fn build(self) -> Result<PdfParsingConfig, regex::Error> {
         let compile = |opt: Option<String>| -> Result<Option<Regex>, regex::Error> {
@@ -260,6 +289,12 @@ impl PdfParsingConfigBuilder {
             min_title_words: self.min_title_words.unwrap_or(4),
             max_authors: self.max_authors.unwrap_or(15),
             compound_suffixes: compile_plain(self.compound_suffixes),
+            footer_exclusion_height_ratio: self
+                .footer_exclusion_height_ratio
+                .or(Some(0.05)),
+            header_exclusion_height_ratio: self
+                .header_exclusion_height_ratio
+                .or(Some(0.04)),
         })
     }
 }

@@ -43,7 +43,7 @@ impl PdfExtractor {
     /// Extract raw text from a PDF file (step 1).
     #[cfg(feature = "pdf")]
     pub fn extract_text(&self, path: &Path) -> Result<String, PdfError> {
-        crate::extract::extract_text_from_pdf(path)
+        crate::extract::extract_text_from_pdf(path, &self.config)
     }
 
     /// Locate the references section in document text (step 2).

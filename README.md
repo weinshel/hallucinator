@@ -62,7 +62,9 @@ See **[hallucinator-rs/PYTHON_BINDINGS.md](hallucinator-rs/PYTHON_BINDINGS.md)**
 
 ---
 
-## Python Quick Start (Original)
+## Python Quick Start (Legacy)
+
+The original pure-Python implementation lives in the `legacy/` directory.
 
 ```bash
 # 1. Clone and setup
@@ -71,10 +73,10 @@ cd hallucinator
 python -m venv venv
 venv\Scripts\activate      # Windows
 source venv/bin/activate   # Linux/Mac
-pip install -r requirements.txt
+pip install -r legacy/requirements.txt
 
 # 2. Run it
-python check_hallucinated_references.py your_paper.pdf
+python legacy/check_hallucinated_references.py your_paper.pdf
 ```
 
 That's it. You'll see which references check out and which don't exist in any database.
@@ -103,23 +105,23 @@ We **strongly recommend** to download the latest **DBLP database** and query it 
 
 ---
 
-## Command Line Usage
+## Command Line Usage (Legacy Python)
 
 ```bash
 # Basic - just check a PDF
-python check_hallucinated_references.py paper.pdf
+python legacy/check_hallucinated_references.py paper.pdf
 
 # With API keys (recommended - better coverage, fewer rate limits)
-python check_hallucinated_references.py --openalex-key=YOUR_KEY --s2-api-key=YOUR_KEY paper.pdf
+python legacy/check_hallucinated_references.py --openalex-key=YOUR_KEY --s2-api-key=YOUR_KEY paper.pdf
 
 # Save output to file
-python check_hallucinated_references.py --output results.txt paper.pdf
+python legacy/check_hallucinated_references.py --output results.txt paper.pdf
 
 # No colors (for logs/piping)
-python check_hallucinated_references.py --no-color paper.pdf
+python legacy/check_hallucinated_references.py --no-color paper.pdf
 
 # Use offline DBLP database (avoids rate limits)
-python check_hallucinated_references.py --dblp-offline=dblp.db paper.pdf
+python legacy/check_hallucinated_references.py --dblp-offline=dblp.db paper.pdf
 ```
 
 ### Command Line Options
@@ -136,10 +138,10 @@ python check_hallucinated_references.py --dblp-offline=dblp.db paper.pdf
 
 ---
 
-## Web Interface
+## Web Interface (Legacy Python)
 
 ```bash
-python app.py
+python legacy/app.py
 # Open http://localhost:5001
 ```
 
@@ -163,7 +165,7 @@ After analysis, download a report of problematic references in HTML or plain tex
 ### Docker
 
 ```bash
-docker build -t hallucinator .
+docker build -t hallucinator legacy/
 docker run -p 5001:5001 hallucinator
 # Open http://localhost:5001
 ```
@@ -194,7 +196,7 @@ DBLP aggressively rate-limits API requests. For heavy usage, you can download th
 ### Setup (one-time, takes 20-30 minutes)
 
 ```bash
-python check_hallucinated_references.py --update-dblp=dblp.db
+python legacy/check_hallucinated_references.py --update-dblp=dblp.db
 ```
 
 This downloads the latest [DBLP N-Triples dump](https://dblp.org/rdf/) and builds a SQLite database with ~6M publications.
@@ -203,10 +205,10 @@ This downloads the latest [DBLP N-Triples dump](https://dblp.org/rdf/) and build
 
 ```bash
 # CLI
-python check_hallucinated_references.py --dblp-offline=dblp.db paper.pdf
+python legacy/check_hallucinated_references.py --dblp-offline=dblp.db paper.pdf
 
 # Web app (set environment variable)
-DBLP_OFFLINE_PATH=dblp.db python app.py
+DBLP_OFFLINE_PATH=dblp.db python legacy/app.py
 ```
 
 ### Keeping it fresh

@@ -47,7 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__, template_folder="templates", static_folder="static")
+app = Flask(__name__, template_folder="legacy/templates", static_folder="legacy/static")
 
 # Security limits for archive processing
 MAX_FILES_IN_ARCHIVE = 50

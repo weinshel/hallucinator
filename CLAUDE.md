@@ -10,31 +10,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-### Installation
+### Legacy Python (in `legacy/` subdirectory)
+
+#### Installation
 ```bash
 python -m venv venv
 venv\Scripts\activate  # Windows
-pip install -r requirements.txt
+pip install -r legacy/requirements.txt
 ```
 
-### CLI Usage
+#### CLI Usage
 ```bash
-python check_hallucinated_references.py <path_to_pdf>
-python check_hallucinated_references.py --no-color --openalex-key=KEY --s2-api-key=KEY <pdf>
-python check_hallucinated_references.py --output log.txt <pdf>
-python check_hallucinated_references.py --dblp-offline=dblp.db <pdf>  # Use offline DBLP
-python check_hallucinated_references.py --update-dblp=dblp.db         # Download & build offline DB
+python legacy/check_hallucinated_references.py <path_to_pdf>
+python legacy/check_hallucinated_references.py --no-color --openalex-key=KEY --s2-api-key=KEY <pdf>
+python legacy/check_hallucinated_references.py --output log.txt <pdf>
+python legacy/check_hallucinated_references.py --dblp-offline=dblp.db <pdf>  # Use offline DBLP
+python legacy/check_hallucinated_references.py --update-dblp=dblp.db         # Download & build offline DB
 ```
 
-### Web Server
+#### Web Server
 ```bash
-python app.py  # Starts on http://localhost:5001
-DBLP_OFFLINE_PATH=dblp.db python app.py  # With offline DBLP
+python legacy/app.py  # Starts on http://localhost:5001
+DBLP_OFFLINE_PATH=dblp.db python legacy/app.py  # With offline DBLP
 ```
 
-### Docker
+#### Docker
 ```bash
-docker build -t hallucinator .
+docker build -t hallucinator legacy/
 docker run -p 5001:5001 hallucinator
 ```
 
@@ -77,10 +79,11 @@ docker run -p 5001:5001 hallucinator
 - Web: `DBLP_OFFLINE_PATH` environment variable
 
 ### Key Files
-- `check_hallucinated_references.py` - Core validation logic, CLI interface
-- `app.py` - Flask web application (shares validation logic with CLI)
-- `templates/index.html` - Web UI with embedded JS/CSS
-- `dblp_offline.py` - Offline DBLP database builder and query module
+- `legacy/check_hallucinated_references.py` - Core validation logic, CLI interface (legacy Python)
+- `legacy/app.py` - Flask web application (legacy Python)
+- `legacy/templates/index.html` - Web UI with embedded JS/CSS
+- `legacy/dblp_offline.py` - Offline DBLP database builder and query module (legacy Python)
+- `hallucinator-rs/` - Primary Rust implementation (see workspace structure in README)
 
 ### Validation Result Types
 - **Verified** - Found in database with matching authors

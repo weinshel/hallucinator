@@ -48,10 +48,38 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Open query cache
+    let query_cache = {
+        let cache_path = std::env::var("HALLUCINATOR_CACHE_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                dirs::cache_dir().map(|d| d.join("hallucinator").join("query_cache.db"))
+            });
+
+        if let Some(ref path) = cache_path {
+            match hallucinator_core::cache::QueryCache::open(path) {
+                Ok(cache) => {
+                    cache.evict_expired();
+                    println!("Query cache loaded: {}", path.display());
+                    Some(Arc::new(cache))
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to open query cache: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         dblp_offline_path: dblp_offline_path.map(std::path::PathBuf::from),
         dblp_offline_db,
         dblp_offline_path_display,
+        query_cache,
     });
 
     // Allow large file uploads (500MB)

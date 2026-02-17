@@ -1,3 +1,4 @@
+use hallucinator_core::cache::QueryCache;
 use hallucinator_dblp::DblpDatabase;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -7,4 +8,5 @@ pub struct AppState {
     pub dblp_offline_path: Option<PathBuf>,
     pub dblp_offline_db: Option<Arc<Mutex<DblpDatabase>>>,
     pub dblp_offline_path_display: String,
+    pub query_cache: Option<Arc<QueryCache>>,
 }

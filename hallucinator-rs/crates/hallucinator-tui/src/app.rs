@@ -301,6 +301,8 @@ pub struct App {
     last_fps_instant: Instant,
     /// Measured FPS for display.
     pub measured_fps: f32,
+    /// Shared query cache for database lookups.
+    pub query_cache: Option<std::sync::Arc<hallucinator_core::cache::QueryCache>>,
 }
 
 impl App {
@@ -363,6 +365,7 @@ impl App {
             frame_count: 0,
             last_fps_instant: Instant::now(),
             measured_fps: 0.0,
+            query_cache: None,
         }
     }
 
@@ -590,6 +593,8 @@ impl App {
             } else {
                 Some(self.config_state.crossref_mailto.clone())
             },
+            cache_path: None,
+            query_cache: self.query_cache.clone(),
         }
     }
 

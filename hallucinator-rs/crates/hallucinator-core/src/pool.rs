@@ -198,6 +198,7 @@ async fn drainer_loop(
 ) {
     let timeout = Duration::from_secs(config.db_timeout_secs);
     let rate_limiters = config.rate_limiters.clone();
+    let query_cache = config.query_cache.clone();
 
     while let Ok(job) = rx.recv().await {
         let collector = &job.collector;
@@ -206,6 +207,18 @@ async fn drainer_loop(
         if collector.verified.load(Ordering::Acquire) {
             skip_and_decrement(collector, db.name()).await;
             continue;
+        }
+
+        // Check cache first
+        if let Some(ref qc) = query_cache {
+            if let Some(cached) = qc.get(db.name(), &collector.title) {
+                let rl_result = rate_limit::RateLimitedResult {
+                    result: Ok(cached),
+                    elapsed: Duration::ZERO,
+                };
+                report_result(collector, db.name(), rl_result).await;
+                continue;
+            }
         }
 
         // Query (includes governor acquire + HTTP call)
@@ -217,6 +230,13 @@ async fn drainer_loop(
             &rate_limiters,
         )
         .await;
+
+        // Write successful results to cache
+        if let Some(ref qc) = query_cache {
+            if let Ok(ref result) = rl_result.result {
+                let _ = qc.put(db.name(), &collector.title, result);
+            }
+        }
 
         // Process result and decrement remaining
         report_result(collector, db.name(), rl_result).await;

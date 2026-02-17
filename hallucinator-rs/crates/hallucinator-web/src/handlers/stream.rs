@@ -348,6 +348,7 @@ fn build_config(state: &AppState, fields: &FormFields) -> Config {
         dblp_offline_db: state.dblp_offline_db.clone(),
         disabled_dbs: fields.disabled_dbs.clone(),
         check_openalex_authors: fields.check_openalex_authors,
+        query_cache: state.query_cache.clone(),
         ..Config::default()
     }
 }
@@ -406,7 +407,9 @@ fn send_progress_event(
             sse_event("retry_pass", &RetryPassEvent { count: *count })
         }
         ProgressEvent::Retrying { .. }
-        | ProgressEvent::DatabaseQueryComplete { .. } => {
+        | ProgressEvent::DatabaseQueryComplete { .. }
+        | ProgressEvent::RateLimitWait { .. }
+        | ProgressEvent::RateLimitRetry { .. } => {
             // Not sent via SSE (detail only needed in TUI)
             return;
         }

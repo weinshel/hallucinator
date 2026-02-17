@@ -5,6 +5,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 pub mod authors;
+pub mod cache;
 pub mod checker;
 pub mod db;
 pub mod doi;
@@ -181,6 +182,8 @@ pub struct Config {
     pub crossref_mailto: Option<String>,
     pub max_rate_limit_retries: u32,
     pub rate_limiters: Arc<RateLimiters>,
+    pub cache_path: Option<PathBuf>,
+    pub query_cache: Option<Arc<cache::QueryCache>>,
 }
 
 impl std::fmt::Debug for Config {
@@ -208,6 +211,11 @@ impl std::fmt::Debug for Config {
                 &self.crossref_mailto.as_ref().map(|_| "***"),
             )
             .field("max_rate_limit_retries", &self.max_rate_limit_retries)
+            .field("cache_path", &self.cache_path)
+            .field(
+                "query_cache",
+                &self.query_cache.as_ref().map(|_| "<open>"),
+            )
             .finish()
     }
 }
@@ -229,6 +237,8 @@ impl Default for Config {
             crossref_mailto: None,
             max_rate_limit_retries: 3,
             rate_limiters: Arc::new(RateLimiters::default()),
+            cache_path: None,
+            query_cache: None,
         }
     }
 }

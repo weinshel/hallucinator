@@ -366,6 +366,32 @@ async fn main() -> anyhow::Result<()> {
         app.activity.log(info.clone());
     }
 
+    // Open query cache
+    let query_cache: Option<std::sync::Arc<hallucinator_core::cache::QueryCache>> = {
+        let cache_path = std::env::var("HALLUCINATOR_CACHE_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs::cache_dir().map(|d| d.join("hallucinator").join("query_cache.db")));
+
+        if let Some(ref path) = cache_path {
+            match hallucinator_core::cache::QueryCache::open(path) {
+                Ok(cache) => {
+                    cache.evict_expired();
+                    startup_info.push(format!("Query cache loaded: {}", path.display()));
+                    Some(std::sync::Arc::new(cache))
+                }
+                Err(e) => {
+                    startup_warnings.push(format!("Failed to open query cache: {}", e));
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+    app.query_cache = query_cache;
+
     // Startup hints if no offline DBs configured (logged last so they show first)
     if app.config_state.acl_offline_path.is_empty() {
         app.activity.log_warn(

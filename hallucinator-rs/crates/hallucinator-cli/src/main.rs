@@ -67,6 +67,14 @@ enum Command {
         /// Dry run: extract and print references without querying databases
         #[arg(long)]
         dry_run: bool,
+
+        /// Path to the query cache database (default: platform cache dir)
+        #[arg(long)]
+        cache_path: Option<PathBuf>,
+
+        /// Disable the query result cache
+        #[arg(long)]
+        no_cache: bool,
     },
 
     /// Download and build the offline DBLP database
@@ -80,6 +88,13 @@ enum Command {
         /// Path to store the ACL SQLite database
         path: PathBuf,
     },
+
+    /// Clear the query result cache
+    ClearCache {
+        /// Path to the cache database (default: platform cache dir)
+        #[arg(long)]
+        cache_path: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -90,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::UpdateDblp { path } => update_dblp(&path).await,
         Command::UpdateAcl { path } => update_acl(&path).await,
+        Command::ClearCache { cache_path } => clear_cache(cache_path),
         Command::Check {
             file_path,
             no_color,
@@ -103,6 +119,8 @@ async fn main() -> anyhow::Result<()> {
             num_workers,
             max_rate_limit_retries,
             dry_run,
+            cache_path,
+            no_cache,
         } => {
             if dry_run {
                 dry_run_check(file_path, no_color, output).await
@@ -119,6 +137,8 @@ async fn main() -> anyhow::Result<()> {
                     check_openalex_authors,
                     num_workers,
                     max_rate_limit_retries,
+                    cache_path,
+                    no_cache,
                 )
                 .await
             }
@@ -139,6 +159,8 @@ async fn check(
     check_openalex_authors: bool,
     num_workers: Option<usize>,
     max_rate_limit_retries: Option<u32>,
+    cache_path: Option<PathBuf>,
+    no_cache: bool,
 ) -> anyhow::Result<()> {
     // Resolve configuration: CLI flags > env vars > defaults
     let openalex_key = openalex_key.or_else(|| std::env::var("OPENALEX_KEY").ok());
@@ -293,6 +315,26 @@ async fn check(
         .ok()
         .filter(|s| !s.is_empty());
 
+    // Open query cache (unless --no-cache)
+    let (resolved_cache_path, query_cache) = if no_cache {
+        (None, None)
+    } else {
+        let path = resolve_cache_path(cache_path);
+        match path {
+            Some(ref p) => match hallucinator_core::cache::QueryCache::open(p) {
+                Ok(cache) => {
+                    cache.evict_expired();
+                    (Some(p.clone()), Some(Arc::new(cache)))
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to open query cache: {}", e);
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        }
+    };
+
     // Build config
     let num_workers = num_workers.unwrap_or(4);
     let max_rate_limit_retries = max_rate_limit_retries.unwrap_or(3);
@@ -316,6 +358,8 @@ async fn check(
         crossref_mailto,
         max_rate_limit_retries,
         rate_limiters,
+        cache_path: resolved_cache_path,
+        query_cache,
     };
 
     // Set up progress callback
@@ -908,4 +952,35 @@ async fn update_acl(db_path: &PathBuf) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolve the query cache path from: CLI flag > env var > platform cache dir.
+fn resolve_cache_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = explicit {
+        return Some(p);
+    }
+    if let Ok(p) = std::env::var("HALLUCINATOR_CACHE_PATH") {
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    dirs::cache_dir().map(|d| d.join("hallucinator").join("query_cache.db"))
+}
+
+/// Clear the query result cache.
+fn clear_cache(cache_path: Option<PathBuf>) -> anyhow::Result<()> {
+    let path = resolve_cache_path(cache_path);
+    match path {
+        Some(ref p) => {
+            let cache = hallucinator_core::cache::QueryCache::open(p)?;
+            let count = cache.len();
+            cache.clear();
+            println!("Cleared {} entries from cache at {}", count, p.display());
+            Ok(())
+        }
+        None => {
+            println!("No cache path found (no platform cache directory available)");
+            Ok(())
+        }
+    }
 }

@@ -297,7 +297,7 @@ fn render_concurrency(lines: &mut Vec<Line>, config: &ConfigState, theme: &Theme
         format!("{}", config.max_archive_size_mb)
     };
     let items = [
-        ("Workers", config.num_workers.to_string()),
+        ("Ref Workers", config.num_workers.to_string()),
         (
             "Rate Limit Retries",
             config.max_rate_limit_retries.to_string(),

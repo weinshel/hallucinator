@@ -209,12 +209,17 @@ pub fn render_in(
 
             for db_result in &result.db_results {
                 let (result_text, result_color) = match db_result.status {
-                    DbStatus::Match => ("\u{2713} match", theme.verified),
-                    DbStatus::NoMatch => ("no match", theme.dim),
-                    DbStatus::AuthorMismatch => ("\u{26A0} mismatch", theme.author_mismatch),
-                    DbStatus::Timeout => ("timeout", theme.not_found),
-                    DbStatus::Error => ("error", theme.not_found),
-                    DbStatus::Skipped => ("(skipped)", theme.dim),
+                    DbStatus::Match => ("\u{2713} match".to_string(), theme.verified),
+                    DbStatus::NoMatch => ("no match".to_string(), theme.dim),
+                    DbStatus::AuthorMismatch => {
+                        ("\u{26A0} mismatch".to_string(), theme.author_mismatch)
+                    }
+                    DbStatus::Timeout => ("timeout".to_string(), theme.not_found),
+                    DbStatus::Error => {
+                        let msg = db_result.error_message.as_deref().unwrap_or("error");
+                        (format!("\u{2717} {}", msg), theme.not_found)
+                    }
+                    DbStatus::Skipped => ("(skipped)".to_string(), theme.dim),
                 };
 
                 let time_str = match db_result.elapsed {

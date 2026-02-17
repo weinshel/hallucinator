@@ -30,3 +30,7 @@ fastrand.workspace = true
 unicode-normalization = "0.1"
 urlencoding = "2"
 log = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+http = "1"

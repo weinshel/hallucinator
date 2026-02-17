@@ -18,6 +18,10 @@ impl DatabaseBackend for AclOffline {
         "ACL Anthology"
     }
 
+    fn is_local(&self) -> bool {
+        true
+    }
+
     fn query<'a>(
         &'a self,
         title: &'a str,
@@ -29,7 +33,8 @@ impl DatabaseBackend for AclOffline {
         Box::pin(async move {
             let result = tokio::task::spawn_blocking(move || {
                 let db = db.lock().map_err(|e| DbQueryError::Other(e.to_string()))?;
-                db.query(&title).map_err(|e| DbQueryError::Other(e.to_string()))
+                db.query(&title)
+                    .map_err(|e| DbQueryError::Other(e.to_string()))
             })
             .await
             .map_err(|e| DbQueryError::Other(e.to_string()))??;

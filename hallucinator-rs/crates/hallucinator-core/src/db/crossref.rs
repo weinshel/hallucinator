@@ -49,8 +49,10 @@ impl DatabaseBackend for CrossRef {
                 return Err(DbQueryError::Other(format!("HTTP {}", resp.status())));
             }
 
-            let data: serde_json::Value =
-                resp.json().await.map_err(|e| DbQueryError::Other(e.to_string()))?;
+            let data: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
             let items = data["message"]["items"]
                 .as_array()
                 .cloned()

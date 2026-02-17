@@ -46,8 +46,10 @@ impl DatabaseBackend for PubMed {
                 return Err(DbQueryError::Other(format!("HTTP {}", resp.status())));
             }
 
-            let data: serde_json::Value =
-                resp.json().await.map_err(|e| DbQueryError::Other(e.to_string()))?;
+            let data: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
             let id_list: Vec<String> = data["esearchresult"]["idlist"]
                 .as_array()
                 .map(|arr| {
@@ -75,11 +77,16 @@ impl DatabaseBackend for PubMed {
                 .map_err(|e| DbQueryError::Other(e.to_string()))?;
 
             if !resp.status().is_success() {
-                return Err(DbQueryError::Other(format!("HTTP {} on fetch", resp.status())));
+                return Err(DbQueryError::Other(format!(
+                    "HTTP {} on fetch",
+                    resp.status()
+                )));
             }
 
-            let data: serde_json::Value =
-                resp.json().await.map_err(|e| DbQueryError::Other(e.to_string()))?;
+            let data: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
             let results = &data["result"];
 
             for pmid in &id_list {

@@ -26,13 +26,23 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // ratatui computes the same cell widths and positions columns identically.
     let hdr_style = Style::default().fg(theme.dim).add_modifier(Modifier::BOLD);
 
+    // Find the max in-flight across all DBs for scaling the bar
+    let max_in_flight = activity
+        .db_health
+        .values()
+        .map(|h| h.in_flight)
+        .max()
+        .unwrap_or(0)
+        .max(1);
+
     if !activity.db_health.is_empty() {
         lines.push(Line::from(vec![
             Span::styled(" \u{25CB} ", hdr_style), // ○ placeholder indicator
             Span::styled(format!("{:<14} ", "Database"), hdr_style),
             Span::styled(format!("{:>4} ", "Qry"), hdr_style),
             Span::styled(format!("{:>4} ", "Hits"), hdr_style),
-            Span::styled(format!("{:>6}", "Avg"), hdr_style),
+            Span::styled(format!("{:>6} ", "Avg"), hdr_style),
+            Span::styled("Load", hdr_style),
         ]));
     }
 
@@ -65,6 +75,26 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         } else {
             theme.active
         };
+
+        // Build a tiny load bar (4 chars max) + count
+        let bar_width: usize = 4;
+        let filled = if max_in_flight > 0 && health.in_flight > 0 {
+            ((health.in_flight as f64 / max_in_flight as f64) * bar_width as f64).ceil() as usize
+        } else {
+            0
+        };
+        let bar_label = if health.in_flight > 0 {
+            let bar: String = "\u{2588}".repeat(filled.min(bar_width));
+            format!("{}{}", bar, health.in_flight)
+        } else {
+            String::new()
+        };
+        let bar_color = if health.in_flight > max_in_flight / 2 {
+            Color::Yellow
+        } else {
+            theme.active
+        };
+
         lines.push(Line::from(vec![
             Span::styled(format!(" {} ", indicator), Style::default().fg(name_color)),
             Span::styled(
@@ -79,7 +109,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 format!("{:>4} ", health.hits),
                 Style::default().fg(hits_color),
             ),
-            Span::styled(format!("{:>6}", avg), Style::default().fg(theme.dim)),
+            Span::styled(format!("{:>6} ", avg), Style::default().fg(theme.dim)),
+            Span::styled(bar_label, Style::default().fg(bar_color)),
         ]));
     }
 
@@ -139,21 +170,28 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 
     // Active queries
+    let num_active = activity.active_queries.len();
+
+    let max_visible = 8;
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " Active Queries",
+        if num_active > 0 {
+            format!(" Checking ({})", num_active)
+        } else {
+            " Checking".to_string()
+        },
         Style::default()
             .fg(theme.active)
             .add_modifier(Modifier::BOLD),
     )));
-
     if activity.active_queries.is_empty() {
         lines.push(Line::from(Span::styled(
             " (none)",
             Style::default().fg(theme.dim),
         )));
     } else {
-        for q in activity.active_queries.iter().take(10) {
+        for q in activity.active_queries.iter().take(max_visible) {
             let title_short = if q.ref_title.chars().count() > 25 {
                 let truncated: String = q.ref_title.chars().take(22).collect();
                 format!("{}...", truncated)
@@ -168,9 +206,16 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(title_short, Style::default().fg(theme.dim)),
             ]));
         }
+        if num_active > max_visible {
+            lines.push(Line::from(Span::styled(
+                format!(" +{} more...", num_active - max_visible),
+                Style::default().fg(theme.dim),
+            )));
+        }
     }
 
     // Summary stats
+    let num_workers = app.config_state.num_workers;
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " Summary",
@@ -179,7 +224,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
-        format!(" Total completed: {}", activity.total_completed),
+        format!(" Workers: {}", num_workers),
+        Style::default().fg(theme.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            " In-flight: {} | Completed: {}",
+            num_active, activity.total_completed
+        ),
         Style::default().fg(theme.text),
     )));
     lines.push(Line::from(Span::styled(

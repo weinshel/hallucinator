@@ -1161,6 +1161,7 @@ dependencies = [
  "hallucinator-acl",
  "hallucinator-dblp",
  "hallucinator-pdf",
+ "http",
  "log",
  "once_cell",
  "quick-xml",
@@ -1219,6 +1220,7 @@ name = "hallucinator-tui"
 version = "0.1.1-alpha.2"
 dependencies = [
  "anyhow",
+ "async-channel",
  "base64",
  "chrono",
  "clap",

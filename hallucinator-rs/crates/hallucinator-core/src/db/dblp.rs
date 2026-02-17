@@ -19,6 +19,10 @@ impl DatabaseBackend for DblpOffline {
         "DBLP"
     }
 
+    fn is_local(&self) -> bool {
+        true
+    }
+
     fn query<'a>(
         &'a self,
         title: &'a str,
@@ -30,7 +34,8 @@ impl DatabaseBackend for DblpOffline {
         Box::pin(async move {
             let result = tokio::task::spawn_blocking(move || {
                 let db = db.lock().map_err(|e| DbQueryError::Other(e.to_string()))?;
-                db.query(&title).map_err(|e| DbQueryError::Other(e.to_string()))
+                db.query(&title)
+                    .map_err(|e| DbQueryError::Other(e.to_string()))
             })
             .await
             .map_err(|e| DbQueryError::Other(e.to_string()))??;
@@ -74,8 +79,10 @@ impl DatabaseBackend for DblpOnline {
                 return Err(DbQueryError::Other(format!("HTTP {}", resp.status())));
             }
 
-            let data: serde_json::Value =
-                resp.json().await.map_err(|e| DbQueryError::Other(e.to_string()))?;
+            let data: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
             let hits = data["result"]["hits"]["hit"]
                 .as_array()
                 .cloned()

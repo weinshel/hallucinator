@@ -21,7 +21,7 @@ from hallucinator import (
 
 def test_validator_config_defaults():
     config = ValidatorConfig()
-    assert config.max_concurrent_refs == 4
+    assert config.num_workers == 4
     assert config.db_timeout_secs == 10
     assert config.db_timeout_short_secs == 5
     assert config.disabled_dbs == []
@@ -37,7 +37,7 @@ def test_validator_config_setters():
     config = ValidatorConfig()
     config.openalex_key = "test-key"
     config.s2_api_key = "s2-key"
-    config.max_concurrent_refs = 8
+    config.num_workers = 8
     config.db_timeout_secs = 20
     config.db_timeout_short_secs = 3
     config.disabled_dbs = ["openalex", "neurips"]
@@ -46,7 +46,7 @@ def test_validator_config_setters():
 
     assert config.openalex_key == "test-key"
     assert config.s2_api_key == "s2-key"
-    assert config.max_concurrent_refs == 8
+    assert config.num_workers == 8
     assert config.db_timeout_secs == 20
     assert config.db_timeout_short_secs == 3
     assert config.disabled_dbs == ["openalex", "neurips"]
@@ -66,7 +66,7 @@ def test_validator_config_repr():
     config = ValidatorConfig()
     r = repr(config)
     assert "ValidatorConfig" in r
-    assert "max_concurrent_refs=4" in r
+    assert "num_workers=4" in r
 
 
 # ── Validator construction ──
@@ -297,3 +297,173 @@ def test_stats_from_results():
     stats = Validator.stats(results)
     assert stats.total == 1
     assert stats.verified + stats.not_found + stats.author_mismatch == 1
+
+
+# ── Rate Limiting Config ──
+
+
+def test_max_rate_limit_retries_default():
+    config = ValidatorConfig()
+    assert config.max_rate_limit_retries == 3
+
+
+def test_max_rate_limit_retries_setter():
+    config = ValidatorConfig()
+    config.max_rate_limit_retries = 5
+    assert config.max_rate_limit_retries == 5
+    config.max_rate_limit_retries = 0
+    assert config.max_rate_limit_retries == 0
+
+
+def test_crossref_mailto_affects_validator():
+    """Setting crossref_mailto should not raise on Validator construction."""
+    config = ValidatorConfig()
+    config.crossref_mailto = "test@example.com"
+    assert config.crossref_mailto == "test@example.com"
+    # Validator constructs RateLimiters based on crossref_mailto presence
+    validator = Validator(config)
+    assert repr(validator).startswith("Validator(")
+
+
+# ── Offline Validation (all DBs disabled, no network) ──
+
+
+def _make_ref(title):
+    """Create a reference with the given title using PdfExtractor."""
+    ext = PdfExtractor()
+    ref = ext.parse_reference(
+        f'J. Smith, "{title}," in Proc. IEEE, 2023.'
+    )
+    return ref
+
+
+def _disabled_config(**overrides):
+    """Config with all real databases disabled (no HTTP calls)."""
+    config = ValidatorConfig()
+    config.disabled_dbs = [
+        "CrossRef",
+        "arXiv",
+        "DBLP",
+        "Semantic Scholar",
+        "ACL Anthology",
+        "Europe PMC",
+        "PubMed",
+        "OpenAlex",
+    ]
+    for k, v in overrides.items():
+        setattr(config, k, v)
+    return config
+
+
+def test_offline_single_ref_returns_not_found():
+    """With all DBs disabled, a reference should be not_found."""
+    ref = _make_ref("A Paper About Testing Offline Validation Paths")
+    assert ref is not None
+
+    config = _disabled_config()
+    validator = Validator(config)
+    results = validator.check([ref])
+
+    assert len(results) == 1
+    assert results[0].status == "not_found"
+    assert results[0].title  # non-empty
+
+
+def test_offline_multiple_refs():
+    """Multiple refs with all DBs disabled — all should be not_found."""
+    refs = []
+    for i in range(5):
+        ref = _make_ref(f"Test Paper Number {i} About Offline Rate Limiting")
+        assert ref is not None
+        refs.append(ref)
+
+    config = _disabled_config(num_workers=2)
+    validator = Validator(config)
+    results = validator.check(refs)
+
+    assert len(results) == 5
+    for r in results:
+        assert r.status == "not_found"
+
+
+def test_offline_progress_events():
+    """Progress events are emitted during offline validation."""
+    ref = _make_ref("A Paper About Testing Progress Event Emission")
+    assert ref is not None
+
+    events = []
+
+    def on_progress(event):
+        events.append(event)
+
+    config = _disabled_config()
+    validator = Validator(config)
+    results = validator.check([ref], progress=on_progress)
+
+    assert len(results) == 1
+
+    # Should have received checking and result events
+    event_types = [e.event_type for e in events]
+    assert "checking" in event_types, f"expected 'checking' in {event_types}"
+    assert "result" in event_types, f"expected 'result' in {event_types}"
+
+    # Verify checking event properties
+    checking = [e for e in events if e.event_type == "checking"][0]
+    assert checking.index == 0
+    assert checking.total == 1
+    assert checking.title is not None
+
+    # Verify result event properties
+    result_event = [e for e in events if e.event_type == "result"][0]
+    assert result_event.index == 0
+    assert result_event.total == 1
+    assert result_event.result is not None
+    assert result_event.result.status == "not_found"
+
+
+def test_offline_stats():
+    """Stats from offline validation — all not_found."""
+    refs = []
+    for title in [
+        "First Paper About Offline Statistics Testing Methods",
+        "Second Paper About Offline Statistics Testing Methods",
+        "Third Paper About Offline Statistics Testing Methods",
+    ]:
+        ref = _make_ref(title)
+        assert ref is not None
+        refs.append(ref)
+
+    config = _disabled_config()
+    validator = Validator(config)
+    results = validator.check(refs)
+
+    stats = Validator.stats(results)
+    assert stats.total == 3
+    assert stats.not_found == 3
+    assert stats.verified == 0
+    assert stats.author_mismatch == 0
+
+
+def test_offline_max_rate_limit_retries_propagates():
+    """max_rate_limit_retries is accepted and doesn't break offline validation."""
+    ref = _make_ref("A Paper About Testing Retry Configuration Propagation")
+    assert ref is not None
+
+    config = _disabled_config(max_rate_limit_retries=0)
+    validator = Validator(config)
+    results = validator.check([ref])
+    assert len(results) == 1
+
+
+def test_offline_db_results_empty():
+    """With all DBs disabled, db_results should be empty."""
+    ref = _make_ref("A Paper About Testing Empty Database Result Lists")
+    assert ref is not None
+
+    config = _disabled_config()
+    validator = Validator(config)
+    results = validator.check([ref])
+
+    assert len(results) == 1
+    assert results[0].db_results == []
+    assert results[0].failed_dbs == []

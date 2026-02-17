@@ -8,6 +8,8 @@ pub struct DbHealth {
     pub failed: usize,
     pub hits: usize,
     pub avg_response_ms: f64,
+    /// Number of queries currently in flight for this DB.
+    pub in_flight: usize,
 }
 
 impl DbHealth {
@@ -18,11 +20,13 @@ impl DbHealth {
             failed: 0,
             hits: 0,
             avg_response_ms: 0.0,
+            in_flight: 0,
         }
     }
 
     pub fn record(&mut self, success: bool, is_match: bool, elapsed_ms: f64) {
         self.total_queries += 1;
+        self.in_flight = self.in_flight.saturating_sub(1);
         if success {
             self.successful += 1;
         } else {
@@ -58,6 +62,7 @@ impl DbHealth {
 pub struct ActiveQuery {
     pub db_name: String,
     pub ref_title: String,
+    pub is_retry: bool,
 }
 
 /// State for the activity panel.
@@ -101,6 +106,24 @@ impl ActivityState {
             self.messages.pop_front();
         }
         self.messages.push_back((msg, true));
+    }
+
+    /// Increment in-flight count for all given DBs (called on Checking).
+    pub fn increment_in_flight(&mut self, db_names: &[String]) {
+        for name in db_names {
+            let health = self
+                .db_health
+                .entry(name.clone())
+                .or_insert_with(DbHealth::new);
+            health.in_flight += 1;
+        }
+    }
+
+    /// Decrement in-flight for a DB that was skipped (early exit).
+    pub fn decrement_in_flight(&mut self, db_name: &str) {
+        if let Some(health) = self.db_health.get_mut(db_name) {
+            health.in_flight = health.in_flight.saturating_sub(1);
+        }
     }
 
     pub fn record_db_complete(

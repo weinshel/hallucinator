@@ -43,8 +43,10 @@ impl DatabaseBackend for OpenAlex {
                 return Err(DbQueryError::Other(format!("HTTP {}", resp.status())));
             }
 
-            let data: serde_json::Value =
-                resp.json().await.map_err(|e| DbQueryError::Other(e.to_string()))?;
+            let data: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| DbQueryError::Other(e.to_string()))?;
             let results = data["results"].as_array().cloned().unwrap_or_default();
 
             for item in results.iter().take(5) {

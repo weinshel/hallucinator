@@ -289,8 +289,9 @@ async fn check(
         return Ok(());
     }
 
-    let crossref_mailto: Option<String> =
-        std::env::var("CROSSREF_MAILTO").ok().filter(|s| !s.is_empty());
+    let crossref_mailto: Option<String> = std::env::var("CROSSREF_MAILTO")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     // Build config
     let num_workers = num_workers.unwrap_or(4);

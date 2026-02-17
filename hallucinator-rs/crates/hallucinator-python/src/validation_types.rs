@@ -180,6 +180,12 @@ impl PyDbResult {
         self.inner.paper_url.as_deref()
     }
 
+    /// Error message if the query failed, or None.
+    #[getter]
+    fn error_message(&self) -> Option<&str> {
+        self.inner.error_message.as_deref()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "DbResult(db={:?}, status={:?}, elapsed_ms={:?})",
@@ -353,6 +359,7 @@ impl PyProgressEvent {
             ProgressEvent::Checking { .. } => "checking",
             ProgressEvent::Result { .. } => "result",
             ProgressEvent::Warning { .. } => "warning",
+            ProgressEvent::Retrying { .. } => "retrying",
             ProgressEvent::RetryPass { .. } => "retry_pass",
             ProgressEvent::DatabaseQueryComplete { .. } => "db_query_complete",
             ProgressEvent::RateLimitWait { .. } => "rate_limit_wait",
@@ -360,34 +367,37 @@ impl PyProgressEvent {
         }
     }
 
-    /// Index of the reference (for checking/result/warning events).
+    /// Index of the reference (for checking/result/warning/retrying events).
     #[getter]
     fn index(&self) -> Option<usize> {
         match &self.inner {
-            ProgressEvent::Checking { index, .. } => Some(*index),
-            ProgressEvent::Result { index, .. } => Some(*index),
-            ProgressEvent::Warning { index, .. } => Some(*index),
+            ProgressEvent::Checking { index, .. }
+            | ProgressEvent::Result { index, .. }
+            | ProgressEvent::Warning { index, .. }
+            | ProgressEvent::Retrying { index, .. } => Some(*index),
             _ => None,
         }
     }
 
-    /// Total number of references (for checking/result/warning events).
+    /// Total number of references (for checking/result/warning/retrying events).
     #[getter]
     fn total(&self) -> Option<usize> {
         match &self.inner {
-            ProgressEvent::Checking { total, .. } => Some(*total),
-            ProgressEvent::Result { total, .. } => Some(*total),
-            ProgressEvent::Warning { total, .. } => Some(*total),
+            ProgressEvent::Checking { total, .. }
+            | ProgressEvent::Result { total, .. }
+            | ProgressEvent::Warning { total, .. }
+            | ProgressEvent::Retrying { total, .. } => Some(*total),
             _ => None,
         }
     }
 
-    /// Reference title (for checking/warning events).
+    /// Reference title (for checking/warning/retrying events).
     #[getter]
     fn title(&self) -> Option<&str> {
         match &self.inner {
-            ProgressEvent::Checking { title, .. } => Some(title),
-            ProgressEvent::Warning { title, .. } => Some(title),
+            ProgressEvent::Checking { title, .. }
+            | ProgressEvent::Warning { title, .. }
+            | ProgressEvent::Retrying { title, .. } => Some(title),
             _ => None,
         }
     }
@@ -401,11 +411,12 @@ impl PyProgressEvent {
         }
     }
 
-    /// List of failed databases (for warning events).
+    /// List of failed databases (for warning/retrying events).
     #[getter]
     fn failed_dbs(&self) -> Option<Vec<String>> {
         match &self.inner {
-            ProgressEvent::Warning { failed_dbs, .. } => Some(failed_dbs.clone()),
+            ProgressEvent::Warning { failed_dbs, .. }
+            | ProgressEvent::Retrying { failed_dbs, .. } => Some(failed_dbs.clone()),
             _ => None,
         }
     }
@@ -507,6 +518,15 @@ impl PyProgressEvent {
             } => format!(
                 "ProgressEvent(type='warning', index={}, total={}, title={:?})",
                 index, total, title,
+            ),
+            ProgressEvent::Retrying {
+                index,
+                total,
+                title,
+                failed_dbs,
+            } => format!(
+                "ProgressEvent(type='retrying', index={}, total={}, title={:?}, failed_dbs={:?})",
+                index, total, title, failed_dbs,
             ),
             ProgressEvent::RetryPass { count } => {
                 format!("ProgressEvent(type='retry_pass', count={})", count)

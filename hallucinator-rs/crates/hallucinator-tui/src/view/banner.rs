@@ -825,6 +825,7 @@ pub fn render_logo_bar(
     tip_index: usize,
     tick: usize,
     tip_change_tick: usize,
+    stats_line: Option<Line<'static>>,
 ) -> Rect {
     // For very small terminals, skip entirely
     if area.height < 8 {
@@ -878,6 +879,12 @@ pub fn render_logo_bar(
             Span::styled(icon_line.to_string(), Style::default().fg(theme.text)),
         ]));
     }
+    // Row 3: blank separator, Row 4: stats
+    if let Some(stats) = stats_line {
+        logo_lines.push(Line::raw(""));
+        logo_lines.push(stats);
+    }
+
     f.render_widget(Paragraph::new(logo_lines), cols[0]);
 
     // ── Right: Tip pane ──

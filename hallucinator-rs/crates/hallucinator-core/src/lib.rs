@@ -17,7 +17,7 @@ pub mod retraction;
 // Re-export for convenience
 pub use hallucinator_pdf::{ExtractionResult, Reference, SkipStats};
 pub use orchestrator::{DbSearchResult, query_all_databases};
-pub use rate_limit::{DbQueryError, RateLimiters};
+pub use rate_limit::{DbQueryError, RateLimitedResult, RateLimiters};
 
 /// Status of a single database query within an orchestrator run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +38,7 @@ pub struct DbResult {
     pub elapsed: Option<Duration>,
     pub found_authors: Vec<String>,
     pub paper_url: Option<String>,
+    pub error_message: Option<String>,
 }
 
 #[derive(Error, Debug)]
@@ -125,6 +126,13 @@ pub enum ProgressEvent {
     },
     RetryPass {
         count: usize,
+    },
+    /// A ref is being retried (handed off from main worker to retry worker).
+    Retrying {
+        index: usize,
+        total: usize,
+        title: String,
+        failed_dbs: Vec<String>,
     },
     DatabaseQueryComplete {
         paper_index: usize,

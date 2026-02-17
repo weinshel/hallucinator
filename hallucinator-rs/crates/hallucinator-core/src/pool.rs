@@ -1,16 +1,27 @@
-//! Global reference validation pool with shared worker tasks.
+//! Per-DB drainer pool for reference validation.
 //!
-//! Replaces per-paper semaphores with a single mpmc work queue.
-//! Workers process refs from any paper, with cancellation via oneshot drop.
+//! Architecture: one dedicated drainer task per enabled remote DB, plus
+//! coordinator tasks that handle DOI + local DBs inline before fanning out
+//! to per-DB drainer queues. Each drainer is the sole consumer of its DB's
+//! rate limiter, eliminating governor contention.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::checker::{check_single_reference, check_single_reference_retry};
-use crate::{Config, DbResult, ProgressEvent, Reference, Status, ValidationResult};
+use crate::authors::validate_authors;
+use crate::db::DatabaseBackend;
+use crate::orchestrator::{build_database_list, query_local_databases};
+use crate::rate_limit;
+use crate::{
+    ArxivInfo, Config, DbResult, DbStatus, ProgressEvent, Reference, Status, ValidationResult,
+};
+
+// ── Public API (unchanged) ──────────────────────────────────────────────
 
 /// A reference validation job submitted to the pool.
 pub struct RefJob {
@@ -22,40 +33,84 @@ pub struct RefJob {
     pub progress: Arc<dyn Fn(ProgressEvent) + Send + Sync>,
 }
 
-/// A pool of worker tasks that process reference validation jobs.
+/// A pool of coordinator + drainer tasks that process reference validation jobs.
 ///
 /// Submit jobs via [`submit()`](ValidationPool::submit), receive results via
 /// the oneshot receiver returned with each job.
 pub struct ValidationPool {
     job_tx: async_channel::Sender<RefJob>,
-    workers_handle: JoinHandle<()>,
+    pool_handle: JoinHandle<()>,
 }
 
 impl ValidationPool {
-    /// Create a new pool with `num_workers` concurrent workers.
+    /// Create a new pool with `num_workers` coordinator tasks.
+    ///
+    /// One drainer task is spawned per enabled remote DB. Coordinators handle
+    /// DOI + local DBs inline, then fan out to per-DB drainer queues.
     pub fn new(config: Arc<Config>, cancel: CancellationToken, num_workers: usize) -> Self {
         let (job_tx, job_rx) = async_channel::unbounded::<RefJob>();
         let client = reqwest::Client::new();
 
-        let workers_handle = tokio::spawn(async move {
-            let mut handles = Vec::with_capacity(num_workers);
-            for _ in 0..num_workers {
-                let rx = job_rx.clone();
-                let config = config.clone();
-                let cancel = cancel.clone();
-                let client = client.clone();
-                handles.push(tokio::spawn(worker_loop(rx, config, client, cancel)));
+        // Build database list and partition into local/remote
+        let all_dbs: Vec<Arc<dyn DatabaseBackend>> = build_database_list(&config, None)
+            .into_iter()
+            .map(Arc::from)
+            .collect();
+        let (local_dbs, remote_dbs): (Vec<_>, Vec<_>) =
+            all_dbs.into_iter().partition(|db| db.is_local());
+
+        // Spawn one drainer per remote DB.
+        let mut drainer_txs: Vec<(String, async_channel::Sender<DrainerJob>)> = Vec::new();
+        let mut drainer_handles: Vec<JoinHandle<()>> = Vec::new();
+
+        for db in remote_dbs {
+            let (tx, rx) = async_channel::unbounded::<DrainerJob>();
+            drainer_txs.push((db.name().to_string(), tx));
+            drainer_handles.push(tokio::spawn(drainer_loop(
+                rx,
+                Arc::clone(&db),
+                config.clone(),
+                client.clone(),
+            )));
+        }
+
+        let drainer_txs = Arc::new(drainer_txs);
+
+        // Spawn coordinator tasks
+        let pool_handle = tokio::spawn(async move {
+            let mut coord_handles = Vec::with_capacity(num_workers.max(1));
+
+            for _ in 0..num_workers.max(1) {
+                coord_handles.push(tokio::spawn(coordinator_loop(
+                    job_rx.clone(),
+                    config.clone(),
+                    client.clone(),
+                    cancel.clone(),
+                    local_dbs.clone(),
+                    drainer_txs.clone(),
+                )));
             }
-            // Drop our clone of the receiver so workers can exit when sender closes
+
+            // Drop our clone so coordinators are the last holders
             drop(job_rx);
-            for h in handles {
+
+            // Wait for coordinators to finish (they exit when job_tx closes)
+            for h in coord_handles {
+                let _ = h.await;
+            }
+
+            // All coordinator Arc<drainer_txs> clones are dropped.
+            // Drop the last reference -> senders close -> drainers drain and exit.
+            drop(drainer_txs);
+
+            for h in drainer_handles {
                 let _ = h.await;
             }
         });
 
         Self {
             job_tx,
-            workers_handle,
+            pool_handle,
         }
     }
 
@@ -69,19 +124,354 @@ impl ValidationPool {
         let _ = self.job_tx.send(job).await;
     }
 
-    /// Close the pool and wait for all workers to finish.
+    /// Close the pool and wait for all coordinators and drainers to finish.
     pub async fn shutdown(self) {
         self.job_tx.close();
-        let _ = self.workers_handle.await;
+        let _ = self.pool_handle.await;
     }
 }
 
-/// Worker loop: receive jobs, process them, send results via oneshot.
-async fn worker_loop(
+// ── Internal types ──────────────────────────────────────────────────────
+
+/// Per-ref aggregation hub. Created by a coordinator, shared by all drainers
+/// working on that ref. The last drainer to decrement `remaining` calls
+/// [`finalize_collector`].
+struct RefCollector {
+    reference: Reference,
+    ref_index: usize,
+    total: usize,
+    title: String,
+    progress: Arc<dyn Fn(ProgressEvent) + Send + Sync>,
+    config: Arc<Config>,
+    client: reqwest::Client,
+
+    /// Number of drainers still to report. Each drainer decrements once.
+    remaining: AtomicUsize,
+    /// Set to true when any drainer verifies. Other drainers check this to skip work.
+    verified: AtomicBool,
+
+    /// Aggregation state (single Mutex, held briefly).
+    state: Mutex<AggState>,
+
+    /// Oneshot sender, taken exactly once by [`finalize_collector`].
+    result_tx: Mutex<Option<oneshot::Sender<ValidationResult>>>,
+
+    /// DB results from the local phase (carried forward for merging).
+    local_result: crate::orchestrator::DbSearchResult,
+}
+
+/// Mutable aggregation state protected by a Mutex.
+struct AggState {
+    verified_info: Option<VerifiedInfo>,
+    first_mismatch: Option<MismatchInfo>,
+    failed_dbs: Vec<String>,
+    db_results: Vec<DbResult>,
+}
+
+struct VerifiedInfo {
+    source: String,
+    found_authors: Vec<String>,
+    paper_url: Option<String>,
+}
+
+struct MismatchInfo {
+    source: String,
+    found_authors: Vec<String>,
+    paper_url: Option<String>,
+}
+
+/// A job submitted to a drainer's queue.
+struct DrainerJob {
+    collector: Arc<RefCollector>,
+}
+
+// ── Drainer ─────────────────────────────────────────────────────────────
+
+/// Drainer task for a remote DB. Processes refs sequentially at the DB's natural
+/// rate. Multiple drainers may share a channel for the same DB to pipeline
+/// requests when response time exceeds the governor interval.
+async fn drainer_loop(
+    rx: async_channel::Receiver<DrainerJob>,
+    db: Arc<dyn DatabaseBackend>,
+    config: Arc<Config>,
+    client: reqwest::Client,
+) {
+    let timeout = Duration::from_secs(config.db_timeout_secs);
+    let rate_limiters = config.rate_limiters.clone();
+
+    while let Ok(job) = rx.recv().await {
+        let collector = &job.collector;
+
+        // Skip if already verified by another drainer
+        if collector.verified.load(Ordering::Acquire) {
+            skip_and_decrement(collector, db.name()).await;
+            continue;
+        }
+
+        // Query (includes governor acquire + HTTP call)
+        let rl_result = rate_limit::query_with_rate_limit(
+            db.as_ref(),
+            &collector.title,
+            &client,
+            timeout,
+            &rate_limiters,
+        )
+        .await;
+
+        // Process result and decrement remaining
+        report_result(collector, db.name(), rl_result).await;
+    }
+}
+
+/// Emit a Skipped event and decrement the collector's remaining counter.
+async fn skip_and_decrement(collector: &RefCollector, db_name: &str) {
+    (collector.progress)(ProgressEvent::DatabaseQueryComplete {
+        paper_index: 0,
+        ref_index: collector.ref_index,
+        db_name: db_name.to_string(),
+        status: DbStatus::Skipped,
+        elapsed: Duration::ZERO,
+    });
+
+    {
+        let mut state = collector.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.db_results.push(DbResult {
+            db_name: db_name.to_string(),
+            status: DbStatus::Skipped,
+            elapsed: None,
+            found_authors: vec![],
+            paper_url: None,
+            error_message: None,
+        });
+    }
+
+    if collector.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+        finalize_collector(collector).await;
+    }
+}
+
+/// Process a DB query result, update the collector's aggregation state,
+/// and decrement the remaining counter (finalizing if last).
+async fn report_result(
+    collector: &RefCollector,
+    db_name: &str,
+    rl_result: rate_limit::RateLimitedResult,
+) {
+    let elapsed = rl_result.elapsed;
+    let check_openalex_authors = collector.config.check_openalex_authors;
+
+    match rl_result.result {
+        Ok((Some(_found_title), found_authors, paper_url)) => {
+            let ref_authors = &collector.reference.authors;
+            if ref_authors.is_empty() || validate_authors(ref_authors, &found_authors) {
+                // Verified — set flag so other drainers can skip
+                collector.verified.store(true, Ordering::Release);
+
+                (collector.progress)(ProgressEvent::DatabaseQueryComplete {
+                    paper_index: 0,
+                    ref_index: collector.ref_index,
+                    db_name: db_name.to_string(),
+                    status: DbStatus::Match,
+                    elapsed,
+                });
+
+                let mut state = collector.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.db_results.push(DbResult {
+                    db_name: db_name.to_string(),
+                    status: DbStatus::Match,
+                    elapsed: Some(elapsed),
+                    found_authors: found_authors.clone(),
+                    paper_url: paper_url.clone(),
+                    error_message: None,
+                });
+                if state.verified_info.is_none() {
+                    state.verified_info = Some(VerifiedInfo {
+                        source: db_name.to_string(),
+                        found_authors,
+                        paper_url,
+                    });
+                }
+            } else {
+                // Author mismatch
+                (collector.progress)(ProgressEvent::DatabaseQueryComplete {
+                    paper_index: 0,
+                    ref_index: collector.ref_index,
+                    db_name: db_name.to_string(),
+                    status: DbStatus::AuthorMismatch,
+                    elapsed,
+                });
+
+                let mut state = collector.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.db_results.push(DbResult {
+                    db_name: db_name.to_string(),
+                    status: DbStatus::AuthorMismatch,
+                    elapsed: Some(elapsed),
+                    found_authors: found_authors.clone(),
+                    paper_url: paper_url.clone(),
+                    error_message: None,
+                });
+                if state.first_mismatch.is_none()
+                    && (db_name != "OpenAlex" || check_openalex_authors)
+                {
+                    state.first_mismatch = Some(MismatchInfo {
+                        source: db_name.to_string(),
+                        found_authors,
+                        paper_url,
+                    });
+                }
+            }
+        }
+        Ok((None, _, _)) => {
+            (collector.progress)(ProgressEvent::DatabaseQueryComplete {
+                paper_index: 0,
+                ref_index: collector.ref_index,
+                db_name: db_name.to_string(),
+                status: DbStatus::NoMatch,
+                elapsed,
+            });
+
+            let mut state = collector.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.db_results.push(DbResult {
+                db_name: db_name.to_string(),
+                status: DbStatus::NoMatch,
+                elapsed: Some(elapsed),
+                found_authors: vec![],
+                paper_url: None,
+                error_message: None,
+            });
+        }
+        Err(err) => {
+            (collector.progress)(ProgressEvent::DatabaseQueryComplete {
+                paper_index: 0,
+                ref_index: collector.ref_index,
+                db_name: db_name.to_string(),
+                status: DbStatus::Error,
+                elapsed,
+            });
+
+            let mut state = collector.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.db_results.push(DbResult {
+                db_name: db_name.to_string(),
+                status: DbStatus::Error,
+                elapsed: Some(elapsed),
+                found_authors: vec![],
+                paper_url: None,
+                error_message: Some(err.to_string()),
+            });
+            log::debug!("{}: {}", db_name, err);
+            state.failed_dbs.push(db_name.to_string());
+        }
+    }
+
+    if collector.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+        finalize_collector(collector).await;
+    }
+}
+
+/// Build the final result and send it on the oneshot channel.
+///
+/// Called exactly once, by whichever drainer decrements `remaining` to 0.
+async fn finalize_collector(collector: &RefCollector) {
+    let (status, source, found_authors, paper_url, remote_failed_dbs, remote_db_results) = {
+        let state = collector.state.lock().unwrap_or_else(|e| e.into_inner());
+
+        if let Some(ref v) = state.verified_info {
+            (
+                Status::Verified,
+                Some(v.source.clone()),
+                v.found_authors.clone(),
+                v.paper_url.clone(),
+                state.failed_dbs.clone(),
+                state.db_results.clone(),
+            )
+        } else if let Some(ref m) = state.first_mismatch {
+            (
+                Status::AuthorMismatch,
+                Some(m.source.clone()),
+                m.found_authors.clone(),
+                m.paper_url.clone(),
+                state.failed_dbs.clone(),
+                state.db_results.clone(),
+            )
+        } else {
+            (
+                Status::NotFound,
+                None,
+                vec![],
+                None,
+                state.failed_dbs.clone(),
+                state.db_results.clone(),
+            )
+        }
+    };
+
+    // Merge local + remote results
+    let mut all_db_results = collector.local_result.db_results.clone();
+    all_db_results.extend(remote_db_results);
+
+    let mut all_failed_dbs = collector.local_result.failed_dbs.clone();
+    all_failed_dbs.extend(remote_failed_dbs);
+
+    // Retraction check if verified (briefly blocks the last drainer)
+    let retraction_info = if status == Status::Verified {
+        check_retraction_for_title(
+            &collector.title,
+            &collector.client,
+            Duration::from_secs(collector.config.db_timeout_secs),
+            collector.config.crossref_mailto.as_deref(),
+        )
+        .await
+    } else {
+        None
+    };
+
+    let result = ValidationResult {
+        title: collector.title.clone(),
+        raw_citation: collector.reference.raw_citation.clone(),
+        ref_authors: collector.reference.authors.clone(),
+        status,
+        source,
+        found_authors,
+        paper_url,
+        failed_dbs: all_failed_dbs,
+        db_results: all_db_results,
+        doi_info: None,
+        arxiv_info: collector.reference.arxiv_id.as_ref().map(|id| ArxivInfo {
+            arxiv_id: id.clone(),
+            valid: false,
+            title: None,
+        }),
+        retraction_info,
+    };
+
+    emit_final_events(
+        collector.progress.as_ref(),
+        &result,
+        collector.ref_index,
+        collector.total,
+        &collector.title,
+    );
+
+    let tx = collector
+        .result_tx
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(tx) = tx {
+        let _ = tx.send(result);
+    }
+}
+
+// ── Coordinator ─────────────────────────────────────────────────────────
+
+/// Coordinator loop: pick a ref, run DOI + local DBs inline, fan out to drainers.
+async fn coordinator_loop(
     job_rx: async_channel::Receiver<RefJob>,
     config: Arc<Config>,
     client: reqwest::Client,
     cancel: CancellationToken,
+    local_dbs: Vec<Arc<dyn DatabaseBackend>>,
+    drainer_txs: Arc<Vec<(String, async_channel::Sender<DrainerJob>)>>,
 ) {
     while let Ok(job) = job_rx.recv().await {
         if cancel.is_cancelled() {
@@ -90,7 +480,7 @@ async fn worker_loop(
 
         let RefJob {
             reference,
-            mut result_tx,
+            result_tx,
             ref_index,
             total,
             progress,
@@ -105,93 +495,280 @@ async fn worker_loop(
             title: title.clone(),
         });
 
-        // Build per-ref DB completion callback
-        let progress_for_db = progress.clone();
-        let on_db_complete = move |db_result: DbResult| {
-            progress_for_db(ProgressEvent::DatabaseQueryComplete {
-                paper_index: 0, // overridden by TUI layer
-                ref_index,
-                db_name: db_result.db_name.clone(),
-                status: db_result.status.clone(),
-                elapsed: db_result.elapsed.unwrap_or_default(),
-            });
-        };
-
-        // First pass — cancellable via oneshot drop or CancellationToken
-        let result = tokio::select! {
-            biased;
-            _ = result_tx.closed() => continue,
-            _ = cancel.cancelled() => break,
-            result = check_single_reference(&reference, &config, &client, false, Some(&on_db_complete)) => result,
-        };
-
-        // Inline retry if NotFound with failed DBs
-        let final_result = if result.status == Status::NotFound && !result.failed_dbs.is_empty() {
-            let failed_dbs = result.failed_dbs.clone();
-
-            // Rebuild the callback for retry (the previous one was moved)
-            let progress_for_retry = progress.clone();
-            let on_retry_complete = move |db_result: DbResult| {
-                progress_for_retry(ProgressEvent::DatabaseQueryComplete {
+        // --- DOI fast path (inline, typically <100ms) ---
+        if let Some(result) = check_doi_fast(&reference, &config, &client).await {
+            // Emit Skipped for all DBs (local + remote)
+            for db in &local_dbs {
+                (progress)(ProgressEvent::DatabaseQueryComplete {
                     paper_index: 0,
                     ref_index,
-                    db_name: db_result.db_name.clone(),
-                    status: db_result.status.clone(),
-                    elapsed: db_result.elapsed.unwrap_or_default(),
+                    db_name: db.name().to_string(),
+                    status: DbStatus::Skipped,
+                    elapsed: Duration::ZERO,
                 });
-            };
-
-            let retry = tokio::select! {
-                biased;
-                _ = result_tx.closed() => continue,
-                _ = cancel.cancelled() => break,
-                retry = check_single_reference_retry(
-                    &reference, &config, &client, &failed_dbs, Some(&on_retry_complete)
-                ) => retry,
-            };
-
-            if retry.status != Status::NotFound {
-                retry
-            } else {
-                result
             }
-        } else {
-            result
-        };
-
-        // Emit warning if some databases failed/timed out
-        if !final_result.failed_dbs.is_empty() {
-            let context = match final_result.status {
-                Status::NotFound => "not found in other DBs".to_string(),
-                Status::Verified => format!(
-                    "verified via {}",
-                    final_result.source.as_deref().unwrap_or("unknown")
-                ),
-                Status::AuthorMismatch => format!(
-                    "author mismatch via {}",
-                    final_result.source.as_deref().unwrap_or("unknown")
-                ),
-            };
-            progress(ProgressEvent::Warning {
-                index: ref_index,
-                total,
-                title: title.clone(),
-                failed_dbs: final_result.failed_dbs.clone(),
-                message: format!(
-                    "{} timed out; {}",
-                    final_result.failed_dbs.join(", "),
-                    context
-                ),
-            });
+            for (db_name, _) in drainer_txs.iter() {
+                (progress)(ProgressEvent::DatabaseQueryComplete {
+                    paper_index: 0,
+                    ref_index,
+                    db_name: db_name.clone(),
+                    status: DbStatus::Skipped,
+                    elapsed: Duration::ZERO,
+                });
+            }
+            emit_final_events(progress.as_ref(), &result, ref_index, total, &title);
+            let _ = result_tx.send(result);
+            continue;
         }
 
-        // Emit Result event
-        progress(ProgressEvent::Result {
-            index: ref_index,
+        // --- Local DB phase (inline, <1ms) ---
+        let db_complete_cb = make_db_callback(progress.clone(), ref_index);
+        let local_result = query_local_databases(
+            &title,
+            &reference.authors,
+            &config,
+            &client,
+            false,
+            None,
+            Some(&db_complete_cb),
+        )
+        .await;
+
+        if local_result.status == Status::Verified {
+            // query_local_databases already emitted Skipped for remaining DBs
+            // (including remote) via the on_db_complete callback
+            let result = build_validation_result(&reference, &title, local_result, None);
+            emit_final_events(progress.as_ref(), &result, ref_index, total, &title);
+            let _ = result_tx.send(result);
+            continue;
+        }
+
+        // --- Fan out to drainer queues ---
+        if drainer_txs.is_empty() {
+            // No remote DBs enabled — build result from local phase
+            let result = build_validation_result(&reference, &title, local_result, None);
+            emit_final_events(progress.as_ref(), &result, ref_index, total, &title);
+            let _ = result_tx.send(result);
+            continue;
+        }
+
+        let collector = Arc::new(RefCollector {
+            reference,
+            ref_index,
             total,
-            result: Box::new(final_result.clone()),
+            title,
+            progress,
+            config: config.clone(),
+            client: client.clone(),
+            remaining: AtomicUsize::new(drainer_txs.len()),
+            verified: AtomicBool::new(false),
+            state: Mutex::new(AggState {
+                verified_info: None,
+                first_mismatch: if local_result.status == Status::AuthorMismatch {
+                    Some(MismatchInfo {
+                        source: local_result.source.clone().unwrap_or_default(),
+                        found_authors: local_result.found_authors.clone(),
+                        paper_url: local_result.paper_url.clone(),
+                    })
+                } else {
+                    None
+                },
+                failed_dbs: vec![],
+                db_results: vec![],
+            }),
+            result_tx: Mutex::new(Some(result_tx)),
+            local_result,
         });
 
-        let _ = result_tx.send(final_result);
+        for (_, tx) in drainer_txs.iter() {
+            let _ = tx.try_send(DrainerJob {
+                collector: collector.clone(),
+            });
+        }
+    }
+}
+
+// ── Helpers (unchanged from previous implementation) ────────────────────
+
+/// Build per-ref DB completion callback.
+fn make_db_callback(
+    progress: Arc<dyn Fn(ProgressEvent) + Send + Sync>,
+    ref_index: usize,
+) -> impl Fn(DbResult) + Send + Sync {
+    move |db_result: DbResult| {
+        progress(ProgressEvent::DatabaseQueryComplete {
+            paper_index: 0,
+            ref_index,
+            db_name: db_result.db_name.clone(),
+            status: db_result.status.clone(),
+            elapsed: db_result.elapsed.unwrap_or_default(),
+        });
+    }
+}
+
+/// Emit Warning + Result progress events.
+fn emit_final_events(
+    progress: &(dyn Fn(ProgressEvent) + Send + Sync),
+    result: &ValidationResult,
+    ref_index: usize,
+    total: usize,
+    title: &str,
+) {
+    if !result.failed_dbs.is_empty() {
+        let context = match result.status {
+            Status::NotFound => "not found in other DBs".to_string(),
+            Status::Verified => format!(
+                "verified via {}",
+                result.source.as_deref().unwrap_or("unknown")
+            ),
+            Status::AuthorMismatch => format!(
+                "author mismatch via {}",
+                result.source.as_deref().unwrap_or("unknown")
+            ),
+        };
+        progress(ProgressEvent::Warning {
+            index: ref_index,
+            total,
+            title: title.to_string(),
+            failed_dbs: result.failed_dbs.clone(),
+            message: format!("{} timed out; {}", result.failed_dbs.join(", "), context),
+        });
+    }
+
+    progress(ProgressEvent::Result {
+        index: ref_index,
+        total,
+        result: Box::new(result.clone()),
+    });
+}
+
+/// DOI fast path: check DOI inline if present.
+async fn check_doi_fast(
+    reference: &Reference,
+    config: &Config,
+    client: &reqwest::Client,
+) -> Option<ValidationResult> {
+    use crate::doi::{DoiMatchResult, check_doi_match, validate_doi};
+    use crate::retraction::check_retraction;
+    use crate::{DoiInfo, RetractionInfo};
+
+    let doi = reference.doi.as_ref()?;
+    let title = reference.title.as_deref().unwrap_or("");
+    let timeout = std::time::Duration::from_secs(config.db_timeout_secs);
+
+    let doi_result = validate_doi(doi, client, timeout).await;
+    let match_result = check_doi_match(&doi_result, title, &reference.authors);
+
+    let doi_info = Some(DoiInfo {
+        doi: doi.clone(),
+        valid: doi_result.valid,
+        title: doi_result.title.clone(),
+    });
+
+    match match_result {
+        DoiMatchResult::Verified { doi_authors, .. } => {
+            let retraction =
+                check_retraction(doi, client, timeout, config.crossref_mailto.as_deref()).await;
+            let retraction_info = if retraction.retracted {
+                Some(RetractionInfo {
+                    is_retracted: true,
+                    retraction_doi: retraction.retraction_doi,
+                    retraction_source: retraction.retraction_type,
+                })
+            } else {
+                None
+            };
+
+            Some(ValidationResult {
+                title: title.to_string(),
+                raw_citation: reference.raw_citation.clone(),
+                ref_authors: reference.authors.clone(),
+                status: Status::Verified,
+                source: Some("DOI".into()),
+                found_authors: doi_authors,
+                paper_url: Some(format!("https://doi.org/{}", doi)),
+                failed_dbs: vec![],
+                db_results: vec![DbResult {
+                    db_name: "DOI".into(),
+                    status: DbStatus::Match,
+                    elapsed: None,
+                    found_authors: vec![],
+                    paper_url: Some(format!("https://doi.org/{}", doi)),
+                    error_message: None,
+                }],
+                doi_info,
+                arxiv_info: None,
+                retraction_info,
+            })
+        }
+        DoiMatchResult::AuthorMismatch { doi_authors, .. } => Some(ValidationResult {
+            title: title.to_string(),
+            raw_citation: reference.raw_citation.clone(),
+            ref_authors: reference.authors.clone(),
+            status: Status::AuthorMismatch,
+            source: Some("DOI".into()),
+            found_authors: doi_authors,
+            paper_url: Some(format!("https://doi.org/{}", doi)),
+            failed_dbs: vec![],
+            db_results: vec![DbResult {
+                db_name: "DOI".into(),
+                status: DbStatus::AuthorMismatch,
+                elapsed: None,
+                found_authors: vec![],
+                paper_url: Some(format!("https://doi.org/{}", doi)),
+                error_message: None,
+            }],
+            doi_info,
+            arxiv_info: None,
+            retraction_info: None,
+        }),
+        _ => None,
+    }
+}
+
+/// Build ValidationResult from a DbSearchResult.
+fn build_validation_result(
+    reference: &Reference,
+    title: &str,
+    db_result: crate::orchestrator::DbSearchResult,
+    retraction_info: Option<crate::RetractionInfo>,
+) -> ValidationResult {
+    ValidationResult {
+        title: title.to_string(),
+        raw_citation: reference.raw_citation.clone(),
+        ref_authors: reference.authors.clone(),
+        status: db_result.status,
+        source: db_result.source,
+        found_authors: db_result.found_authors,
+        paper_url: db_result.paper_url,
+        failed_dbs: db_result.failed_dbs,
+        db_results: db_result.db_results,
+        doi_info: None,
+        arxiv_info: reference.arxiv_id.as_ref().map(|id| ArxivInfo {
+            arxiv_id: id.clone(),
+            valid: false,
+            title: None,
+        }),
+        retraction_info,
+    }
+}
+
+/// Check retraction by title, returning info if retracted.
+async fn check_retraction_for_title(
+    title: &str,
+    client: &reqwest::Client,
+    timeout: std::time::Duration,
+    mailto: Option<&str>,
+) -> Option<crate::RetractionInfo> {
+    let retraction =
+        crate::retraction::check_retraction_by_title(title, client, timeout, mailto).await;
+    if retraction.retracted {
+        Some(crate::RetractionInfo {
+            is_retracted: true,
+            retraction_doi: retraction.retraction_doi,
+            retraction_source: retraction.retraction_type,
+        })
+    } else {
+        None
     }
 }

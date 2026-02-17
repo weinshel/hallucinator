@@ -11,6 +11,9 @@ pub mod pubmed;
 pub mod semantic_scholar;
 pub mod ssrn;
 
+#[cfg(test)]
+pub(crate) mod mock;
+
 use std::future::Future;
 use std::pin::Pin;
 
@@ -24,6 +27,11 @@ pub type DbQueryResult = (Option<String>, Vec<String>, Option<String>);
 pub trait DatabaseBackend: Send + Sync {
     /// The canonical name of this database (e.g., "CrossRef", "arXiv").
     fn name(&self) -> &str;
+
+    /// Whether this backend is local (offline SQLite, etc.) and needs no rate limiting.
+    fn is_local(&self) -> bool {
+        false
+    }
 
     /// Query the database for a paper matching the given title.
     fn query<'a>(

@@ -211,6 +211,12 @@ pub fn normalize_title(title: &str) -> String {
 }
 
 /// Check if two titles match using fuzzy comparison (95% threshold).
+///
+/// Includes conservative prefix matching: if a shorter title is a prefix of a
+/// longer one but they differ on subtitle presence (text after `?` or `!`),
+/// the match is rejected unless there is ≥70% length coverage. This prevents
+/// false matches like `"Won't Somebody Think of the Children?"` matching
+/// `"Won't somebody think of the children?" Examining COPPA...` (different papers).
 pub fn titles_match(title_a: &str, title_b: &str) -> bool {
     let norm_a = normalize_title(title_a);
     let norm_b = normalize_title(title_b);
@@ -220,7 +226,49 @@ pub fn titles_match(title_a: &str, title_b: &str) -> bool {
     }
 
     let score = rapidfuzz::fuzz::ratio(norm_a.chars(), norm_b.chars());
-    score >= 0.95
+    if score >= 0.95 {
+        return true;
+    }
+
+    // Conservative prefix matching with subtitle awareness
+    let (shorter, longer) = if norm_a.len() <= norm_b.len() {
+        (&norm_a, &norm_b)
+    } else {
+        (&norm_b, &norm_a)
+    };
+
+    // Only attempt prefix matching for titles of meaningful length
+    if shorter.len() < 30 {
+        return false;
+    }
+
+    if !longer.starts_with(shorter.as_str()) {
+        return false;
+    }
+
+    // Check subtitle awareness: does one title have text after ?/! that the other doesn't?
+    let has_subtitle = |t: &str| {
+        // Check the raw (non-normalized) title for ? or ! followed by more text
+        let lower = t.to_lowercase();
+        if let Some(pos) = lower.rfind(['?', '!']) {
+            // There's meaningful text after the ? or !
+            lower[pos + 1..].chars().any(|c| c.is_alphanumeric())
+        } else {
+            false
+        }
+    };
+
+    let a_has_subtitle = has_subtitle(title_a);
+    let b_has_subtitle = has_subtitle(title_b);
+
+    if a_has_subtitle != b_has_subtitle {
+        // One has a subtitle, the other doesn't — require ≥70% length coverage
+        let coverage = shorter.len() as f64 / longer.len() as f64;
+        return coverage >= 0.70;
+    }
+
+    // Both have or both lack subtitles — accept the prefix match
+    true
 }
 
 #[cfg(test)]
@@ -548,5 +596,41 @@ mod tests {
             "Déjà Vu: Side-Channel Analysis of Randomization",
             "Deja Vu: Side-Channel Analysis of Randomization"
         ));
+    }
+
+    // =========================================================================
+    // Conservative prefix matching with subtitle awareness
+    // =========================================================================
+
+    #[test]
+    fn test_prefix_subtitle_mismatch_rejects() {
+        // Different papers: one ends at "?" and the other continues with a subtitle
+        assert!(!titles_match(
+            "Won't Somebody Think of the Children?",
+            "Won't somebody think of the children? Examining COPPA compliance at scale"
+        ));
+    }
+
+    #[test]
+    fn test_prefix_both_have_subtitle_accepts() {
+        // Same base title, both have subtitles — should match via prefix
+        assert!(titles_match(
+            "Attention is all you need: Transformers for sequence modeling",
+            "Attention is all you need: Transformers for sequence modeling and beyond"
+        ));
+    }
+
+    #[test]
+    fn test_prefix_exact_match_still_works() {
+        assert!(titles_match(
+            "A very long title about detecting hallucinated references in academic papers",
+            "A very long title about detecting hallucinated references in academic papers"
+        ));
+    }
+
+    #[test]
+    fn test_prefix_short_title_no_prefix_match() {
+        // Short titles (< 30 normalized chars) should not trigger prefix matching
+        assert!(!titles_match("Short title", "Short title with extra words"));
     }
 }

@@ -3,13 +3,17 @@ use std::path::Path;
 use mupdf::{Document, TextPageFlags};
 
 use crate::PdfError;
+use crate::config::PdfParsingConfig;
 use crate::text_processing::expand_ligatures;
 
 /// Extract text from a PDF file using MuPDF.
 ///
 /// Opens the PDF, iterates all pages, extracts text from each,
 /// joins with newlines, and expands typographic ligatures.
-pub fn extract_text_from_pdf(pdf_path: &Path) -> Result<String, PdfError> {
+///
+/// If `config.footer_exclusion_height_ratio` is set, text blocks in the
+/// bottom portion of each page (based on the ratio) will be excluded.
+pub fn extract_text_from_pdf(pdf_path: &Path, config: &PdfParsingConfig) -> Result<String, PdfError> {
     let path_str = pdf_path
         .to_str()
         .ok_or_else(|| PdfError::OpenError("invalid path encoding".into()))?;
@@ -27,9 +31,26 @@ pub fn extract_text_from_pdf(pdf_path: &Path) -> Result<String, PdfError> {
             .to_text_page(TextPageFlags::empty())
             .map_err(|e| PdfError::ExtractionError(e.to_string()))?;
 
+        // Get page bounds for footer exclusion
+        let page_bounds = page.bounds().map_err(|e| PdfError::ExtractionError(e.to_string()))?;
+        let page_height = page_bounds.y1 - page_bounds.y0;
+
+        // Calculate footer threshold if configured
+        let footer_threshold = config.footer_exclusion_height_ratio
+            .map(|ratio| page_bounds.y1 - (page_height * ratio as f32));
+
         // Use block/line iteration to match PyMuPDF's get_text() behavior
         let mut page_text = String::new();
         for block in text_page.blocks() {
+            // Check if block is in footer region
+            if let Some(threshold) = footer_threshold {
+                let block_bounds = block.bounds();
+                // Skip blocks whose top edge is below the footer threshold
+                if block_bounds.y0 >= threshold {
+                    continue;
+                }
+            }
+
             for line in block.lines() {
                 let line_text: String = line
                     .chars()

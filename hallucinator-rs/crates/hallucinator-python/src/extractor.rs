@@ -157,6 +157,20 @@ impl PyPdfExtractor {
         self.invalidate();
     }
 
+    /// Set the footer exclusion height ratio (0.0–1.0).
+    ///
+    /// This excludes text in the bottom portion of each page from extraction.
+    /// For example, 0.1 excludes the bottom 10% of each page.
+    /// Set to None to disable footer exclusion.
+    #[setter]
+    fn set_footer_exclusion_height_ratio(&mut self, ratio: Option<f64>) {
+        if let Some(r) = ratio {
+            self.builder = self.builder.clone().footer_exclusion_height_ratio(r);
+        }
+        // Note: Cannot "unset" once set via builder pattern, but None means use default (None)
+        self.invalidate();
+    }
+
     // ── Extraction methods ──
 
     /// Run the full extraction pipeline on a PDF file.

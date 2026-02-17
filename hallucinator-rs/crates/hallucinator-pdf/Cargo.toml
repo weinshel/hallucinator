@@ -20,3 +20,10 @@ thiserror.workspace = true
 zip = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
+
+[dev-dependencies]
+hallucinator-bbl = { workspace = true }
+hallucinator-core = { workspace = true }
+rapidfuzz = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }

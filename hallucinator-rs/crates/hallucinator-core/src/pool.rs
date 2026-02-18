@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::authors::validate_authors;
+use crate::db::searxng::Searxng;
 use crate::db::DatabaseBackend;
 use crate::orchestrator::{build_database_list, query_local_databases};
 use crate::rate_limit;
@@ -405,6 +406,37 @@ async fn finalize_collector(collector: &RefCollector) {
         }
     };
 
+    // SearxNG fallback for NotFound references
+    let (status, source, found_authors, paper_url, remote_db_results) =
+        if status == Status::NotFound {
+            if let Some(ref searxng_url) = collector.config.searxng_url {
+                let searxng = Searxng::new(searxng_url.clone());
+                let timeout = Duration::from_secs(collector.config.db_timeout_secs);
+
+                if let Ok((Some(_found_title), _, url)) =
+                    searxng.query(&collector.title, &collector.client, timeout).await
+                {
+                    // Web search found the paper
+                    let mut db_results = remote_db_results;
+                    db_results.push(DbResult {
+                        db_name: "Web Search".into(),
+                        status: DbStatus::Match,
+                        elapsed: None,
+                        found_authors: vec![],
+                        paper_url: url.clone(),
+                        error_message: None,
+                    });
+                    (Status::Verified, Some("Web Search".into()), vec![], url, db_results)
+                } else {
+                    (status, source, found_authors, paper_url, remote_db_results)
+                }
+            } else {
+                (status, source, found_authors, paper_url, remote_db_results)
+            }
+        } else {
+            (status, source, found_authors, paper_url, remote_db_results)
+        };
+
     // Merge local + remote results
     let mut all_db_results = collector.local_result.db_results.clone();
     all_db_results.extend(remote_db_results);
@@ -545,8 +577,52 @@ async fn coordinator_loop(
 
         // --- Fan out to drainer queues ---
         if drainer_txs.is_empty() {
-            // No remote DBs enabled — build result from local phase
-            let result = build_validation_result(&reference, &title, local_result, None);
+            // No remote DBs enabled — try SearxNG fallback if configured
+            let result = if local_result.status == Status::NotFound {
+                if let Some(ref searxng_url) = config.searxng_url {
+                    let searxng = Searxng::new(searxng_url.clone());
+                    let timeout = Duration::from_secs(config.db_timeout_secs);
+
+                    if let Ok((Some(_), _, url)) =
+                        searxng.query(&title, &client, timeout).await
+                    {
+                        // Web search found the paper
+                        let mut db_results = local_result.db_results.clone();
+                        db_results.push(DbResult {
+                            db_name: "Web Search".into(),
+                            status: DbStatus::Match,
+                            elapsed: None,
+                            found_authors: vec![],
+                            paper_url: url.clone(),
+                            error_message: None,
+                        });
+                        ValidationResult {
+                            title: title.clone(),
+                            raw_citation: reference.raw_citation.clone(),
+                            ref_authors: reference.authors.clone(),
+                            status: Status::Verified,
+                            source: Some("Web Search".into()),
+                            found_authors: vec![],
+                            paper_url: url,
+                            failed_dbs: local_result.failed_dbs.clone(),
+                            db_results,
+                            doi_info: None,
+                            arxiv_info: reference.arxiv_id.as_ref().map(|id| ArxivInfo {
+                                arxiv_id: id.clone(),
+                                valid: false,
+                                title: None,
+                            }),
+                            retraction_info: None,
+                        }
+                    } else {
+                        build_validation_result(&reference, &title, local_result, None)
+                    }
+                } else {
+                    build_validation_result(&reference, &title, local_result, None)
+                }
+            } else {
+                build_validation_result(&reference, &title, local_result, None)
+            };
             emit_final_events(progress.as_ref(), &result, ref_index, total, &title);
             let _ = result_tx.send(result);
             continue;

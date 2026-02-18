@@ -293,6 +293,10 @@ pub struct App {
     pub extracted_count: usize,
     /// Number of `run_batch_with_offset` tasks still running.
     inflight_batches: usize,
+    /// Rate limiters for the current run (shared with backend for backoff state).
+    pub current_rate_limiters: Option<std::sync::Arc<hallucinator_core::RateLimiters>>,
+    /// Query cache for the current run (shared with backend for cache stats).
+    pub current_query_cache: Option<std::sync::Arc<hallucinator_core::QueryCache>>,
     /// Frame counter for FPS measurement.
     frame_count: u32,
     /// Last time FPS was sampled.
@@ -358,6 +362,8 @@ impl App {
             archive_streaming_name: None,
             extracted_count: 0,
             inflight_batches: 0,
+            current_rate_limiters: None,
+            current_query_cache: None,
             frame_count: 0,
             last_fps_instant: Instant::now(),
             measured_fps: 0.0,
@@ -525,6 +531,9 @@ impl App {
 
         if let Some(tx) = &self.backend_cmd_tx {
             let config = self.build_config();
+            // Keep references to rate limiters and cache for the activity panel
+            self.current_rate_limiters = Some(config.rate_limiters.clone());
+            self.current_query_cache = config.query_cache.clone();
             let _ = tx.send(BackendCommand::ProcessFiles {
                 files: real_files,
                 starting_index: 0,
@@ -1868,6 +1877,16 @@ impl App {
 
     /// Clear the query cache (both in-memory and on-disk).
     fn clear_query_cache(&mut self) {
+        // Prefer the live cache handle — clears both L1 DashMap and L2 SQLite,
+        // and VACUUM runs on the same connection so there's no locking conflict.
+        if let Some(ref cache) = self.current_query_cache {
+            cache.clear();
+            self.config_state.cache_clear_status = Some("Cache cleared".to_string());
+            self.activity.log("Query cache cleared".to_string());
+            return;
+        }
+
+        // No live cache — open a temporary handle to clear the file on disk.
         let cache_path = if self.config_state.cache_path.is_empty() {
             None
         } else {

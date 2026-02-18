@@ -114,13 +114,13 @@ impl AdaptiveDbLimiter {
         }
     }
 
-    /// If 60s have passed since the last 429, restore the original rate.
+    /// If 30s have passed since the last 429, restore the original rate.
     fn try_decay(&self) {
         let should_restore = self
             .last_429
             .lock()
             .ok()
-            .and_then(|last| last.map(|t| t.elapsed().as_secs() >= 60))
+            .and_then(|last| last.map(|t| t.elapsed().as_secs() >= 30))
             .unwrap_or(false);
 
         if should_restore && self.current_factor.load(Ordering::SeqCst) > 1 {
@@ -192,6 +192,14 @@ impl RateLimiters {
     pub fn get(&self, db_name: &str) -> Option<&AdaptiveDbLimiter> {
         self.limiters.get(db_name)
     }
+
+    /// Return the current backoff factor for a database (1 = normal, 2/4/8/16 = throttled).
+    pub fn backoff_factor(&self, db_name: &str) -> u32 {
+        self.limiters
+            .get(db_name)
+            .map(|l| l.current_factor.load(Ordering::Relaxed))
+            .unwrap_or(1)
+    }
 }
 
 /// Check if an HTTP response is a 429 and extract Retry-After if present.
@@ -247,14 +255,18 @@ pub async fn query_with_rate_limit(
     rate_limiters: &RateLimiters,
     cache: Option<&QueryCache>,
 ) -> RateLimitedResult {
-    // Check cache before making any network request or waiting on the governor
-    if let Some(c) = cache {
-        if let Some(cached_result) = c.get(title, db.name()) {
-            log::debug!("{}: cache hit for {:?}", db.name(), title);
-            return RateLimitedResult {
-                result: Ok(cached_result),
-                elapsed: Duration::ZERO,
-            };
+    // Check cache before making any network request or waiting on the governor.
+    // Skip cache for local/offline backends — they have their own SQLite DBs.
+    let use_cache = !db.is_local();
+    if use_cache {
+        if let Some(c) = cache {
+            if let Some(cached_result) = c.get(title, db.name()) {
+                log::debug!("{}: cache hit for {:?}", db.name(), title);
+                return RateLimitedResult {
+                    result: Ok(cached_result),
+                    elapsed: Duration::ZERO,
+                };
+            }
         }
     }
 
@@ -304,10 +316,13 @@ pub async fn query_with_rate_limit(
         Err(other) => Err(other),
     };
 
-    // Cache successful results (found or not-found); never cache errors
-    if let Ok(ref query_result) = result {
-        if let Some(c) = cache {
-            c.insert(title, db.name(), query_result);
+    // Cache successful results (found or not-found); never cache errors.
+    // Skip cache for local/offline backends.
+    if use_cache {
+        if let Ok(ref query_result) = result {
+            if let Some(c) = cache {
+                c.insert(title, db.name(), query_result);
+            }
         }
     }
 
@@ -439,16 +454,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decay_restores_after_60s() {
+    async fn decay_restores_after_30s() {
         let limiter = AdaptiveDbLimiter::per_second(10);
         limiter.on_rate_limited();
         limiter.on_rate_limited();
         assert_eq!(limiter.current_factor.load(Ordering::SeqCst), 4);
 
-        // Manually backdate last_429 to 61 seconds ago
+        // Manually backdate last_429 to 31 seconds ago
         {
             let mut last = limiter.last_429.lock().unwrap();
-            *last = Some(Instant::now() - Duration::from_secs(61));
+            *last = Some(Instant::now() - Duration::from_secs(31));
         }
 
         // acquire() calls try_decay() internally

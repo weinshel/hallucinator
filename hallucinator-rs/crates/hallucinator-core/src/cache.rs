@@ -181,6 +181,8 @@ impl SqliteStore {
 
     fn clear(&self) {
         let _ = self.conn.execute("DELETE FROM query_cache", []);
+        // Reclaim disk space — without VACUUM the deleted pages stay as free pages.
+        let _ = self.conn.execute_batch("VACUUM");
     }
 
     /// Remove all expired entries from the database.

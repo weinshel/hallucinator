@@ -8,7 +8,7 @@
 //! it cannot verify authors - it only confirms the paper exists on the web.
 
 use super::{DatabaseBackend, DbQueryError, DbQueryResult};
-use crate::matching::titles_match;
+use crate::matching::normalize_title;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -24,6 +24,42 @@ impl Searxng {
     pub fn new(base_url: String) -> Self {
         Self { base_url }
     }
+}
+
+/// Lenient title matching for web search results.
+/// More permissive than `titles_match` since we just need to confirm the paper exists.
+/// Uses substring matching and a lower similarity threshold.
+fn titles_match_lenient(reference_title: &str, search_title: &str) -> bool {
+    let norm_ref = normalize_title(reference_title);
+    let norm_search = normalize_title(search_title);
+
+    if norm_ref.is_empty() || norm_search.is_empty() {
+        return false;
+    }
+
+    // Exact match
+    if norm_ref == norm_search {
+        return true;
+    }
+
+    // Fuzzy match with lower threshold (85% instead of 95%)
+    let score = rapidfuzz::fuzz::ratio(norm_ref.chars(), norm_search.chars());
+    if score >= 0.85 {
+        return true;
+    }
+
+    // Substring match: if the search result contains the reference title
+    // (handles "Date Paper Title - Venue" patterns)
+    if norm_ref.len() >= 15 && norm_search.contains(&norm_ref) {
+        return true;
+    }
+
+    // Also check if reference contains the search result
+    if norm_search.len() >= 15 && norm_ref.contains(&norm_search) {
+        return true;
+    }
+
+    false
 }
 
 /// Check if a URL is from an academic domain.
@@ -131,8 +167,8 @@ impl DatabaseBackend for Searxng {
                     continue;
                 }
 
-                // Verify the title matches (fuzzy matching)
-                if titles_match(title, &result.title) {
+                // Verify the title matches (lenient matching for web search)
+                if titles_match_lenient(title, &result.title) {
                     // Return found result - no authors available from web search
                     return Ok((Some(result.title), vec![], Some(result.url)));
                 }
@@ -160,5 +196,47 @@ mod tests {
         assert!(!is_academic_url("https://github.com/user/repo"));
         assert!(!is_academic_url("https://medium.com/article"));
         assert!(!is_academic_url("https://random-blog.com/post"));
+    }
+
+    #[test]
+    fn test_titles_match_lenient_exact() {
+        assert!(titles_match_lenient(
+            "Attention Is All You Need",
+            "Attention Is All You Need"
+        ));
+    }
+
+    #[test]
+    fn test_titles_match_lenient_with_suffix() {
+        // Reference title should match search result with venue suffix
+        assert!(titles_match_lenient(
+            "Oasis: A universe in a transformer",
+            "Oasis: A Universe in a Transformer - OpenReview"
+        ));
+    }
+
+    #[test]
+    fn test_titles_match_lenient_with_prefix() {
+        // Search result with date prefix
+        assert!(titles_match_lenient(
+            "Oasis: A universe in a transformer",
+            "October 31, 2024 Oasis: A Universe in a Transformer"
+        ));
+    }
+
+    #[test]
+    fn test_titles_match_lenient_case_insensitive() {
+        assert!(titles_match_lenient(
+            "attention is all you need",
+            "ATTENTION IS ALL YOU NEED"
+        ));
+    }
+
+    #[test]
+    fn test_titles_match_lenient_rejects_different() {
+        assert!(!titles_match_lenient(
+            "Attention Is All You Need",
+            "BERT: Pre-training of Deep Bidirectional Transformers"
+        ));
     }
 }

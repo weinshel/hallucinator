@@ -46,7 +46,7 @@ Pro-tip: The offline DBLP database indexes millions of CS publications for insta
 Pro-tip: "Author mismatch" might mean the LLM invented a plausible-sounding author list
 Pro-tip: Built by the iDRAMA Lab -- because the drama of fake citations needed investigating
 Pro-tip: Jeremy Blackburn studies online harms at Binghamton -- fake refs are just another kind of harm
-Pro-tip: Gianluca Stringhini at Boston University has 100+ papers on security -- all real, we checked
+Pro-tip: Gianluca Stringhini hunted fake accounts, bots, and disinfo for 20 years -- LLMs just gave him a new prey
 #Pro-tip: The iDRAMA Lab has studied everything from hate speech to memes to radicalization pipelines
 Pro-tip: This project is AGPL-3.0 licensed -- free as in freedom, free as in catching fraud
 Pro-tip: Europe PMC and PubMed coverage means biomedical hallucinations don't escape either

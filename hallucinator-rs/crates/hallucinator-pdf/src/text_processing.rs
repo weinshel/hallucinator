@@ -111,14 +111,16 @@ pub(crate) fn fix_hyphenation_with_config(text: &str, config: &PdfParsingConfig)
             return format!("{}-{}", before, after_word);
         }
 
-        // If the word after the hyphen starts with uppercase, it's likely a compound
-        // proper noun (e.g., "Over-The-Air", "Up-To-Date"), not a syllable break.
-        // Syllable breaks like "detec-\ntion" have lowercase continuation.
-        let after_is_titlecase = after_char
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_uppercase());
-        if after_is_titlecase {
+        // If the word after the hyphen is a small connector word starting with uppercase,
+        // it's likely a compound proper noun (e.g., "Over-The-Air", "Up-To-Date").
+        // But if it's a longer word starting with uppercase (like "Bridge" in "Base-Bridge"),
+        // it's likely CamelCase that broke across lines — remove the hyphen.
+        static HYPHEN_CONNECTORS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+            ["The", "To", "Of", "In", "On", "Up", "Out", "At", "By", "For", "And", "Or", "A", "An"]
+                .into_iter()
+                .collect()
+        });
+        if HYPHEN_CONNECTORS.contains(after_word.as_str()) {
             return format!("{}-{}", before, after_word);
         }
 
@@ -222,5 +224,13 @@ mod tests {
         // But lowercase is still treated as syllable break
         assert_eq!(fix_hyphenation("detec-\ntion"), "detection");
         assert_eq!(fix_hyphenation("classi-\nfication"), "classification");
+    }
+
+    #[test]
+    fn test_fix_hyphenation_camelcase() {
+        // Issue #169: CamelCase words broken across lines should have hyphen removed
+        assert_eq!(fix_hyphenation("Base- Bridge"), "BaseBridge");
+        assert_eq!(fix_hyphenation("Base-\nBridge"), "BaseBridge");
+        assert_eq!(fix_hyphenation("Smart- Phone"), "SmartPhone");
     }
 }

@@ -115,11 +115,7 @@ fn merge(base: ConfigFile, overlay: ConfigFile) -> ConfigFile {
                 .databases
                 .as_ref()
                 .and_then(|d| d.cache_path.clone())
-                .or_else(|| {
-                    base.databases
-                        .as_ref()
-                        .and_then(|d| d.cache_path.clone())
-                }),
+                .or_else(|| base.databases.as_ref().and_then(|d| d.cache_path.clone())),
             disabled: overlay
                 .databases
                 .as_ref()

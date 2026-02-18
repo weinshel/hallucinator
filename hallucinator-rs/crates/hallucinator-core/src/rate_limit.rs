@@ -258,16 +258,15 @@ pub async fn query_with_rate_limit(
     // Check cache before making any network request or waiting on the governor.
     // Skip cache for local/offline backends — they have their own SQLite DBs.
     let use_cache = !db.is_local();
-    if use_cache {
-        if let Some(c) = cache {
-            if let Some(cached_result) = c.get(title, db.name()) {
-                log::debug!("{}: cache hit for {:?}", db.name(), title);
-                return RateLimitedResult {
-                    result: Ok(cached_result),
-                    elapsed: Duration::ZERO,
-                };
-            }
-        }
+    if use_cache
+        && let Some(c) = cache
+        && let Some(cached_result) = c.get(title, db.name())
+    {
+        log::debug!("{}: cache hit for {:?}", db.name(), title);
+        return RateLimitedResult {
+            result: Ok(cached_result),
+            elapsed: Duration::ZERO,
+        };
     }
 
     // Skip rate limiting for local/offline backends (SQLite queries need no throttling)
@@ -318,12 +317,11 @@ pub async fn query_with_rate_limit(
 
     // Cache successful results (found or not-found); never cache errors.
     // Skip cache for local/offline backends.
-    if use_cache {
-        if let Ok(ref query_result) = result {
-            if let Some(c) = cache {
-                c.insert(title, db.name(), query_result);
-            }
-        }
+    if use_cache
+        && let Ok(ref query_result) = result
+        && let Some(c) = cache
+    {
+        c.insert(title, db.name(), query_result);
     }
 
     RateLimitedResult {
@@ -526,9 +524,15 @@ mod tests {
         let client = reqwest::Client::new();
         let limiters = RateLimiters::new(false, false);
 
-        let rl_result =
-            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, None)
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "A Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            None,
+        )
+        .await;
 
         assert!(rl_result.result.is_ok());
         let (title, _, _) = rl_result.result.unwrap();
@@ -547,9 +551,15 @@ mod tests {
         let client = reqwest::Client::new();
         let limiters = RateLimiters::new(false, false);
 
-        let rl_result =
-            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, None)
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "A Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            None,
+        )
+        .await;
 
         assert!(rl_result.result.is_err());
         // Called twice: initial attempt + one retry after honoring Retry-After
@@ -562,9 +572,15 @@ mod tests {
         let client = reqwest::Client::new();
         let limiters = RateLimiters::new(false, false);
 
-        let rl_result =
-            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, None)
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "A Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            None,
+        )
+        .await;
 
         assert!(rl_result.result.is_err());
         assert_eq!(db.call_count(), 1);
@@ -585,18 +601,30 @@ mod tests {
         let cache = QueryCache::default();
 
         // First call: cache miss, queries DB
-        let rl_result =
-            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "A Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            Some(&cache),
+        )
+        .await;
         assert!(rl_result.result.is_ok());
         assert_eq!(db.call_count(), 1);
         assert_eq!(cache.hits(), 0);
         assert_eq!(cache.misses(), 1);
 
         // Second call: cache hit, skips DB
-        let rl_result =
-            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "A Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            Some(&cache),
+        )
+        .await;
         assert!(rl_result.result.is_ok());
         assert_eq!(db.call_count(), 1); // still 1 — DB not called again
         assert_eq!(cache.hits(), 1);
@@ -611,18 +639,30 @@ mod tests {
         let limiters = RateLimiters::new(false, false);
         let cache = QueryCache::default();
 
-        let rl_result =
-            query_with_rate_limit(&db, "Missing Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "Missing Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            Some(&cache),
+        )
+        .await;
         assert!(rl_result.result.is_ok());
         let (title, _, _) = rl_result.result.unwrap();
         assert!(title.is_none());
         assert_eq!(cache.len(), 1); // not-found cached
 
         // Second call should hit cache, not query DB
-        let rl_result =
-            query_with_rate_limit(&db, "Missing Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "Missing Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            Some(&cache),
+        )
+        .await;
         assert!(rl_result.result.is_ok());
         assert_eq!(db.call_count(), 1); // still only 1 DB call
         assert_eq!(cache.hits(), 1);
@@ -648,17 +688,29 @@ mod tests {
         let limiters = RateLimiters::new(false, false);
         let cache = QueryCache::default();
 
-        let rl_result =
-            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "A Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            Some(&cache),
+        )
+        .await;
         assert!(rl_result.result.is_ok());
         assert_eq!(db.call_count(), 2); // 429 + retry
         assert_eq!(cache.len(), 1); // result cached after successful retry
 
         // Third call should hit cache
-        let rl_result =
-            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "A Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            Some(&cache),
+        )
+        .await;
         assert!(rl_result.result.is_ok());
         assert_eq!(db.call_count(), 2); // no additional DB call
         assert_eq!(cache.hits(), 1);
@@ -677,9 +729,15 @@ mod tests {
         let limiters = RateLimiters::new(false, false);
         let cache = QueryCache::default();
 
-        let rl_result =
-            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "A Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            Some(&cache),
+        )
+        .await;
         assert!(rl_result.result.is_err());
         assert!(cache.is_empty()); // errors never cached
     }
@@ -691,9 +749,15 @@ mod tests {
         let limiters = RateLimiters::new(false, false);
         let cache = QueryCache::default();
 
-        let rl_result =
-            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
-                .await;
+        let rl_result = query_with_rate_limit(
+            &db,
+            "A Paper",
+            &client,
+            Duration::from_secs(10),
+            &limiters,
+            Some(&cache),
+        )
+        .await;
         assert!(rl_result.result.is_err());
         assert!(cache.is_empty()); // errors not cached
     }

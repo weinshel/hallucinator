@@ -115,8 +115,11 @@ async fn main() -> anyhow::Result<()> {
             clear_cache,
         } => {
             if clear_cache {
-                let path = cache_path
-                    .or_else(|| std::env::var("HALLUCINATOR_CACHE_PATH").ok().map(PathBuf::from));
+                let path = cache_path.or_else(|| {
+                    std::env::var("HALLUCINATOR_CACHE_PATH")
+                        .ok()
+                        .map(PathBuf::from)
+                });
                 return match path {
                     Some(p) if p.exists() => {
                         let cache = hallucinator_core::QueryCache::open(
@@ -134,7 +137,9 @@ async fn main() -> anyhow::Result<()> {
                         Ok(())
                     }
                     None => {
-                        anyhow::bail!("No cache path specified. Use --cache-path or set HALLUCINATOR_CACHE_PATH");
+                        anyhow::bail!(
+                            "No cache path specified. Use --cache-path or set HALLUCINATOR_CACHE_PATH"
+                        );
                     }
                 };
             }
@@ -337,8 +342,11 @@ async fn check(
         s2_api_key.is_some(),
     ));
 
-    let cache_path = cache_path
-        .or_else(|| std::env::var("HALLUCINATOR_CACHE_PATH").ok().map(PathBuf::from));
+    let cache_path = cache_path.or_else(|| {
+        std::env::var("HALLUCINATOR_CACHE_PATH")
+            .ok()
+            .map(PathBuf::from)
+    });
     let query_cache = hallucinator_core::build_query_cache(cache_path.as_deref());
 
     let config = hallucinator_core::Config {

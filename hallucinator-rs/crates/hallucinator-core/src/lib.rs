@@ -214,7 +214,10 @@ impl std::fmt::Debug for Config {
                 &self.crossref_mailto.as_ref().map(|_| "***"),
             )
             .field("max_rate_limit_retries", &self.max_rate_limit_retries)
-            .field("query_cache", &self.query_cache.as_ref().map(|c| format!("{:?}", c)))
+            .field(
+                "query_cache",
+                &self.query_cache.as_ref().map(|c| format!("{:?}", c)),
+            )
             .field("cache_path", &self.cache_path)
             .finish()
     }
@@ -263,7 +266,11 @@ pub fn build_query_cache(cache_path: Option<&std::path::Path>) -> Arc<QueryCache
                 return Arc::new(cache);
             }
             Err(e) => {
-                log::warn!("Failed to open cache at {}: {}; falling back to in-memory", path.display(), e);
+                log::warn!(
+                    "Failed to open cache at {}: {}; falling back to in-memory",
+                    path.display(),
+                    e
+                );
             }
         }
     }

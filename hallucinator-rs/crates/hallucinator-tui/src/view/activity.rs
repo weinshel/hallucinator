@@ -133,13 +133,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // Cache stats row (if a query cache is active)
     if let Some(cache) = &app.current_query_cache {
         let hits = cache.hits();
-        let misses = cache.misses();
-        let total = hits + misses;
-        let hit_rate = if total > 0 {
-            format!("{:.0}%", hits as f64 / total as f64 * 100.0)
-        } else {
-            "\u{2014}".to_string()
-        };
+        let total = hits + cache.misses();
         let cache_color = if theme.is_t800() {
             theme.dim
         } else {
@@ -151,16 +145,29 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 format!("{:<14} ", "Cache"),
                 Style::default().fg(cache_color),
             ),
-            Span::styled(
-                format!("{:>4} ", total),
-                Style::default().fg(theme.dim),
-            ),
+            Span::styled(format!("{:>4} ", total), Style::default().fg(theme.dim)),
             Span::styled(
                 format!("{:>4} ", hits),
-                Style::default().fg(if theme.is_t800() { Color::White } else { theme.active }),
+                Style::default().fg(if theme.is_t800() {
+                    Color::White
+                } else {
+                    theme.active
+                }),
             ),
             Span::styled(
-                format!("{:>6} ", hit_rate),
+                format!(
+                    "{:>6} ",
+                    if total > 0 {
+                        let ms = cache.avg_lookup_ms();
+                        if ms >= 1000.0 {
+                            format!("{:.1}s", ms / 1000.0)
+                        } else {
+                            format!("{:.0}ms", ms)
+                        }
+                    } else {
+                        "\u{2014}".to_string()
+                    }
+                ),
                 Style::default().fg(theme.dim),
             ),
         ]));

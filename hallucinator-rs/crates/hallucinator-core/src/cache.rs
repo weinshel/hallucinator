@@ -12,13 +12,13 @@
 //! key. Only successful results are cached; transient errors (timeouts, network
 //! failures) are never cached.
 
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 
 use crate::db::DbQueryResult;
 use crate::matching::normalize_title;
@@ -60,19 +60,32 @@ struct CacheEntry {
     inserted_epoch: u64,
 }
 
-/// SQLite-backed persistent store (L2).
-struct SqliteStore {
+/// Open a SQLite connection with WAL mode and standard pragmas.
+fn open_sqlite(path: &Path, read_only: bool) -> Result<Connection, rusqlite::Error> {
+    let flags = if read_only {
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+    };
+    let conn = Connection::open_with_flags(path, flags)?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;",
+    )?;
+    Ok(conn)
+}
+
+/// SQLite writer connection (L2 writes: insert, clear, evict).
+struct SqliteWriter {
     conn: Connection,
 }
 
-impl SqliteStore {
+impl SqliteWriter {
     fn open(path: &Path) -> Result<Self, rusqlite::Error> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA busy_timeout = 5000;",
-        )?;
+        let conn = open_sqlite(path, false)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS query_cache (
                  normalized_title TEXT NOT NULL,
@@ -86,66 +99,6 @@ impl SqliteStore {
              );",
         )?;
         Ok(Self { conn })
-    }
-
-    fn get(
-        &self,
-        norm_title: &str,
-        db_name: &str,
-        positive_ttl: Duration,
-        negative_ttl: Duration,
-    ) -> Option<(CachedResult, u64)> {
-        let now = now_epoch();
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT found, found_title, authors, paper_url, inserted_at
-                 FROM query_cache
-                 WHERE normalized_title = ?1 AND db_name = ?2",
-            )
-            .ok()?;
-
-        let row = stmt
-            .query_row(params![norm_title, db_name], |row| {
-                let found: i32 = row.get(0)?;
-                let found_title: Option<String> = row.get(1)?;
-                let authors_json: Option<String> = row.get(2)?;
-                let paper_url: Option<String> = row.get(3)?;
-                let inserted_at: u64 = row.get(4)?;
-                Ok((found, found_title, authors_json, paper_url, inserted_at))
-            })
-            .ok()?;
-
-        let (found, found_title, authors_json, paper_url, inserted_at) = row;
-
-        let result = if found != 0 {
-            CachedResult::Found {
-                title: found_title.unwrap_or_default(),
-                authors: authors_json
-                    .and_then(|j| serde_json::from_str(&j).ok())
-                    .unwrap_or_default(),
-                url: paper_url,
-            }
-        } else {
-            CachedResult::NotFound
-        };
-
-        // Check TTL
-        let ttl = match &result {
-            CachedResult::Found { .. } => positive_ttl,
-            CachedResult::NotFound => negative_ttl,
-        };
-        let age = Duration::from_secs(now.saturating_sub(inserted_at));
-        if age > ttl {
-            // Expired — lazily remove
-            let _ = self.conn.execute(
-                "DELETE FROM query_cache WHERE normalized_title = ?1 AND db_name = ?2",
-                params![norm_title, db_name],
-            );
-            return None;
-        }
-
-        Some((result, inserted_at))
     }
 
     fn insert(&self, norm_title: &str, db_name: &str, result: &CachedResult, epoch: u64) {
@@ -185,7 +138,6 @@ impl SqliteStore {
         let _ = self.conn.execute_batch("VACUUM");
     }
 
-    /// Remove all expired entries from the database.
     fn evict_expired(&self, positive_ttl: Duration, negative_ttl: Duration) {
         let now = now_epoch();
         let pos_cutoff = now.saturating_sub(positive_ttl.as_secs());
@@ -200,10 +152,111 @@ impl SqliteStore {
 
     fn count(&self) -> usize {
         self.conn
-            .query_row("SELECT COUNT(*) FROM query_cache", [], |row| {
-                row.get::<_, i64>(0)
+            .query_row("SELECT COUNT(*) FROM query_cache", [], |row| row.get(0))
+            .unwrap_or(0)
+    }
+}
+
+/// Pool of read-only SQLite connections for concurrent L2 lookups.
+///
+/// Each reader gets its own connection (SQLite WAL mode allows concurrent reads).
+/// Connections are returned to the pool after use. If the pool is empty, a new
+/// connection is opened.
+struct ReadPool {
+    pool: Mutex<Vec<Connection>>,
+    path: PathBuf,
+}
+
+impl ReadPool {
+    fn new(path: &Path) -> Self {
+        Self {
+            pool: Mutex::new(Vec::new()),
+            path: path.to_path_buf(),
+        }
+    }
+
+    fn acquire(&self) -> Option<Connection> {
+        // Try to reuse a pooled connection
+        if let Ok(mut pool) = self.pool.lock()
+            && let Some(conn) = pool.pop()
+        {
+            return Some(conn);
+        }
+        // Pool empty — open a new read-only connection
+        open_sqlite(&self.path, true).ok()
+    }
+
+    fn release(&self, conn: Connection) {
+        if let Ok(mut pool) = self.pool.lock() {
+            pool.push(conn);
+        }
+    }
+
+    fn get(
+        &self,
+        norm_title: &str,
+        db_name: &str,
+        positive_ttl: Duration,
+        negative_ttl: Duration,
+    ) -> Option<(CachedResult, u64)> {
+        let conn = self.acquire()?;
+        let result = Self::query(&conn, norm_title, db_name, positive_ttl, negative_ttl);
+        self.release(conn);
+        result
+    }
+
+    fn query(
+        conn: &Connection,
+        norm_title: &str,
+        db_name: &str,
+        positive_ttl: Duration,
+        negative_ttl: Duration,
+    ) -> Option<(CachedResult, u64)> {
+        let now = now_epoch();
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT found, found_title, authors, paper_url, inserted_at
+                 FROM query_cache
+                 WHERE normalized_title = ?1 AND db_name = ?2",
+            )
+            .ok()?;
+
+        let row = stmt
+            .query_row(params![norm_title, db_name], |row| {
+                let found: i32 = row.get(0)?;
+                let found_title: Option<String> = row.get(1)?;
+                let authors_json: Option<String> = row.get(2)?;
+                let paper_url: Option<String> = row.get(3)?;
+                let inserted_at: u64 = row.get(4)?;
+                Ok((found, found_title, authors_json, paper_url, inserted_at))
             })
-            .unwrap_or(0) as usize
+            .ok()?;
+
+        let (found, found_title, authors_json, paper_url, inserted_at) = row;
+
+        let result = if found != 0 {
+            CachedResult::Found {
+                title: found_title.unwrap_or_default(),
+                authors: authors_json
+                    .and_then(|j| serde_json::from_str(&j).ok())
+                    .unwrap_or_default(),
+                url: paper_url,
+            }
+        } else {
+            CachedResult::NotFound
+        };
+
+        // Check TTL — if expired, return None (writer evicts on next startup)
+        let ttl = match &result {
+            CachedResult::Found { .. } => positive_ttl,
+            CachedResult::NotFound => negative_ttl,
+        };
+        let age = Duration::from_secs(now.saturating_sub(inserted_at));
+        if age > ttl {
+            return None;
+        }
+
+        Some((result, inserted_at))
     }
 }
 
@@ -217,14 +270,22 @@ fn now_epoch() -> u64 {
 /// Thread-safe two-tier cache for database query results.
 ///
 /// L1: [`DashMap`] for lock-free concurrent access from multiple drainer tasks.
-/// L2: Optional [`SqliteStore`] for persistence across restarts.
+/// L2: Optional SQLite database — reads use a [`ReadPool`] of concurrent connections,
+///     writes go through a single [`SqliteWriter`] behind a [`Mutex`].
 pub struct QueryCache {
     entries: DashMap<CacheKey, CacheEntry>,
-    sqlite: Option<Mutex<SqliteStore>>,
+    /// Writer connection for inserts, clears, eviction (serialized).
+    sqlite_writer: Option<Mutex<SqliteWriter>>,
+    /// Pool of read-only connections for concurrent L2 lookups.
+    read_pool: Option<ReadPool>,
     positive_ttl: Duration,
     negative_ttl: Duration,
     hits: AtomicU64,
     misses: AtomicU64,
+    /// Running sum of lookup durations in microseconds (for computing average).
+    total_lookup_us: AtomicU64,
+    /// Total number of lookups (hits + misses) for average calculation.
+    total_lookups: AtomicU64,
 }
 
 impl Default for QueryCache {
@@ -238,11 +299,14 @@ impl QueryCache {
     pub fn new(positive_ttl: Duration, negative_ttl: Duration) -> Self {
         Self {
             entries: DashMap::new(),
-            sqlite: None,
+            sqlite_writer: None,
+            read_pool: None,
             positive_ttl,
             negative_ttl,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            total_lookup_us: AtomicU64::new(0),
+            total_lookups: AtomicU64::new(0),
         }
     }
 
@@ -255,16 +319,19 @@ impl QueryCache {
         positive_ttl: Duration,
         negative_ttl: Duration,
     ) -> Result<Self, String> {
-        let store = SqliteStore::open(path)
+        let writer = SqliteWriter::open(path)
             .map_err(|e| format!("Failed to open cache database at {}: {}", path.display(), e))?;
-        store.evict_expired(positive_ttl, negative_ttl);
+        writer.evict_expired(positive_ttl, negative_ttl);
         Ok(Self {
             entries: DashMap::new(),
-            sqlite: Some(Mutex::new(store)),
+            sqlite_writer: Some(Mutex::new(writer)),
+            read_pool: Some(ReadPool::new(path)),
             positive_ttl,
             negative_ttl,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            total_lookup_us: AtomicU64::new(0),
+            total_lookups: AtomicU64::new(0),
         })
     }
 
@@ -273,6 +340,7 @@ impl QueryCache {
     /// Returns `Some(result)` on cache hit (within TTL), `None` on miss.
     /// The title is normalized before lookup.
     pub fn get(&self, title: &str, db_name: &str) -> Option<DbQueryResult> {
+        let start = Instant::now();
         let norm = normalize_title(title);
         let key = CacheKey {
             normalized_title: norm.clone(),
@@ -291,34 +359,40 @@ impl QueryCache {
                 // Fall through to L2
             } else {
                 self.hits.fetch_add(1, Ordering::Relaxed);
+                self.record_lookup(start);
                 return Some(cached_to_query_result(&entry.result));
             }
         }
 
-        // L2 check
-        if let Some(ref sqlite_mutex) = self.sqlite {
-            if let Ok(store) = sqlite_mutex.lock() {
-                if let Some((result, epoch)) =
-                    store.get(&norm, db_name, self.positive_ttl, self.negative_ttl)
-                {
-                    // Promote to L1
-                    let query_result = cached_to_query_result(&result);
-                    self.entries.insert(
-                        key,
-                        CacheEntry {
-                            result,
-                            inserted_at: epoch_to_instant(epoch),
-                            inserted_epoch: epoch,
-                        },
-                    );
-                    self.hits.fetch_add(1, Ordering::Relaxed);
-                    return Some(query_result);
-                }
-            }
+        // L2 check (concurrent read — no writer lock needed)
+        if let Some(ref pool) = self.read_pool
+            && let Some((result, epoch)) =
+                pool.get(&norm, db_name, self.positive_ttl, self.negative_ttl)
+        {
+            // Promote to L1
+            let query_result = cached_to_query_result(&result);
+            self.entries.insert(
+                key,
+                CacheEntry {
+                    result,
+                    inserted_at: epoch_to_instant(epoch),
+                    inserted_epoch: epoch,
+                },
+            );
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.record_lookup(start);
+            return Some(query_result);
         }
 
         self.misses.fetch_add(1, Ordering::Relaxed);
+        self.record_lookup(start);
         None
+    }
+
+    fn record_lookup(&self, start: Instant) {
+        let us = start.elapsed().as_micros() as u64;
+        self.total_lookup_us.fetch_add(us, Ordering::Relaxed);
+        self.total_lookups.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Insert a query result into the cache.
@@ -354,20 +428,20 @@ impl QueryCache {
         );
 
         // L2
-        if let Some(ref sqlite_mutex) = self.sqlite {
-            if let Ok(store) = sqlite_mutex.lock() {
-                store.insert(&norm, db_name, &cached, epoch);
-            }
+        if let Some(ref sqlite_mutex) = self.sqlite_writer
+            && let Ok(store) = sqlite_mutex.lock()
+        {
+            store.insert(&norm, db_name, &cached, epoch);
         }
     }
 
     /// Remove all entries from both L1 and L2.
     pub fn clear(&self) {
         self.entries.clear();
-        if let Some(ref sqlite_mutex) = self.sqlite {
-            if let Ok(store) = sqlite_mutex.lock() {
-                store.clear();
-            }
+        if let Some(ref sqlite_mutex) = self.sqlite_writer
+            && let Ok(store) = sqlite_mutex.lock()
+        {
+            store.clear();
         }
     }
 
@@ -379,6 +453,16 @@ impl QueryCache {
     /// Number of cache misses since creation.
     pub fn misses(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
+    }
+
+    /// Average lookup time in milliseconds (hits and misses).
+    pub fn avg_lookup_ms(&self) -> f64 {
+        let count = self.total_lookups.load(Ordering::Relaxed);
+        if count == 0 {
+            return 0.0;
+        }
+        let us = self.total_lookup_us.load(Ordering::Relaxed);
+        us as f64 / count as f64 / 1000.0
     }
 
     /// Number of entries currently in the L1 in-memory cache.
@@ -393,7 +477,7 @@ impl QueryCache {
 
     /// Total entries in the persistent L2 store (0 if no SQLite backing).
     pub fn disk_len(&self) -> usize {
-        self.sqlite
+        self.sqlite_writer
             .as_ref()
             .and_then(|m| m.lock().ok())
             .map(|s| s.count())
@@ -402,7 +486,7 @@ impl QueryCache {
 
     /// Whether this cache has a persistent SQLite backing store.
     pub fn has_persistence(&self) -> bool {
-        self.sqlite.is_some()
+        self.sqlite_writer.is_some()
     }
 
     /// The positive (found) TTL.
@@ -642,8 +726,8 @@ mod tests {
 
         // Insert with 1-second TTL (SQLite uses epoch-second resolution)
         {
-            let cache = QueryCache::open(&path, Duration::from_secs(1), Duration::from_secs(1))
-                .unwrap();
+            let cache =
+                QueryCache::open(&path, Duration::from_secs(1), Duration::from_secs(1)).unwrap();
             cache.insert("Paper", "DB", &(Some("Paper".into()), vec![], None));
             cache.insert("Missing", "DB", &(None, vec![], None));
         }
@@ -671,11 +755,7 @@ mod tests {
         let negative_ttl = DEFAULT_NEGATIVE_TTL;
         let cache = QueryCache::open(&path, positive_ttl, negative_ttl).unwrap();
 
-        let result: DbQueryResult = (
-            Some("Persistent Paper".into()),
-            vec!["Author".into()],
-            None,
-        );
+        let result: DbQueryResult = (Some("Persistent Paper".into()), vec!["Author".into()], None);
         cache.insert("Persistent Paper", "CrossRef", &result);
 
         // Manually expire L1 by removing the entry, simulating L1 eviction
@@ -759,7 +839,11 @@ mod tests {
                 let title = format!("Paper {}", i);
                 let db = format!("DB{}", i % 3);
                 // Write
-                c.insert(&title, &db, &(Some(title.clone()), vec!["Author".into()], None));
+                c.insert(
+                    &title,
+                    &db,
+                    &(Some(title.clone()), vec!["Author".into()], None),
+                );
                 // Read back
                 let result = c.get(&title, &db);
                 assert!(result.is_some(), "concurrent read failed for {}", title);

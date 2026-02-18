@@ -1906,8 +1906,7 @@ impl App {
                         self.activity.log("Query cache cleared".to_string());
                     }
                     Err(e) => {
-                        self.config_state.cache_clear_status =
-                            Some(format!("Failed: {}", e));
+                        self.config_state.cache_clear_status = Some(format!("Failed: {}", e));
                         self.activity
                             .log_warn(format!("Failed to clear cache: {}", e));
                     }

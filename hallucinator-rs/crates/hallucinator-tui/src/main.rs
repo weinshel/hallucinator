@@ -78,6 +78,11 @@ struct Cli {
     /// Target frames per second (default: 30)
     #[arg(long)]
     fps: Option<u32>,
+
+    /// Enable SearxNG web search fallback for unverified citations.
+    /// Uses SEARXNG_URL env var or defaults to http://localhost:8080
+    #[arg(long)]
+    searxng: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -179,6 +184,16 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(fps) = cli.fps {
         config_state.fps = fps.clamp(1, 120);
+    }
+
+    // SearxNG URL: only enabled if --searxng flag is set
+    if cli.searxng {
+        config_state.searxng_url = Some(
+            std::env::var("SEARXNG_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "http://localhost:8080".to_string()),
+        );
     }
 
     // Mark disabled DBs from CLI args

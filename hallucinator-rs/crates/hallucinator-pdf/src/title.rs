@@ -207,6 +207,15 @@ pub(crate) fn clean_title_with_config(
         title = title[..=punct_pos].to_string();
     }
 
+    // Handle multi-word venues after ?/! like "! IACR Cryptology ePrint Archive, 2021"
+    static QMARK_MULTIWORD_VENUE_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"[?!]\s+(?:IACR|Cryptology\s+ePrint|ePrint\s+Archive)\b.*$").unwrap()
+    });
+    if let Some(m) = QMARK_MULTIWORD_VENUE_RE.find(&title) {
+        let punct_pos = title[..m.end()].rfind(['?', '!']).unwrap();
+        title = title[..=punct_pos].to_string();
+    }
+
     // Remove editor lists: ". In Name, Name, and Name, editors, Venue"
     static EDITOR_LIST_RE: Lazy<Regex> = Lazy::new(|| {
         let name = r"[A-Za-z\u{00C0}-\u{024F}]+(?:\s+[A-Z]\.)*(?:\s+[A-Za-z\u{00C0}-\u{024F}]+)?";
@@ -1199,7 +1208,7 @@ pub(crate) static DEFAULT_CUTOFF_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         Regex::new(r"\[D\].*$").unwrap(),
         Regex::new(r"(?i)\.\s*[Ii]n:\s+[A-Z].*$").unwrap(),
         Regex::new(r"(?i)\.\s*[Ii]n\s+[A-Z].*$").unwrap(),
-        Regex::new(r"(?i)[.?!]\s*(?:Proceedings|Conference|Workshop|Symposium|IEEE|ACM|USENIX|AAAI|EMNLP|NAACL|arXiv|Available|CoRR|PACM[- ]?\w+|JMLR|VLDB|SIGMOD|SIGKDD|PLDI|POPL|OOPSLA|SOSP|OSDI).*$").unwrap(),
+        Regex::new(r"(?i)[.?!]\s*(?:Proceedings|Conference|Workshop|Symposium|IEEE|ACM|USENIX|AAAI|EMNLP|NAACL|arXiv|Available|CoRR|PACM[- ]?\w+|JMLR|VLDB|SIGMOD|SIGKDD|PLDI|POPL|OOPSLA|SOSP|OSDI|IACR|Cryptology\s+ePrint).*$").unwrap(),
         Regex::new(r"(?i)[.?!]\s*(?:Advances\s+in|Journal\s+of|Transactions\s+of|Transactions\s+on|Communications\s+of).*$").unwrap(),
         Regex::new(r"(?i)[.?!]\s+International\s+Journal\b.*$").unwrap(),
         Regex::new(r"(?i)\.\s*[A-Z][a-z]+\s+(?:Journal|Review|Transactions|Letters|advances|Processing|medica|Intelligenz)\b.*$").unwrap(),
@@ -2008,6 +2017,37 @@ mod tests {
         assert!(
             cleaned.contains("How much does it matter?"),
             "Title should end with question mark: {}",
+            cleaned,
+        );
+    }
+
+    #[test]
+    fn test_iacr_eprint_after_exclamation() {
+        // Issue #164: "IACR Cryptology ePrint Archive" after ! should not leak into title
+        let ref_text = "Aljosha Judmayer, Nicholas Stifter, Philipp Schindler, and Edgar R. Weippl. Estimating (miner) extractable value is hard, let's go shopping! IACR Cryptology ePrint Archive, 2021.";
+        let (title, _) = extract_title_from_reference(ref_text);
+        let cleaned = clean_title(&title, false);
+        assert!(
+            !cleaned.contains("IACR"),
+            "IACR venue should not leak into title: {}",
+            cleaned,
+        );
+        assert!(
+            cleaned.contains("let's go shopping!"),
+            "Title should end with exclamation mark: {}",
+            cleaned,
+        );
+    }
+
+    #[test]
+    fn test_iacr_preserved_in_title_body() {
+        // IACR should only be stripped when it's a venue suffix after punctuation,
+        // not when it's legitimately part of the title content
+        let title = "Understanding IACR Standards for Cryptographic Protocols";
+        let cleaned = clean_title(title, false);
+        assert!(
+            cleaned.contains("IACR"),
+            "IACR in title body should be preserved: {}",
             cleaned,
         );
     }

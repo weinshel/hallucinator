@@ -181,6 +181,9 @@ impl RateLimiters {
         // OpenAlex: 10/s without key, 100/s with key — light governor so adaptive
         // backoff kicks in if we get 429'd
         limiters.insert("OpenAlex", AdaptiveDbLimiter::per_second(10));
+        // DOI (doi.org): generous limit, no documented cap but be polite
+        limiters.insert("DOI", AdaptiveDbLimiter::per_second(3));
+
         // SSRN: disabled, skip limiter
         // NeurIPS: disabled, skip limiter
         // Offline DBs (DBLP offline, ACL offline) share names but don't make HTTP requests
@@ -235,7 +238,7 @@ pub fn parse_retry_after(value: &str) -> Option<Duration> {
 /// Query a database with proactive governor rate limiting.
 ///
 /// 1. Acquires the per-DB governor (waits if needed)
-/// 2. Calls `db.query()`
+/// 2. Calls `db.query()` (or `db.query_doi()` if `doi_context` is provided)
 /// 3. On 429: adapts governor to slower rate and returns error immediately
 ///    (the pool-level retry queue will re-check failed DBs later)
 /// 4. On other errors or success: returns immediately
@@ -247,6 +250,30 @@ pub struct RateLimitedResult {
     pub elapsed: Duration,
 }
 
+/// Context for DOI-based queries, passed to backends that support `query_doi`.
+pub struct DoiContext<'a> {
+    pub doi: &'a str,
+    pub authors: &'a [String],
+}
+
+/// Execute the appropriate query for a backend, trying `query_doi` first if context is provided.
+async fn execute_query(
+    db: &dyn DatabaseBackend,
+    title: &str,
+    client: &reqwest::Client,
+    timeout: Duration,
+    doi_context: Option<&DoiContext<'_>>,
+) -> Result<DbQueryResult, DbQueryError> {
+    if let Some(ctx) = doi_context
+        && let Some(result) = db
+            .query_doi(ctx.doi, title, ctx.authors, client, timeout)
+            .await
+    {
+        return result;
+    }
+    db.query(title, client, timeout).await
+}
+
 pub async fn query_with_rate_limit(
     db: &dyn DatabaseBackend,
     title: &str,
@@ -254,6 +281,7 @@ pub async fn query_with_rate_limit(
     timeout: Duration,
     rate_limiters: &RateLimiters,
     cache: Option<&QueryCache>,
+    doi_context: Option<&DoiContext<'_>>,
 ) -> RateLimitedResult {
     // Check cache before making any network request or waiting on the governor.
     // Skip cache for local/offline backends — they have their own SQLite DBs.
@@ -284,7 +312,7 @@ pub async fn query_with_rate_limit(
     // Timer starts AFTER governor — measures actual HTTP time only
     let start = Instant::now();
 
-    let result = match db.query(title, client, timeout).await {
+    let result = match execute_query(db, title, client, timeout, doi_context).await {
         Ok(result) => Ok(result),
         Err(DbQueryError::RateLimited { retry_after }) => {
             // Adapt governor to slower rate so subsequent requests are throttled
@@ -310,7 +338,7 @@ pub async fn query_with_rate_limit(
             }
 
             // Single retry — if still 429, give up
-            db.query(title, client, timeout).await
+            execute_query(db, title, client, timeout, doi_context).await
         }
         Err(other) => Err(other),
     };
@@ -343,7 +371,7 @@ pub async fn query_with_retry(
     _max_retries: u32,
     cache: Option<&QueryCache>,
 ) -> RateLimitedResult {
-    query_with_rate_limit(db, title, client, timeout, rate_limiters, cache).await
+    query_with_rate_limit(db, title, client, timeout, rate_limiters, cache, None).await
 }
 
 #[cfg(test)]
@@ -482,6 +510,7 @@ mod tests {
             "Europe PMC",
             "PubMed",
             "ACL Anthology",
+            "DOI",
         ] {
             assert!(limiters.get(name).is_some(), "missing limiter for {name}");
         }
@@ -531,6 +560,7 @@ mod tests {
             Duration::from_secs(10),
             &limiters,
             None,
+            None,
         )
         .await;
 
@@ -558,6 +588,7 @@ mod tests {
             Duration::from_secs(10),
             &limiters,
             None,
+            None,
         )
         .await;
 
@@ -578,6 +609,7 @@ mod tests {
             &client,
             Duration::from_secs(10),
             &limiters,
+            None,
             None,
         )
         .await;
@@ -608,6 +640,7 @@ mod tests {
             Duration::from_secs(10),
             &limiters,
             Some(&cache),
+            None,
         )
         .await;
         assert!(rl_result.result.is_ok());
@@ -623,6 +656,7 @@ mod tests {
             Duration::from_secs(10),
             &limiters,
             Some(&cache),
+            None,
         )
         .await;
         assert!(rl_result.result.is_ok());
@@ -646,6 +680,7 @@ mod tests {
             Duration::from_secs(10),
             &limiters,
             Some(&cache),
+            None,
         )
         .await;
         assert!(rl_result.result.is_ok());
@@ -661,6 +696,7 @@ mod tests {
             Duration::from_secs(10),
             &limiters,
             Some(&cache),
+            None,
         )
         .await;
         assert!(rl_result.result.is_ok());
@@ -695,6 +731,7 @@ mod tests {
             Duration::from_secs(10),
             &limiters,
             Some(&cache),
+            None,
         )
         .await;
         assert!(rl_result.result.is_ok());
@@ -709,6 +746,7 @@ mod tests {
             Duration::from_secs(10),
             &limiters,
             Some(&cache),
+            None,
         )
         .await;
         assert!(rl_result.result.is_ok());
@@ -736,6 +774,7 @@ mod tests {
             Duration::from_secs(10),
             &limiters,
             Some(&cache),
+            None,
         )
         .await;
         assert!(rl_result.result.is_err());
@@ -756,6 +795,7 @@ mod tests {
             Duration::from_secs(10),
             &limiters,
             Some(&cache),
+            None,
         )
         .await;
         assert!(rl_result.result.is_err());

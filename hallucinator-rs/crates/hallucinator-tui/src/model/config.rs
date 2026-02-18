@@ -87,6 +87,7 @@ impl Default for ConfigState {
             ("Europe PMC".to_string(), true),
             ("PubMed".to_string(), true),
             ("OpenAlex".to_string(), true),
+            ("DOI".to_string(), true),
         ];
 
         Self {

@@ -510,6 +510,9 @@ pub(crate) fn build_database_list(
     if should_include("PubMed") {
         databases.push(Box::new(pubmed::PubMed));
     }
+    if should_include("DOI") {
+        databases.push(Box::new(doi_resolver::DoiResolver));
+    }
     if let Some(ref key) = config.openalex_key
         && should_include("OpenAlex")
     {
@@ -540,6 +543,7 @@ mod tests {
                 "Europe PMC".into(),
                 "PubMed".into(),
                 "OpenAlex".into(),
+                "DOI".into(),
             ],
             ..Config::default()
         }
@@ -558,6 +562,7 @@ mod tests {
             "ACL Anthology",
             "Europe PMC",
             "PubMed",
+            "DOI",
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }

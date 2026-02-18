@@ -993,7 +993,9 @@ fn try_author_particles(ref_text: &str) -> Option<(String, bool)> {
     // Pattern: "I. Name, I. Name, and I. Name. Title"
     // The key is finding ", and Initial. Surname. TitleStart"
     static AND_AUTHOR_TITLE_RE: Lazy<Regex> = Lazy::new(|| {
-        let initial = r"[\x41-\x5A\u{00C0}-\u{00D6}\u{00D8}-\u{00DE}\u{0027}\u{0060}\u{00B4}]\.(?:[\s\-]*[A-Z]\.)*";
+        // Initial pattern: single letter "A." or multi-letter "Yu." (Russian/Chinese patronymics)
+        // Also handles compound initials like "A.-B." or "A. B."
+        let initial = r"[\x41-\x5A\u{00C0}-\u{00D6}\u{00D8}-\u{00DE}\u{0027}\u{0060}\u{00B4}](?:[a-z]{0,2})?\.(?:[\s\-]*[A-Z](?:[a-z]{0,2})?\.)*";
         let particle =
             r"(?:(?:von|van|de|del|della|di|da|dos|das|du|le|la|les|den|der|ten|ter|op|het)\s+)?";
         let surname_chars = r"[A-Za-z\u{00C0}-\u{024F}\u{0027}\u{0060}\u{00B4}\u{2019}\-]";
@@ -1231,6 +1233,27 @@ fn split_sentences_skip_initials(text: &str) -> Vec<String> {
             let is_author = AUTHOR_AFTER.iter().any(|re| re.is_match(after_period));
             if is_author {
                 continue; // Skip — this is an author initial
+            }
+        }
+
+        // Check for multi-letter initials (2-3 chars like "Yu." in Russian/Chinese names)
+        // e.g., "A. Yu. Veretennikov" where "Yu." is a patronymic initial
+        {
+            let mut word_start = pos - 1;
+            while word_start > 0 && text.as_bytes()[word_start - 1].is_ascii_alphabetic() {
+                word_start -= 1;
+            }
+            let word_len = pos - word_start;
+            // Short words (2-3 chars) starting with capital followed by surname
+            if word_len >= 2
+                && word_len <= 3
+                && text.as_bytes()[word_start].is_ascii_uppercase()
+            {
+                let after_period = &text[m.end()..];
+                let is_author = AUTHOR_AFTER.iter().any(|re| re.is_match(after_period));
+                if is_author {
+                    continue; // Skip — this is a multi-letter initial
+                }
             }
         }
 

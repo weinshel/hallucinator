@@ -31,7 +31,8 @@ pub(crate) fn find_references_section_with_config(
             // Match common end-of-references markers:
             // - Explicit section headers: Appendix, Acknowledgments, etc.
             // - Single-letter appendix sections: "A\nTechnical Lemmas" (common in NeurIPS)
-            Regex::new(r"(?i)\n\s*(?:Appendix|Acknowledgments|Acknowledgements|Supplementary|Ethics\s+Statement|Ethical\s+Considerations|Broader\s+Impact|Paper\s+Checklist|Checklist|[A-Z]\n\s*(?:Technical|Proofs?|Additional|Extended|Experimental|Derivations?|Algorithms?|Details?|Implementation))")
+            // - Conference checklists: "NeurIPS Paper Checklist", "ICML Checklist", etc.
+            Regex::new(r"(?i)\n\s*(?:Appendix|Acknowledgments|Acknowledgements|Supplementary|Ethics\s+Statement|Ethical\s+Considerations|Broader\s+Impact|(?:\w+\s+)?(?:Paper\s+)?Checklist|[A-Z]\n\s*(?:Technical|Proofs?|Additional|Extended|Experimental|Derivations?|Algorithms?|Details?|Implementation))")
                 .unwrap()
         });
 
@@ -87,19 +88,24 @@ pub(crate) fn segment_references_with_config(
         return refs;
     }
 
-    // Strategy 3: AAAI/ACM author-year (period + newline + Surname, I.)
-    if let Some(refs) = try_aaai(ref_text) {
-        return refs;
-    }
+    // Strategy 3: Author-based formats (ML full names, AAAI, NeurIPS initials)
+    // Try all three and return the one that finds the most references
+    {
+        let ml_refs = try_ml_full_name(ref_text);
+        let aaai_refs = try_aaai(ref_text);
+        let neurips_refs = try_neurips(ref_text);
 
-    // Strategy 3b: NeurIPS/ML (". \n I. Surname and I. Surname. Title.")
-    if let Some(refs) = try_neurips(ref_text) {
-        return refs;
-    }
-
-    // Strategy 3c: ML full names ("Firstname Lastname, Firstname Lastname, and Firstname Lastname. Title.")
-    if let Some(refs) = try_ml_full_name(ref_text) {
-        return refs;
+        let mut best: Option<Vec<String>> = None;
+        for candidate in [ml_refs, aaai_refs, neurips_refs] {
+            if let Some(refs) = candidate {
+                if best.as_ref().map_or(true, |b| refs.len() > b.len()) {
+                    best = Some(refs);
+                }
+            }
+        }
+        if let Some(refs) = best {
+            return refs;
+        }
     }
 
     // Strategy 4: Springer/Nature (line starts with capital + has (Year))
@@ -112,7 +118,8 @@ pub(crate) fn segment_references_with_config(
 }
 
 fn try_ieee_with_config(ref_text: &str, config: &PdfParsingConfig) -> Option<Vec<String>> {
-    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\n\s*\[(\d+)\]\s*").unwrap());
+    // Match [1], [2], etc. at start of string or after newline
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)(?:^|\n)\s*\[(\d+)\]\s*").unwrap());
 
     let re = config.ieee_segment_re.as_ref().unwrap_or(&RE);
     let matches: Vec<_> = re.find_iter(ref_text).collect();
@@ -157,7 +164,9 @@ fn try_ieee_with_config(ref_text: &str, config: &PdfParsingConfig) -> Option<Vec
 }
 
 fn try_numbered_with_config(ref_text: &str, config: &PdfParsingConfig) -> Option<Vec<String>> {
-    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)(?:^|\n)\s*(\d+)\.\s+").unwrap());
+    // Match 1-3 digit numbers only (not 4-digit years like 2018, 2024)
+    // Papers rarely have 1000+ references, so this is a safe constraint
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)(?:^|\n)\s*(\d{1,3})\.\s+").unwrap());
 
     let re = config.numbered_segment_re.as_ref().unwrap_or(&RE);
     let matches: Vec<_> = re.find_iter(ref_text).collect();
@@ -337,11 +346,18 @@ fn try_neurips(ref_text: &str) -> Option<Vec<String>> {
 }
 
 fn try_ml_full_name(ref_text: &str) -> Option<Vec<String>> {
-    // ML papers with full author names: "Firstname Lastname, Firstname Lastname, and Firstname Lastname. Title."
-    // Boundaries: year/URL end + period + newline + "Firstname Lastname,"
+    // ML papers with full author names or initials
+    // Boundaries: year/URL end + period + newline + author name pattern
     static RE: Lazy<Regex> = Lazy::new(|| {
+        // Pattern handles four author formats:
+        // 1. Full names: "Eva E Stüeken," / "William E Schiesser." / "Randall J. LeVeque."
+        // 2. Initials with periods: "E. Pardoux," / "E. Pardoux and A." / "V. V. Jikov,"
+        // 3. Abbreviated initials: "MM Locarnini," / "HE Garcia," (2-3 caps without periods)
+        // 4. ALL CAPS first name: "PHILIPPE Courtier," (4+ caps followed by mixed-case surname)
+        //
+        // Terminators: comma (multi-author), period (single-author/end), " and" (co-author)
         Regex::new(
-            r"((?:(?:19|20)\d{2}[a-z]?|html|pdf)\.\n+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z][a-zA-Z\u{00C0}-\u{024F}\-]+,)",
+            r"((?:(?:19|20)\d{2}[a-z]?|html|pdf)\.\n+)((?:[A-Z][a-z]+(?:\s+[A-Z](?:\.|[a-z]+)?)?\s+[A-Z][a-zA-Z\u{00C0}-\u{024F}\-]+|[A-Z]\.(?:\s*[A-Z]\.)?\s+[A-Z][a-zA-Z\u{00C0}-\u{024F}\-]+|[A-Z]{2,3}\s+[A-Z][a-zA-Z\u{00C0}-\u{024F}\-]+|[A-Z]{4,}\s+[A-Z][a-z][a-zA-Z\u{00C0}-\u{024F}\-]*)(?:[,.]| and ))",
         )
         .unwrap()
     });

@@ -28,7 +28,10 @@ pub(crate) fn find_references_section_with_config(
         let rest = &text[ref_start..];
 
         static END_RE: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r"(?i)\n\s*(?:Appendix|Acknowledgments|Acknowledgements|Supplementary|Ethics\s+Statement|Ethical\s+Considerations|Broader\s+Impact|Paper\s+Checklist|Checklist)")
+            // Match common end-of-references markers:
+            // - Explicit section headers: Appendix, Acknowledgments, etc.
+            // - Single-letter appendix sections: "A\nTechnical Lemmas" (common in NeurIPS)
+            Regex::new(r"(?i)\n\s*(?:Appendix|Acknowledgments|Acknowledgements|Supplementary|Ethics\s+Statement|Ethical\s+Considerations|Broader\s+Impact|Paper\s+Checklist|Checklist|[A-Z]\n\s*(?:Technical|Proofs?|Additional|Extended|Experimental|Derivations?|Algorithms?|Details?|Implementation))")
                 .unwrap()
         });
 
@@ -94,6 +97,11 @@ pub(crate) fn segment_references_with_config(
         return refs;
     }
 
+    // Strategy 3c: ML full names ("Firstname Lastname, Firstname Lastname, and Firstname Lastname. Title.")
+    if let Some(refs) = try_ml_full_name(ref_text) {
+        return refs;
+    }
+
     // Strategy 4: Springer/Nature (line starts with capital + has (Year))
     if let Some(refs) = try_springer_nature(ref_text) {
         return refs;
@@ -109,6 +117,26 @@ fn try_ieee_with_config(ref_text: &str, config: &PdfParsingConfig) -> Option<Vec
     let re = config.ieee_segment_re.as_ref().unwrap_or(&RE);
     let matches: Vec<_> = re.find_iter(ref_text).collect();
     if matches.len() < 3 {
+        return None;
+    }
+
+    // Extract the captured numbers to check sequentiality
+    // This prevents matching years like [2017], [2020] in author-year citations
+    let caps: Vec<_> = re.captures_iter(ref_text).collect();
+    let first_nums: Vec<i64> = caps
+        .iter()
+        .take(5)
+        .filter_map(|c| c.get(1)?.as_str().parse().ok())
+        .collect();
+
+    // First IEEE reference should be [1]
+    if first_nums.is_empty() || first_nums[0] != 1 {
+        return None;
+    }
+
+    // Numbers should be sequential: [1], [2], [3], ...
+    let is_sequential = first_nums.windows(2).all(|w| w[1] == w[0] + 1);
+    if !is_sequential {
         return None;
     }
 
@@ -290,6 +318,53 @@ fn try_neurips(ref_text: &str) -> Option<Vec<String>> {
     }
 
     // Each subsequent reference starts at the second capture group
+    for i in 0..matches.len() {
+        let caps = RE.captures(&ref_text[matches[i].start()..]).unwrap();
+        let ref_start = matches[i].start() + caps.get(2).unwrap().start();
+        let ref_end = if i + 1 < matches.len() {
+            let next_caps = RE.captures(&ref_text[matches[i + 1].start()..]).unwrap();
+            matches[i + 1].start() + next_caps.get(1).unwrap().end()
+        } else {
+            ref_text.len()
+        };
+        let content = ref_text[ref_start..ref_end].trim();
+        if !content.is_empty() {
+            refs.push(content.to_string());
+        }
+    }
+
+    Some(refs)
+}
+
+fn try_ml_full_name(ref_text: &str) -> Option<Vec<String>> {
+    // ML papers with full author names: "Firstname Lastname, Firstname Lastname, and Firstname Lastname. Title."
+    // Boundaries: year/URL end + period + newline + "Firstname Lastname,"
+    static RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"((?:(?:19|20)\d{2}[a-z]?|html|pdf)\.\n+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+[A-Z][a-zA-Z\u{00C0}-\u{024F}\-]+,)",
+        )
+        .unwrap()
+    });
+
+    let matches: Vec<_> = RE.find_iter(ref_text).collect();
+    if matches.len() < 5 {
+        return None;
+    }
+
+    let mut refs = Vec::new();
+
+    // First reference: everything before the first boundary
+    let first_end = matches[0].start()
+        + RE.captures(&ref_text[matches[0].start()..])
+            .and_then(|c| c.get(1))
+            .map(|m| m.end())
+            .unwrap_or(0);
+    let first_ref = ref_text[..first_end].trim();
+    if !first_ref.is_empty() && first_ref.len() > 20 {
+        refs.push(first_ref.to_string());
+    }
+
+    // Each subsequent reference starts at the second capture group (author name)
     for i in 0..matches.len() {
         let caps = RE.captures(&ref_text[matches[i].start()..]).unwrap();
         let ref_start = matches[i].start() + caps.get(2).unwrap().start();

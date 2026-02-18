@@ -442,7 +442,14 @@ fn dry_run_pdf(
         // Normalize raw citation for display
         let raw_display: String = ref_text.split_whitespace().collect::<Vec<_>>().join(" ");
         let raw_display = if raw_display.len() > 200 {
-            format!("{}...", &raw_display[..200])
+            // Find a char boundary at or before position 200
+            let boundary = raw_display
+                .char_indices()
+                .take_while(|(i, _)| *i <= 200)
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            format!("{}...", &raw_display[..boundary])
         } else {
             raw_display
         };

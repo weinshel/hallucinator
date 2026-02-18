@@ -328,3 +328,150 @@ pub fn from_config_state(state: &ConfigState) -> ConfigFile {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_path_round_trip_toml() {
+        let config = ConfigFile {
+            databases: Some(DatabasesConfig {
+                cache_path: Some("/tmp/test_cache.db".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: ConfigFile = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            parsed.databases.unwrap().cache_path.unwrap(),
+            "/tmp/test_cache.db"
+        );
+    }
+
+    #[test]
+    fn cache_path_absent_deserializes_as_none() {
+        let toml_str = "[databases]\ndblp_offline_path = \"/some/path\"\n";
+        let parsed: ConfigFile = toml::from_str(toml_str).unwrap();
+        assert!(parsed.databases.unwrap().cache_path.is_none());
+    }
+
+    #[test]
+    fn merge_cache_path_overlay_wins() {
+        let base = ConfigFile {
+            databases: Some(DatabasesConfig {
+                cache_path: Some("/base/cache.db".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let overlay = ConfigFile {
+            databases: Some(DatabasesConfig {
+                cache_path: Some("/overlay/cache.db".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let merged = merge(base, overlay);
+        assert_eq!(
+            merged.databases.unwrap().cache_path.unwrap(),
+            "/overlay/cache.db"
+        );
+    }
+
+    #[test]
+    fn merge_cache_path_base_preserved_when_overlay_absent() {
+        let base = ConfigFile {
+            databases: Some(DatabasesConfig {
+                cache_path: Some("/base/cache.db".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let overlay = ConfigFile::default();
+        let merged = merge(base, overlay);
+        assert_eq!(
+            merged.databases.unwrap().cache_path.unwrap(),
+            "/base/cache.db"
+        );
+    }
+
+    #[test]
+    fn apply_cache_path_to_config_state() {
+        let file_cfg = ConfigFile {
+            databases: Some(DatabasesConfig {
+                cache_path: Some("/tmp/cache.db".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut state = ConfigState::default();
+        assert!(state.cache_path.is_empty());
+
+        apply_to_config_state(&file_cfg, &mut state);
+        assert_eq!(state.cache_path, "/tmp/cache.db");
+    }
+
+    #[test]
+    fn apply_empty_cache_path_does_not_overwrite() {
+        let file_cfg = ConfigFile {
+            databases: Some(DatabasesConfig {
+                cache_path: Some(String::new()), // empty string
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut state = ConfigState::default();
+        state.cache_path = "existing.db".to_string();
+
+        apply_to_config_state(&file_cfg, &mut state);
+        assert_eq!(state.cache_path, "existing.db"); // not overwritten
+    }
+
+    #[test]
+    fn apply_none_cache_path_does_not_overwrite() {
+        let file_cfg = ConfigFile::default(); // no databases section
+        let mut state = ConfigState::default();
+        state.cache_path = "existing.db".to_string();
+
+        apply_to_config_state(&file_cfg, &mut state);
+        assert_eq!(state.cache_path, "existing.db"); // preserved
+    }
+
+    #[test]
+    fn from_config_state_cache_path() {
+        let mut state = ConfigState::default();
+        state.cache_path = "/tmp/cache.db".to_string();
+        let file_cfg = from_config_state(&state);
+        assert_eq!(
+            file_cfg.databases.unwrap().cache_path.unwrap(),
+            "/tmp/cache.db"
+        );
+    }
+
+    #[test]
+    fn from_config_state_empty_cache_path_is_none() {
+        let state = ConfigState::default();
+        let file_cfg = from_config_state(&state);
+        assert!(file_cfg.databases.unwrap().cache_path.is_none());
+    }
+
+    #[test]
+    fn full_round_trip_config_state_toml_config_state() {
+        // ConfigState → ConfigFile → TOML → ConfigFile → ConfigState
+        let mut state = ConfigState::default();
+        state.cache_path = "/data/hallucinator_cache.db".to_string();
+        state.openalex_key = "test-key".to_string();
+
+        let file_cfg = from_config_state(&state);
+        let toml_str = toml::to_string_pretty(&file_cfg).unwrap();
+        let parsed: ConfigFile = toml::from_str(&toml_str).unwrap();
+
+        let mut state2 = ConfigState::default();
+        apply_to_config_state(&parsed, &mut state2);
+
+        assert_eq!(state2.cache_path, "/data/hallucinator_cache.db");
+        assert_eq!(state2.openalex_key, "test-key");
+    }
+}

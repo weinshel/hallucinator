@@ -270,6 +270,67 @@ pub fn build_query_cache(cache_path: Option<&std::path::Path>) -> Arc<QueryCache
     Arc::new(QueryCache::default())
 }
 
+#[cfg(test)]
+mod build_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn temp_path() -> PathBuf {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir()
+            .join(format!(
+                "hallucinator_build_cache_test_{}_{}",
+                std::process::id(),
+                id,
+            ))
+            .join("cache.db")
+    }
+
+    #[test]
+    fn none_path_returns_in_memory() {
+        let cache = build_query_cache(None);
+        assert!(!cache.has_persistence());
+    }
+
+    #[test]
+    fn valid_path_returns_persistent() {
+        let path = temp_path();
+        let _ = std::fs::remove_file(&path);
+
+        let cache = build_query_cache(Some(&path));
+        assert!(cache.has_persistence());
+
+        // Verify default TTLs (7 days positive, 24 hours negative)
+        assert_eq!(
+            cache.positive_ttl(),
+            std::time::Duration::from_secs(7 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            cache.negative_ttl(),
+            std::time::Duration::from_secs(24 * 60 * 60)
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn creates_parent_directory() {
+        let path = temp_path();
+        // Remove the parent directory entirely
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+
+        let cache = build_query_cache(Some(&path));
+        assert!(cache.has_persistence());
+        assert!(path.parent().unwrap().exists());
+
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 /// Check a list of references against academic databases.
 ///
 /// Validates each reference concurrently, querying multiple databases in parallel.

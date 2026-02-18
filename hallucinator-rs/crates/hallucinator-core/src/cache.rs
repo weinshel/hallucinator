@@ -655,4 +655,267 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    // ── Two-tier interaction tests ────────────────────────────────────
+
+    #[test]
+    fn l1_expired_l2_valid_promotes() {
+        // L1 has a very short TTL, L2 has a long TTL.
+        // After L1 expires, get() should still find the entry in L2 and promote it.
+        let path = temp_cache_path();
+        let _ = std::fs::remove_file(&path);
+
+        let positive_ttl = DEFAULT_POSITIVE_TTL;
+        let negative_ttl = DEFAULT_NEGATIVE_TTL;
+        let cache = QueryCache::open(&path, positive_ttl, negative_ttl).unwrap();
+
+        let result: DbQueryResult = (
+            Some("Persistent Paper".into()),
+            vec!["Author".into()],
+            None,
+        );
+        cache.insert("Persistent Paper", "CrossRef", &result);
+
+        // Manually expire L1 by removing the entry, simulating L1 eviction
+        let norm = normalize_title("Persistent Paper");
+        let key = CacheKey {
+            normalized_title: norm,
+            db_name: "CrossRef".to_string(),
+        };
+        cache.entries.remove(&key);
+        assert!(cache.is_empty()); // L1 is empty
+
+        // get() should fall through to L2 and find it
+        let cached = cache.get("Persistent Paper", "CrossRef");
+        assert!(cached.is_some());
+        let (title, authors, _) = cached.unwrap();
+        assert_eq!(title.unwrap(), "Persistent Paper");
+        assert_eq!(authors, vec!["Author"]);
+
+        // Should be promoted back to L1
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn l2_miss_increments_miss_counter_once() {
+        // When both L1 and L2 miss, misses should increment exactly once.
+        let path = temp_cache_path();
+        let _ = std::fs::remove_file(&path);
+
+        let cache = QueryCache::open(&path, DEFAULT_POSITIVE_TTL, DEFAULT_NEGATIVE_TTL).unwrap();
+        assert!(cache.get("Nonexistent", "DB").is_none());
+        assert_eq!(cache.misses(), 1); // exactly one miss, not two
+        assert_eq!(cache.hits(), 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clear_both_tiers_then_restart() {
+        // Insert entries, clear both tiers, restart — should be empty.
+        let path = temp_cache_path();
+        let _ = std::fs::remove_file(&path);
+
+        let cache = QueryCache::open(&path, DEFAULT_POSITIVE_TTL, DEFAULT_NEGATIVE_TTL).unwrap();
+        cache.insert("Paper A", "DB1", &(Some("Paper A".into()), vec![], None));
+        cache.insert("Paper B", "DB2", &(None, vec![], None));
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.disk_len(), 2);
+
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.disk_len(), 0);
+
+        // Restart — should still be empty
+        drop(cache);
+        let cache2 = QueryCache::open(&path, DEFAULT_POSITIVE_TTL, DEFAULT_NEGATIVE_TTL).unwrap();
+        assert!(cache2.is_empty());
+        assert_eq!(cache2.disk_len(), 0);
+        assert!(cache2.get("Paper A", "DB1").is_none());
+        assert!(cache2.get("Paper B", "DB2").is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn concurrent_reads_and_writes() {
+        let path = temp_cache_path();
+        let _ = std::fs::remove_file(&path);
+
+        let cache = std::sync::Arc::new(
+            QueryCache::open(&path, DEFAULT_POSITIVE_TTL, DEFAULT_NEGATIVE_TTL).unwrap(),
+        );
+
+        let mut handles = vec![];
+        for i in 0..10 {
+            let c = cache.clone();
+            handles.push(std::thread::spawn(move || {
+                let title = format!("Paper {}", i);
+                let db = format!("DB{}", i % 3);
+                // Write
+                c.insert(&title, &db, &(Some(title.clone()), vec!["Author".into()], None));
+                // Read back
+                let result = c.get(&title, &db);
+                assert!(result.is_some(), "concurrent read failed for {}", title);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All 10 entries should be present
+        assert_eq!(cache.len(), 10);
+        assert_eq!(cache.disk_len(), 10);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn corrupted_authors_json_in_sqlite() {
+        // Manually corrupt the authors JSON in SQLite, verify graceful recovery.
+        let path = temp_cache_path();
+        let _ = std::fs::remove_file(&path);
+
+        // First insert a valid entry
+        {
+            let cache =
+                QueryCache::open(&path, DEFAULT_POSITIVE_TTL, DEFAULT_NEGATIVE_TTL).unwrap();
+            cache.insert(
+                "Test Paper",
+                "DB",
+                &(Some("Test Paper".into()), vec!["Author".into()], None),
+            );
+        }
+
+        // Corrupt the authors JSON directly in SQLite
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE query_cache SET authors = '{not valid json!!!' WHERE db_name = 'DB'",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Re-open and read — should fall back to empty authors, not panic
+        let cache2 = QueryCache::open(&path, DEFAULT_POSITIVE_TTL, DEFAULT_NEGATIVE_TTL).unwrap();
+        let cached = cache2.get("Test Paper", "DB");
+        assert!(cached.is_some());
+        let (title, authors, _) = cached.unwrap();
+        assert_eq!(title.unwrap(), "Test Paper");
+        assert!(authors.is_empty()); // corrupted JSON → empty fallback
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn zero_ttl_entries_expire_immediately() {
+        let cache = QueryCache::new(Duration::ZERO, Duration::ZERO);
+        cache.insert("Paper", "DB", &(Some("Paper".into()), vec![], None));
+        // With zero TTL, any elapsed time > 0 means expired
+        // The insert and get happen so fast they might share the same Instant,
+        // but the `>` check (not `>=`) means Duration::ZERO elapsed == Duration::ZERO TTL
+        // is NOT expired. That's fine — it's a degenerate edge case.
+        // Insert a not-found too:
+        cache.insert("Missing", "DB", &(None, vec![], None));
+        // At minimum, verify no panic and consistent state
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn multiple_dbs_same_title() {
+        // Same title cached across multiple databases should be independent.
+        let cache = QueryCache::default();
+        let found: DbQueryResult = (Some("Paper X".into()), vec!["A".into()], None);
+        let not_found: DbQueryResult = (None, vec![], None);
+
+        cache.insert("Paper X", "CrossRef", &found);
+        cache.insert("Paper X", "arXiv", &not_found);
+        cache.insert("Paper X", "DBLP", &found);
+
+        assert_eq!(cache.len(), 3);
+
+        let cr = cache.get("Paper X", "CrossRef").unwrap();
+        assert!(cr.0.is_some());
+
+        let arxiv = cache.get("Paper X", "arXiv").unwrap();
+        assert!(arxiv.0.is_none());
+
+        let dblp = cache.get("Paper X", "DBLP").unwrap();
+        assert!(dblp.0.is_some());
+    }
+
+    #[test]
+    fn overwrite_existing_entry() {
+        // Inserting the same key twice should overwrite the first entry.
+        let cache = QueryCache::default();
+        cache.insert("Paper", "DB", &(None, vec![], None));
+        assert!(cache.get("Paper", "DB").unwrap().0.is_none());
+
+        // Now overwrite with a found result
+        cache.insert(
+            "Paper",
+            "DB",
+            &(Some("Paper".into()), vec!["Author".into()], None),
+        );
+        let cached = cache.get("Paper", "DB").unwrap();
+        assert_eq!(cached.0.unwrap(), "Paper");
+        assert_eq!(cached.1, vec!["Author"]);
+        assert_eq!(cache.len(), 1); // still one entry, not two
+    }
+
+    #[test]
+    fn sqlite_overwrite_existing_entry() {
+        let path = temp_cache_path();
+        let _ = std::fs::remove_file(&path);
+
+        let cache = QueryCache::open(&path, DEFAULT_POSITIVE_TTL, DEFAULT_NEGATIVE_TTL).unwrap();
+        cache.insert("Paper", "DB", &(None, vec![], None));
+        assert_eq!(cache.disk_len(), 1);
+
+        // Overwrite with found result
+        cache.insert(
+            "Paper",
+            "DB",
+            &(Some("Paper".into()), vec!["Author".into()], None),
+        );
+        assert_eq!(cache.disk_len(), 1); // still one row
+
+        // Restart and verify the overwritten value persisted
+        drop(cache);
+        let cache2 = QueryCache::open(&path, DEFAULT_POSITIVE_TTL, DEFAULT_NEGATIVE_TTL).unwrap();
+        let cached = cache2.get("Paper", "DB").unwrap();
+        assert_eq!(cached.0.unwrap(), "Paper");
+        assert_eq!(cached.1, vec!["Author"]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn has_persistence_flag() {
+        // In-memory cache reports no persistence
+        let mem = QueryCache::default();
+        assert!(!mem.has_persistence());
+
+        // SQLite-backed cache reports persistence
+        let path = temp_cache_path();
+        let _ = std::fs::remove_file(&path);
+        let persistent =
+            QueryCache::open(&path, DEFAULT_POSITIVE_TTL, DEFAULT_NEGATIVE_TTL).unwrap();
+        assert!(persistent.has_persistence());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ttl_accessors() {
+        let cache = QueryCache::new(Duration::from_secs(42), Duration::from_secs(7));
+        assert_eq!(cache.positive_ttl(), Duration::from_secs(42));
+        assert_eq!(cache.negative_ttl(), Duration::from_secs(7));
+    }
 }

@@ -589,6 +589,87 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn cache_stores_not_found() {
+        // Verify that not-found results are cached (negative caching).
+        let db = MockDb::new("TestDB", MockResponse::NotFound);
+        let client = reqwest::Client::new();
+        let limiters = RateLimiters::new(false, false);
+        let cache = QueryCache::default();
+
+        let rl_result =
+            query_with_rate_limit(&db, "Missing Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
+                .await;
+        assert!(rl_result.result.is_ok());
+        let (title, _, _) = rl_result.result.unwrap();
+        assert!(title.is_none());
+        assert_eq!(cache.len(), 1); // not-found cached
+
+        // Second call should hit cache, not query DB
+        let rl_result =
+            query_with_rate_limit(&db, "Missing Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
+                .await;
+        assert!(rl_result.result.is_ok());
+        assert_eq!(db.call_count(), 1); // still only 1 DB call
+        assert_eq!(cache.hits(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_populated_after_429_retry_success() {
+        // When first call gets 429 and retry succeeds, the result should be cached.
+        let db = MockDb::with_sequence(
+            "TestDB",
+            vec![
+                MockResponse::RateLimited {
+                    retry_after: Some(Duration::from_secs(1)),
+                },
+                MockResponse::Found {
+                    title: "A Paper".into(),
+                    authors: vec!["Author".into()],
+                    url: None,
+                },
+            ],
+        );
+        let client = reqwest::Client::new();
+        let limiters = RateLimiters::new(false, false);
+        let cache = QueryCache::default();
+
+        let rl_result =
+            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
+                .await;
+        assert!(rl_result.result.is_ok());
+        assert_eq!(db.call_count(), 2); // 429 + retry
+        assert_eq!(cache.len(), 1); // result cached after successful retry
+
+        // Third call should hit cache
+        let rl_result =
+            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
+                .await;
+        assert!(rl_result.result.is_ok());
+        assert_eq!(db.call_count(), 2); // no additional DB call
+        assert_eq!(cache.hits(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_not_populated_after_429_retry_failure() {
+        // When first call gets 429 and retry also gets 429, nothing should be cached.
+        let db = MockDb::new(
+            "TestDB",
+            MockResponse::RateLimited {
+                retry_after: Some(Duration::from_secs(1)),
+            },
+        );
+        let client = reqwest::Client::new();
+        let limiters = RateLimiters::new(false, false);
+        let cache = QueryCache::default();
+
+        let rl_result =
+            query_with_rate_limit(&db, "A Paper", &client, Duration::from_secs(10), &limiters, Some(&cache))
+                .await;
+        assert!(rl_result.result.is_err());
+        assert!(cache.is_empty()); // errors never cached
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn cache_does_not_store_errors() {
         let db = MockDb::new("TestDB", MockResponse::Error("connection refused".into()));
         let client = reqwest::Client::new();

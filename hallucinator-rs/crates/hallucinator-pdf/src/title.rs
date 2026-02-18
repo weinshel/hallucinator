@@ -75,6 +75,11 @@ pub(crate) fn extract_title_from_reference_with_config(
         return result;
     }
 
+    // === Format 2b: Book citation - "Author and Author, Title. Publisher, Year." ===
+    if let Some(result) = try_book_citation(ref_text) {
+        return result;
+    }
+
     // === Format 3a: Springer/Nature/Harvard - "Authors (Year) Title" ===
     if let Some(result) = try_springer_year(ref_text) {
         return result;
@@ -968,7 +973,8 @@ fn try_author_particles(ref_text: &str) -> Option<(String, bool)> {
         let particle =
             r"(?:(?:von|van|de|del|della|di|da|dos|das|du|le|la|les|den|der|ten|ter|op|het)\s+)?";
         let surname_chars = r"[A-Za-z\u{00C0}-\u{024F}\u{0027}\u{0060}\u{00B4}\u{2019}\-]";
-        let surname = format!(r"{}{}+(?:\s+{}+)*", particle, surname_chars, surname_chars);
+        // Require at least 2 chars in surname to avoid matching single-letter initials like "G."
+        let surname = format!(r"{}{}{{2,}}(?:\s+{}+)*", particle, surname_chars, surname_chars);
         let pattern = format!(
             r#",?\s+and\s+{}\s*{}\.\s+([A-Z\u{{00C0}}-\u{{00D6}}][a-z]|[A-Z]\s+[a-z]|[0-9]|["\u{{201c}}\u{{201d}}])"#,
             initial, surname,
@@ -1018,6 +1024,79 @@ fn try_author_particles(ref_text: &str) -> Option<(String, bool)> {
     } else {
         Some((title.to_string(), false))
     }
+}
+
+/// Book citation format: "F. M. Author and F. M. Author, Title. Publisher, Year."
+/// The key difference from journal format is: authors end with COMMA (not period),
+/// followed by title, then period, then publisher.
+fn try_book_citation(ref_text: &str) -> Option<(String, bool)> {
+    // Pattern: "and Initial. Surname, Title"
+    // where title starts with capital letter and contains lowercase (not all caps)
+    static BOOK_AUTHOR_RE: Lazy<Regex> = Lazy::new(|| {
+        // Match: "and I. I. Surname," or "and I. Surname," where Surname is 2+ letters
+        Regex::new(
+            r"(?i)\band\s+(?:[A-Z]\.\s*)+[A-Za-z\u{00C0}-\u{024F}'-]{2,},\s*([A-Z][a-z])",
+        )
+        .unwrap()
+    });
+
+    let caps = BOOK_AUTHOR_RE.captures(ref_text)?;
+    let title_start_match = caps.get(1)?;
+    let title_start = title_start_match.start();
+    let title_text = &ref_text[title_start..];
+
+    // Find where title ends: first period followed by space and then publisher/year
+    // Publishers: "MIT press", "Springer", "Elsevier", "Cambridge", "Oxford", etc.
+    // Or: capital word followed by comma and 4-digit year
+    static TITLE_END_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+        vec![
+            // Period followed by publisher name
+            Regex::new(r"\.\s+(?:MIT|Cambridge|Oxford|Springer|Elsevier|Wiley|Academic|Prentice|McGraw|Addison|O'Reilly|Morgan|CRC|IEEE|ACM)\b").unwrap(),
+            // Period followed by "X press" or "X Press"
+            Regex::new(r"\.\s+[A-Z][a-z]+\s+[Pp]ress\b").unwrap(),
+            // Period followed by "X Publishing"
+            Regex::new(r"\.\s+[A-Z][a-z]+\s+Publishing\b").unwrap(),
+            // Period followed by capitalized word, comma, year
+            Regex::new(r"\.\s+[A-Z][a-z]+,\s*(?:19|20)\d{2}").unwrap(),
+        ]
+    });
+
+    let mut title_end = title_text.len();
+    for re in TITLE_END_PATTERNS.iter() {
+        if let Some(m) = re.find(title_text) {
+            title_end = title_end.min(m.start());
+        }
+    }
+
+    // If no publisher pattern found, look for first real period
+    if title_end == title_text.len() {
+        // Find first period that's not after a single letter (initial)
+        for (i, _) in title_text.match_indices('.') {
+            if i > 0 {
+                let char_before = title_text.as_bytes().get(i - 1).copied().unwrap_or(0);
+                // Skip if it's an initial (single capital letter before period)
+                if char_before.is_ascii_uppercase() {
+                    let two_before = if i >= 2 {
+                        title_text.as_bytes().get(i - 2).copied().unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    if !two_before.is_ascii_alphabetic() {
+                        continue; // This is an initial like "A."
+                    }
+                }
+                title_end = i;
+                break;
+            }
+        }
+    }
+
+    let title = title_text[..title_end].trim();
+    if title.len() < 10 {
+        return None; // Too short to be a real title
+    }
+
+    Some((title.to_string(), false))
 }
 
 fn try_direct_in_venue(ref_text: &str) -> Option<(String, bool)> {
@@ -2061,6 +2140,24 @@ mod tests {
             cleaned.contains("Web 2.0 Technologies"),
             "Period in 2.0 should not truncate title: {}",
             cleaned,
+        );
+    }
+
+    #[test]
+    fn test_book_citation_format() {
+        // Issue #165: Book citation with comma after authors
+        let ref_text = "R. S. Sutton and A. G. Barto, Reinforcement learning: An introduction. MIT press, 2018.";
+        let (title, _) = extract_title_from_reference(ref_text);
+        let cleaned = clean_title(&title, false);
+        assert!(
+            !cleaned.contains("Barto"),
+            "Author name should not be in title: {}",
+            cleaned
+        );
+        assert!(
+            cleaned.contains("Reinforcement learning"),
+            "Title should contain main content: {}",
+            cleaned
         );
     }
 }

@@ -1,7 +1,7 @@
 use super::{DatabaseBackend, DbQueryError, DbQueryResult};
 use crate::matching::titles_match;
 use crate::rate_limit::check_rate_limit_response;
-use hallucinator_pdf::identifiers::get_query_words;
+use crate::text_utils::get_query_words;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -74,9 +74,9 @@ fn parse_ssrn_results(html: &str, title: &str) -> Result<DbQueryResult, DbQueryE
             // Note: scraper's tree traversal is limited; author extraction
             // from SSRN's complex DOM is best-effort here
 
-            return Ok((Some(found_title.to_string()), authors, paper_url));
+            return Ok(DbQueryResult::found(found_title, authors, paper_url));
         }
     }
 
-    Ok((None, vec![], None))
+    Ok(DbQueryResult::not_found())
 }

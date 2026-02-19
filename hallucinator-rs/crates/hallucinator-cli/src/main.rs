@@ -13,6 +13,14 @@ use output::ColorMode;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    /// Path to config file (default: auto-detect platform config dir)
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
+    /// Write tracing/debug logs to this file (default: stderr)
+    #[arg(long, global = true)]
+    log: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -80,6 +88,10 @@ enum Command {
         /// Clear the query cache and exit
         #[arg(long)]
         clear_cache: bool,
+
+        /// Clear only not-found entries from the cache and exit
+        #[arg(long)]
+        clear_not_found: bool,
     },
 
     /// Download and build the offline DBLP database
@@ -100,6 +112,51 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
 
+    // Initialize tracing: file (no ANSI) if --log given, otherwise stderr.
+    if let Some(ref log_path) = cli.log {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .unwrap_or_else(|e| panic!("Cannot open log file {}: {}", log_path.display(), e));
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt::init();
+    }
+
+    // Load config file (explicit --config path, or auto-detect)
+    let (file_config, config_source) = match &cli.config {
+        Some(path) => match hallucinator_core::config_file::load_from_path(path) {
+            Some(cfg) => (cfg, Some(path.clone())),
+            None => {
+                eprintln!("Warning: config file not found: {}", path.display());
+                (hallucinator_core::config_file::ConfigFile::default(), None)
+            }
+        },
+        None => {
+            // Auto-detect: try platform config dir, then CWD overlay
+            let cwd_path = PathBuf::from(".hallucinator.toml");
+            let platform_path = hallucinator_core::config_file::config_path();
+
+            let has_cwd = cwd_path.exists();
+            let has_platform = platform_path.as_ref().is_some_and(|p| p.exists());
+
+            let cfg = hallucinator_core::config_file::load_config();
+            let source = if has_cwd {
+                Some(cwd_path)
+            } else if has_platform {
+                platform_path
+            } else {
+                None
+            };
+            (cfg, source)
+        }
+    };
+
     match cli.command {
         Command::UpdateDblp { path } => update_dblp(&path).await,
         Command::UpdateAcl { path } => update_acl(&path).await,
@@ -119,13 +176,22 @@ async fn main() -> anyhow::Result<()> {
             searxng,
             cache_path,
             clear_cache,
+            clear_not_found,
         } => {
-            if clear_cache {
-                let path = cache_path.or_else(|| {
-                    std::env::var("HALLUCINATOR_CACHE_PATH")
-                        .ok()
-                        .map(PathBuf::from)
-                });
+            if clear_cache || clear_not_found {
+                let path = cache_path
+                    .or_else(|| {
+                        std::env::var("HALLUCINATOR_CACHE_PATH")
+                            .ok()
+                            .map(PathBuf::from)
+                    })
+                    .or_else(|| {
+                        file_config
+                            .databases
+                            .as_ref()
+                            .and_then(|d| d.cache_path.as_ref())
+                            .map(PathBuf::from)
+                    });
                 return match path {
                     Some(p) if p.exists() => {
                         let cache = hallucinator_core::QueryCache::open(
@@ -134,8 +200,17 @@ async fn main() -> anyhow::Result<()> {
                             std::time::Duration::from_secs(1),
                         )
                         .map_err(|e| anyhow::anyhow!("{}", e))?;
-                        cache.clear();
-                        println!("Cache cleared: {}", p.display());
+                        if clear_not_found {
+                            let removed = cache.clear_not_found();
+                            println!(
+                                "Cleared {} not-found entries from cache: {}",
+                                removed,
+                                p.display()
+                            );
+                        } else {
+                            cache.clear();
+                            println!("Cache cleared: {}", p.display());
+                        }
                         Ok(())
                     }
                     Some(p) => {
@@ -166,6 +241,8 @@ async fn main() -> anyhow::Result<()> {
                     max_rate_limit_retries,
                     searxng,
                     cache_path,
+                    file_config,
+                    config_source,
                 )
                 .await
             }
@@ -188,28 +265,82 @@ async fn check(
     max_rate_limit_retries: Option<u32>,
     searxng: bool,
     cache_path: Option<PathBuf>,
+    file_config: hallucinator_core::config_file::ConfigFile,
+    config_source: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    // Resolve configuration: CLI flags > env vars > defaults
-    let openalex_key = openalex_key.or_else(|| std::env::var("OPENALEX_KEY").ok());
-    let s2_api_key = s2_api_key.or_else(|| std::env::var("S2_API_KEY").ok());
-    let dblp_offline_path =
-        dblp_offline.or_else(|| std::env::var("DBLP_OFFLINE_PATH").ok().map(PathBuf::from));
-    let acl_offline_path =
-        acl_offline.or_else(|| std::env::var("ACL_OFFLINE_PATH").ok().map(PathBuf::from));
+    // Print config file source
+    match &config_source {
+        Some(path) => eprintln!("Config file: {}", path.display()),
+        None => eprintln!("Config file: none (use --config <path> or create .hallucinator.toml)"),
+    }
+
+    // Resolve configuration: CLI flags > env vars > config file > defaults
+    let openalex_key = openalex_key
+        .or_else(|| std::env::var("OPENALEX_KEY").ok())
+        .or_else(|| {
+            file_config
+                .api_keys
+                .as_ref()
+                .and_then(|a| a.openalex_key.clone())
+        });
+    let s2_api_key = s2_api_key
+        .or_else(|| std::env::var("S2_API_KEY").ok())
+        .or_else(|| {
+            file_config
+                .api_keys
+                .as_ref()
+                .and_then(|a| a.s2_api_key.clone())
+        });
+    let dblp_offline_path = dblp_offline
+        .or_else(|| std::env::var("DBLP_OFFLINE_PATH").ok().map(PathBuf::from))
+        .or_else(|| {
+            file_config
+                .databases
+                .as_ref()
+                .and_then(|d| d.dblp_offline_path.as_ref())
+                .map(PathBuf::from)
+        });
+    let acl_offline_path = acl_offline
+        .or_else(|| std::env::var("ACL_OFFLINE_PATH").ok().map(PathBuf::from))
+        .or_else(|| {
+            file_config
+                .databases
+                .as_ref()
+                .and_then(|d| d.acl_offline_path.as_ref())
+                .map(PathBuf::from)
+        });
     let db_timeout_secs: u64 = std::env::var("DB_TIMEOUT")
         .ok()
         .and_then(|v| v.parse().ok())
+        .or_else(|| {
+            file_config
+                .concurrency
+                .as_ref()
+                .and_then(|c| c.db_timeout_secs)
+        })
         .unwrap_or(10);
     let db_timeout_short_secs: u64 = std::env::var("DB_TIMEOUT_SHORT")
         .ok()
         .and_then(|v| v.parse().ok())
+        .or_else(|| {
+            file_config
+                .concurrency
+                .as_ref()
+                .and_then(|c| c.db_timeout_short_secs)
+        })
         .unwrap_or(5);
 
-    // SearxNG URL: only enabled if --searxng flag is set
+    // SearxNG URL: --searxng flag > env var > config file
     let searxng_url = if searxng {
         let url = std::env::var("SEARXNG_URL")
             .ok()
             .filter(|s| !s.is_empty())
+            .or_else(|| {
+                file_config
+                    .databases
+                    .as_ref()
+                    .and_then(|d| d.searxng_url.clone())
+            })
             .unwrap_or_else(|| "http://localhost:8080".to_string());
 
         // Check connectivity and warn if not reachable
@@ -220,7 +351,11 @@ async fn check(
 
         Some(url)
     } else {
-        None
+        // Even without --searxng flag, config file can enable it
+        file_config
+            .databases
+            .as_ref()
+            .and_then(|d| d.searxng_url.clone())
     };
 
     // Determine color mode and output writer
@@ -314,66 +449,65 @@ async fn check(
         None
     };
 
-    // Extract references from input file
     if !file_path.exists() {
         anyhow::bail!("File not found: {}", file_path.display());
     }
 
-    let is_bbl = file_path
-        .extension()
-        .map(|e| e.eq_ignore_ascii_case("bbl"))
-        .unwrap_or(false);
-    let is_bib = file_path
-        .extension()
-        .map(|e| e.eq_ignore_ascii_case("bib"))
-        .unwrap_or(false);
-
-    let extraction = if is_bbl {
-        hallucinator_bbl::extract_references_from_bbl(&file_path)
-            .map_err(|e| anyhow::anyhow!("BBL extraction failed: {}", e))?
-    } else if is_bib {
-        hallucinator_bbl::extract_references_from_bib(&file_path)
-            .map_err(|e| anyhow::anyhow!("BIB extraction failed: {}", e))?
-    } else {
-        hallucinator_pdf::extract_references(&file_path)?
-    };
-
-    let file_name = file_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| file_path.display().to_string());
-
-    output::print_extraction_summary(
-        &mut writer,
-        &file_name,
-        extraction.references.len(),
-        &extraction.skip_stats,
-        color,
-    )?;
-
-    if extraction.references.is_empty() {
-        writeln!(writer, "No references to check.")?;
-        return Ok(());
-    }
-
     let crossref_mailto: Option<String> = std::env::var("CROSSREF_MAILTO")
         .ok()
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            file_config
+                .api_keys
+                .as_ref()
+                .and_then(|a| a.crossref_mailto.clone())
+        });
 
-    // Build config
-    let num_workers = num_workers.unwrap_or(4);
-    let max_rate_limit_retries = max_rate_limit_retries.unwrap_or(3);
+    // Merge disable_dbs: CLI flags + config file disabled list
+    let disable_dbs = if disable_dbs.is_empty() {
+        file_config
+            .databases
+            .as_ref()
+            .and_then(|d| d.disabled.clone())
+            .unwrap_or_default()
+    } else {
+        disable_dbs
+    };
+
+    // Build config: CLI flags > env vars > config file > defaults
+    let num_workers = num_workers
+        .or_else(|| file_config.concurrency.as_ref().and_then(|c| c.num_workers))
+        .unwrap_or(4);
+    let max_rate_limit_retries = max_rate_limit_retries
+        .or_else(|| {
+            file_config
+                .concurrency
+                .as_ref()
+                .and_then(|c| c.max_rate_limit_retries)
+        })
+        .unwrap_or(3);
     let rate_limiters = std::sync::Arc::new(hallucinator_core::RateLimiters::new(
         crossref_mailto.is_some(),
         s2_api_key.is_some(),
     ));
 
-    let cache_path = cache_path.or_else(|| {
-        std::env::var("HALLUCINATOR_CACHE_PATH")
-            .ok()
-            .map(PathBuf::from)
-    });
-    let query_cache = hallucinator_core::build_query_cache(cache_path.as_deref());
+    let cache_path = cache_path
+        .or_else(|| {
+            std::env::var("HALLUCINATOR_CACHE_PATH")
+                .ok()
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            file_config
+                .databases
+                .as_ref()
+                .and_then(|d| d.cache_path.as_ref())
+                .map(PathBuf::from)
+        });
+    let positive_ttl = hallucinator_core::DEFAULT_POSITIVE_TTL.as_secs();
+    let negative_ttl = hallucinator_core::DEFAULT_NEGATIVE_TTL.as_secs();
+    let query_cache =
+        hallucinator_core::build_query_cache(cache_path.as_deref(), positive_ttl, negative_ttl);
 
     let config = hallucinator_core::Config {
         openalex_key: openalex_key.clone(),
@@ -393,7 +527,36 @@ async fn check(
         searxng_url,
         query_cache: Some(query_cache),
         cache_path,
+        cache_positive_ttl_secs: positive_ttl,
+        cache_negative_ttl_secs: negative_ttl,
     };
+
+    // Handle archives: extract each file and run check on each independently
+    if hallucinator_ingest::is_archive_path(&file_path) {
+        return run_archive_check(&file_path, config, output, color).await;
+    }
+
+    // Single file: extract then check
+    let extraction = hallucinator_ingest::extract_references(&file_path)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let file_name = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_path.display().to_string());
+
+    output::print_extraction_summary(
+        &mut writer,
+        &file_name,
+        extraction.references.len(),
+        &extraction.skip_stats,
+        color,
+    )?;
+
+    if extraction.references.is_empty() {
+        writeln!(writer, "No references to check.")?;
+        return Ok(());
+    }
 
     // Set up progress callback
     let progress_writer: Arc<Mutex<Box<dyn Write + Send>>> = if output.is_some() {
@@ -436,6 +599,139 @@ async fn check(
     output::print_doi_issues(&mut writer, &results, color)?;
     output::print_retraction_warnings(&mut writer, &results, color)?;
     output::print_summary(&mut writer, &results, &skip_stats, color)?;
+
+    Ok(())
+}
+
+/// Process all extractable files inside an archive, printing a per-file report for each.
+async fn run_archive_check(
+    archive_path: &std::path::Path,
+    config: hallucinator_core::Config,
+    output: Option<PathBuf>,
+    color: ColorMode,
+) -> anyhow::Result<()> {
+    use hallucinator_ingest::archive::{ArchiveItem, extract_archive_streaming};
+
+    let mut writer: Box<dyn Write> = if let Some(ref output_path) = output {
+        Box::new(std::fs::File::create(output_path)?)
+    } else {
+        Box::new(std::io::stdout())
+    };
+
+    let archive_name = archive_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| archive_path.display().to_string());
+
+    writeln!(writer, "Archive: {}", archive_name)?;
+    writeln!(writer)?;
+
+    let temp_dir = tempfile::tempdir()?;
+    let (tx, rx) = std::sync::mpsc::channel::<ArchiveItem>();
+
+    let archive_path = archive_path.to_path_buf();
+    let dir = temp_dir.path().to_path_buf();
+    let extract_handle =
+        std::thread::spawn(move || extract_archive_streaming(&archive_path, &dir, 0, &tx));
+
+    let mut file_count = 0usize;
+    let config = Arc::new(config);
+
+    for item in rx {
+        match item {
+            ArchiveItem::Warning(msg) => {
+                writeln!(writer, "Warning: {}", msg)?;
+            }
+            ArchiveItem::Pdf(extracted) => {
+                file_count += 1;
+
+                // Print a header separator for each file
+                writeln!(writer, "─── {} ───", extracted.filename)?;
+                writeln!(writer)?;
+
+                let path = extracted.path.clone();
+                let extraction = match hallucinator_ingest::extract_references(&path) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        writeln!(writer, "  Error: {}", e)?;
+                        writeln!(writer)?;
+                        continue;
+                    }
+                };
+
+                output::print_extraction_summary(
+                    &mut writer,
+                    &extracted.filename,
+                    extraction.references.len(),
+                    &extraction.skip_stats,
+                    color,
+                )?;
+
+                if extraction.references.is_empty() {
+                    writeln!(writer, "No references to check.")?;
+                    writeln!(writer)?;
+                    continue;
+                }
+
+                let progress_writer: Arc<Mutex<Box<dyn Write + Send>>> = if output.is_some() {
+                    Arc::new(Mutex::new(Box::new(std::io::stderr())))
+                } else {
+                    Arc::new(Mutex::new(Box::new(std::io::stdout())))
+                };
+                let progress_color = color;
+                let progress_cb = {
+                    let pw = Arc::clone(&progress_writer);
+                    move |event: hallucinator_core::ProgressEvent| {
+                        if let Ok(mut w) = pw.lock() {
+                            let _ = output::print_progress(&mut *w, &event, progress_color);
+                            let _ = w.flush();
+                        }
+                    }
+                };
+
+                let cancel = CancellationToken::new();
+                let cancel_clone = cancel.clone();
+                tokio::spawn(async move {
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        cancel_clone.cancel();
+                    }
+                });
+
+                let skip_stats = extraction.skip_stats.clone();
+                let config_clone = Arc::clone(&config);
+                let refs = extraction.references;
+
+                let results = hallucinator_core::check_references(
+                    refs,
+                    (*config_clone).clone(),
+                    progress_cb,
+                    cancel,
+                )
+                .await;
+
+                writeln!(writer)?;
+                // Use the first openalex key for the report (openalex_key is in config)
+                let has_openalex = config_clone.openalex_key.is_some();
+                output::print_hallucination_report(&mut writer, &results, has_openalex, color)?;
+                output::print_doi_issues(&mut writer, &results, color)?;
+                output::print_retraction_warnings(&mut writer, &results, color)?;
+                output::print_summary(&mut writer, &results, &skip_stats, color)?;
+                writeln!(writer)?;
+            }
+            ArchiveItem::Done { total } => {
+                writeln!(writer, "Processed {} file(s) from archive.", total)?;
+            }
+        }
+    }
+
+    extract_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Archive extraction thread panicked"))?
+        .map_err(|e| anyhow::anyhow!("Archive extraction failed: {}", e))?;
+
+    if file_count == 0 {
+        writeln!(writer, "No processable files found in archive.")?;
+    }
 
     Ok(())
 }
@@ -486,7 +782,10 @@ fn dry_run_pdf(
 ) -> anyhow::Result<()> {
     use owo_colors::OwoColorize;
 
-    let text = hallucinator_pdf::extract::extract_text_from_pdf(file_path)?;
+    use hallucinator_pdf::PdfBackend as _;
+    let text = hallucinator_pdf_mupdf::MupdfBackend
+        .extract_text(file_path)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     let ref_section = hallucinator_pdf::section::find_references_section(&text)
         .ok_or_else(|| anyhow::anyhow!("No references section found"))?;
     let raw_refs = hallucinator_pdf::section::segment_references(&ref_section);

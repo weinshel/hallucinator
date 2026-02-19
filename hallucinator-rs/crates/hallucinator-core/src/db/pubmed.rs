@@ -1,7 +1,7 @@
 use super::{DatabaseBackend, DbQueryError, DbQueryResult};
 use crate::matching::titles_match;
 use crate::rate_limit::check_rate_limit_response;
-use hallucinator_pdf::identifiers::get_query_words;
+use crate::text_utils::get_query_words;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -60,7 +60,7 @@ impl DatabaseBackend for PubMed {
                 .unwrap_or_default();
 
             if id_list.is_empty() {
-                return Ok((None, vec![], None));
+                return Ok(DbQueryResult::not_found());
             }
 
             // Step 2: Fetch details
@@ -104,11 +104,11 @@ impl DatabaseBackend for PubMed {
 
                     let paper_url = format!("https://pubmed.ncbi.nlm.nih.gov/{}/", pmid);
 
-                    return Ok((Some(found_title.to_string()), authors, Some(paper_url)));
+                    return Ok(DbQueryResult::found(found_title, authors, Some(paper_url)));
                 }
             }
 
-            Ok((None, vec![], None))
+            Ok(DbQueryResult::not_found())
         })
     }
 }

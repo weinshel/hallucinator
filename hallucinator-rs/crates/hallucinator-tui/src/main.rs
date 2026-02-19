@@ -1,3 +1,4 @@
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -318,6 +319,18 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect();
 
+    let log_dir = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("hallucinator")
+        .join("logs");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "hallucinator-tui.log");
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(file_appender)
+        .with_ansi(false)
+        .init();
+    startup_info.push(format!("Logs: {}", log_dir.display()));
+
     // Set Windows timer resolution to 1ms for accurate frame pacing.
     // Without this, timers round up to the default 15.6ms granularity,
     // causing ~22 FPS instead of the target 30.
@@ -410,6 +423,11 @@ async fn main() -> anyhow::Result<()> {
             "No CrossRef mailto set. Set your email in Config > API Keys for better rate limits."
                 .to_string(),
         );
+    }
+
+    // Eagerly open the query cache so the user sees it in the activity log at startup
+    if !app.config_state.cache_path.is_empty() {
+        app.get_or_build_query_cache();
     }
 
     // Initialize results persistence directory

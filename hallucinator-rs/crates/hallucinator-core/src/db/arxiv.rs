@@ -1,6 +1,6 @@
 use super::{DatabaseBackend, DbQueryError, DbQueryResult};
 use crate::matching::titles_match;
-use hallucinator_pdf::identifiers::get_query_words;
+use crate::text_utils::get_query_words;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -131,7 +131,11 @@ fn parse_arxiv_response(xml: &str, title: &str) -> Result<DbQueryResult, DbQuery
                             } else {
                                 Some(current_link.clone())
                             };
-                            return Ok((Some(entry_title), current_authors.clone(), link));
+                            return Ok(DbQueryResult::found(
+                                entry_title,
+                                current_authors.clone(),
+                                link,
+                            ));
                         }
                         in_entry = false;
                     }
@@ -153,5 +157,5 @@ fn parse_arxiv_response(xml: &str, title: &str) -> Result<DbQueryResult, DbQuery
         buf.clear();
     }
 
-    Ok((None, vec![], None))
+    Ok(DbQueryResult::not_found())
 }

@@ -7,7 +7,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
-use hallucinator_pdf::archive::ArchiveItem;
+use hallucinator_ingest::archive::ArchiveItem;
 
 use hallucinator_core::{DbStatus, ProgressEvent};
 
@@ -145,7 +145,7 @@ impl FilePickerState {
                     let is_pdf = ext.map(|e| e.eq_ignore_ascii_case("pdf")).unwrap_or(false);
                     let is_bbl = ext.map(|e| e.eq_ignore_ascii_case("bbl")).unwrap_or(false);
                     let is_bib = ext.map(|e| e.eq_ignore_ascii_case("bib")).unwrap_or(false);
-                    let is_archive = hallucinator_pdf::archive::is_archive_path(&path);
+                    let is_archive = hallucinator_ingest::is_archive_path(&path);
                     let is_json = ext.map(|e| e.eq_ignore_ascii_case("json")).unwrap_or(false);
                     let is_db = ext
                         .map(|e| e.eq_ignore_ascii_case("db") || e.eq_ignore_ascii_case("sqlite"))
@@ -297,6 +297,8 @@ pub struct App {
     pub current_rate_limiters: Option<std::sync::Arc<hallucinator_core::RateLimiters>>,
     /// Query cache for the current run (shared with backend for cache stats).
     pub current_query_cache: Option<std::sync::Arc<hallucinator_core::QueryCache>>,
+    /// Cache path corresponding to the current_query_cache (for change detection).
+    current_query_cache_path: Option<std::path::PathBuf>,
     /// Frame counter for FPS measurement.
     frame_count: u32,
     /// Last time FPS was sampled.
@@ -364,6 +366,7 @@ impl App {
             inflight_batches: 0,
             current_rate_limiters: None,
             current_query_cache: None,
+            current_query_cache_path: None,
             frame_count: 0,
             last_fps_instant: Instant::now(),
             measured_fps: 0.0,
@@ -536,11 +539,10 @@ impl App {
             rs.clear();
         }
 
+        let config = self.build_config();
+        // Keep references to rate limiters and cache for the activity panel
+        self.current_rate_limiters = Some(config.rate_limiters.clone());
         if let Some(tx) = &self.backend_cmd_tx {
-            let config = self.build_config();
-            // Keep references to rate limiters and cache for the activity panel
-            self.current_rate_limiters = Some(config.rate_limiters.clone());
-            self.current_query_cache = config.query_cache.clone();
             let _ = tx.send(BackendCommand::ProcessFiles {
                 files: real_files,
                 starting_index: 0,
@@ -550,8 +552,59 @@ impl App {
         }
     }
 
+    /// Return the existing query cache if the path hasn't changed, or build a new one.
+    pub(crate) fn get_or_build_query_cache(
+        &mut self,
+    ) -> std::sync::Arc<hallucinator_core::QueryCache> {
+        let current_path = if self.config_state.cache_path.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(&self.config_state.cache_path))
+        };
+
+        // Reuse existing cache if path matches and we have a live handle
+        if let Some(ref existing) = self.current_query_cache {
+            let prev_path = self
+                .current_query_cache_path
+                .as_ref()
+                .map(std::path::PathBuf::from);
+            if prev_path == current_path {
+                return existing.clone();
+            }
+        }
+
+        // Path changed or no cache yet — build fresh
+        let cache = hallucinator_core::build_query_cache(
+            current_path.as_deref(),
+            hallucinator_core::DEFAULT_POSITIVE_TTL.as_secs(),
+            hallucinator_core::DEFAULT_NEGATIVE_TTL.as_secs(),
+        );
+
+        // Log cache info
+        if cache.has_persistence() {
+            let (found, nf) = cache.l2_counts();
+            let total = found + nf;
+            if let Some(ref p) = current_path {
+                self.activity.log(format!(
+                    "Cache opened: {} ({} entries: {} found, {} not-found)",
+                    p.display(),
+                    total,
+                    found,
+                    nf,
+                ));
+            }
+        } else if current_path.is_some() {
+            self.activity
+                .log_warn("Cache: failed to open SQLite, using in-memory only".to_string());
+        }
+
+        self.current_query_cache = Some(cache.clone());
+        self.current_query_cache_path = current_path;
+        cache
+    }
+
     /// Build a `hallucinator_core::Config` from the current ConfigState.
-    fn build_config(&self) -> hallucinator_core::Config {
+    fn build_config(&mut self) -> hallucinator_core::Config {
         let disabled_dbs: Vec<String> = self
             .config_state
             .disabled_dbs
@@ -608,13 +661,9 @@ impl App {
             } else {
                 Some(std::path::PathBuf::from(&self.config_state.cache_path))
             },
-            query_cache: Some(hallucinator_core::build_query_cache(
-                if self.config_state.cache_path.is_empty() {
-                    None
-                } else {
-                    Some(std::path::Path::new(&self.config_state.cache_path))
-                },
-            )),
+            cache_positive_ttl_secs: hallucinator_core::DEFAULT_POSITIVE_TTL.as_secs(),
+            cache_negative_ttl_secs: hallucinator_core::DEFAULT_NEGATIVE_TTL.as_secs(),
+            query_cache: Some(self.get_or_build_query_cache()),
         }
     }
 
@@ -660,7 +709,7 @@ impl App {
                             .log_warn(format!("Failed to load {}: {}", path.display(), e));
                     }
                 }
-            } else if hallucinator_pdf::archive::is_archive_path(&path) {
+            } else if hallucinator_ingest::is_archive_path(&path) {
                 // Set extracting indicator for the first archive so it shows immediately
                 if self.extracting_archive.is_none() {
                     let name = path
@@ -726,7 +775,7 @@ impl App {
         // Spawn blocking extraction in a background thread
         tokio::task::spawn_blocking(move || {
             if let Err(e) =
-                hallucinator_pdf::archive::extract_archive_streaming(&path, &dir, max_size, &tx)
+                hallucinator_ingest::extract_archive_streaming(&path, &dir, max_size, &tx)
             {
                 // Send the error as a warning so the UI can display it;
                 // Done{0} signals no PDFs were found.
@@ -789,18 +838,17 @@ impl App {
         let got_new = !new_pdfs.is_empty();
 
         // If processing is already started, send newly extracted PDFs to backend
-        if self.processing_started
-            && got_new
-            && let Some(tx) = &self.backend_cmd_tx
-        {
+        if self.processing_started && got_new {
             let starting_index = self.file_paths.len() - new_pdfs.len();
             let config = self.build_config();
-            let _ = tx.send(BackendCommand::ProcessFiles {
-                files: new_pdfs,
-                starting_index,
-                config: Box::new(config),
-            });
-            self.inflight_batches += 1;
+            if let Some(tx) = &self.backend_cmd_tx {
+                let _ = tx.send(BackendCommand::ProcessFiles {
+                    files: new_pdfs,
+                    starting_index,
+                    config: Box::new(config),
+                });
+                self.inflight_batches += 1;
+            }
         }
 
         if got_new {
@@ -1713,7 +1761,7 @@ impl App {
         use crate::model::config::ConfigSection;
         match self.config_state.section {
             ConfigSection::ApiKeys => 3,
-            ConfigSection::Databases => 5 + self.config_state.disabled_dbs.len(), // DBLP + ACL + cache_path + clear_cache + searxng_url + toggles
+            ConfigSection::Databases => 6 + self.config_state.disabled_dbs.len(), // DBLP + ACL + cache_path + clear_cache + clear_not_found + searxng_url + toggles
             ConfigSection::Concurrency => 5,
             ConfigSection::Display => 2, // theme + fps
         }
@@ -1780,13 +1828,16 @@ impl App {
                     // Item 3: clear cache button
                     self.clear_query_cache();
                 } else if self.config_state.item_cursor == 4 {
-                    // Item 4: edit SearxNG URL
+                    // Item 4: clear not-found button
+                    self.clear_not_found_cache();
+                } else if self.config_state.item_cursor == 5 {
+                    // Item 5: edit SearxNG URL
                     self.config_state.editing = true;
                     self.config_state.edit_buffer =
                         self.config_state.searxng_url.clone().unwrap_or_default();
                     self.input_mode = InputMode::TextInput;
                 } else {
-                    // Items 5+: toggle DB (same as space)
+                    // Items 6+: toggle DB (same as space)
                     self.handle_config_space();
                 }
             }
@@ -1798,9 +1849,9 @@ impl App {
         use crate::model::config::ConfigSection;
         match self.config_state.section {
             ConfigSection::Databases => {
-                // Items 5+ are DB toggles (0-1: paths, 2: cache path, 3: clear cache, 4: searxng url)
-                if self.config_state.item_cursor >= 5 {
-                    let toggle_idx = self.config_state.item_cursor - 5;
+                // Items 6+ are DB toggles (0-1: paths, 2: cache path, 3: clear cache, 4: clear not-found, 5: searxng url)
+                if self.config_state.item_cursor >= 6 {
+                    let toggle_idx = self.config_state.item_cursor - 6;
                     if let Some((_, enabled)) = self.config_state.disabled_dbs.get_mut(toggle_idx) {
                         *enabled = !*enabled;
                         self.config_state.dirty = true;
@@ -1877,7 +1928,7 @@ impl App {
                         clean_canonicalize(&PathBuf::from(&buf))
                     };
                 }
-                4 => {
+                5 => {
                     self.config_state.searxng_url = if buf.is_empty() { None } else { Some(buf) };
                 }
                 _ => {}
@@ -1930,6 +1981,55 @@ impl App {
                         self.config_state.cache_clear_status = Some(format!("Failed: {}", e));
                         self.activity
                             .log_warn(format!("Failed to clear cache: {}", e));
+                    }
+                }
+            } else {
+                self.config_state.cache_clear_status = Some("No cache file found".to_string());
+            }
+        } else {
+            self.config_state.cache_clear_status = Some("No cache path configured".to_string());
+        }
+    }
+
+    /// Clear only not-found entries from the query cache.
+    fn clear_not_found_cache(&mut self) {
+        if let Some(ref cache) = self.current_query_cache {
+            let removed = cache.clear_not_found();
+            self.config_state.cache_clear_status = Some(format!(
+                "Cleared {} not-found entries (ref x db pairs)",
+                removed
+            ));
+            self.activity.log(format!(
+                "Cleared {} not-found cache entries (each ref checked against multiple DBs)",
+                removed
+            ));
+            return;
+        }
+
+        let cache_path = if self.config_state.cache_path.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(&self.config_state.cache_path))
+        };
+
+        if let Some(ref path) = cache_path {
+            if path.exists() {
+                match hallucinator_core::QueryCache::open(
+                    path,
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
+                ) {
+                    Ok(cache) => {
+                        let removed = cache.clear_not_found();
+                        self.config_state.cache_clear_status =
+                            Some(format!("Cleared {} not-found entries", removed));
+                        self.activity
+                            .log(format!("Cleared {} not-found cache entries", removed));
+                    }
+                    Err(e) => {
+                        self.config_state.cache_clear_status = Some(format!("Failed: {}", e));
+                        self.activity
+                            .log_warn(format!("Failed to clear not-found cache: {}", e));
                     }
                 }
             } else {
@@ -2213,7 +2313,10 @@ impl App {
                 self.activity.total_completed += 1;
                 self.throughput_since_last += 1;
             }
-            ProgressEvent::Warning { .. } => {}
+            ProgressEvent::Warning { .. } => {
+                // Per-reference warnings are too spammy for the activity log.
+                // Aggregate DB-level warnings are emitted below in DatabaseQueryComplete.
+            }
             ProgressEvent::Retrying {
                 title, failed_dbs, ..
             } => {
@@ -2250,26 +2353,27 @@ impl App {
                         status,
                         DbStatus::Match | DbStatus::NoMatch | DbStatus::AuthorMismatch
                     );
+                    let is_rate_limited = status == DbStatus::RateLimited;
                     let is_match = status == DbStatus::Match;
                     self.activity.record_db_complete(
                         &db_name,
                         success,
+                        is_rate_limited,
                         is_match,
                         elapsed.as_secs_f64() * 1000.0,
                     );
 
-                    // Warn when DBLP online is repeatedly timing out and no offline DB is configured
-                    if db_name == "DBLP"
-                        && !success
-                        && !self.activity.dblp_timeout_warned
-                        && self.config_state.dblp_offline_path.is_empty()
-                        && let Some(health) = self.activity.db_health.get("DBLP")
+                    // Emit a one-time warning when a DB hits 3+ failures
+                    if !success
+                        && !self.activity.warned_dbs.contains(&db_name)
+                        && let Some(health) = self.activity.db_health.get(db_name.as_str())
                         && health.failed >= 3
                     {
-                        self.activity.log_warn(
-                                    "DBLP online timing out repeatedly. Build an offline database: hallucinator-tui update-dblp".to_string()
-                                );
-                        self.activity.dblp_timeout_warned = true;
+                        let has_dblp_offline = !self.config_state.dblp_offline_path.is_empty();
+                        let msg =
+                            db_failure_warning(&db_name, health.rate_limited, has_dblp_offline);
+                        self.activity.log_warn(msg);
+                        self.activity.warned_dbs.insert(db_name.clone());
                     }
                 }
             }
@@ -2450,8 +2554,8 @@ impl App {
         self.activity
             .log(format!("Retrying ref #{}...", ref_idx + 1));
 
+        let config = self.build_config();
         if let Some(tx) = &self.backend_cmd_tx {
-            let config = self.build_config();
             let _ = tx.send(BackendCommand::RetryReferences {
                 paper_index: paper_idx,
                 refs_to_retry: vec![(ref_idx, reference, failed_dbs)],
@@ -2509,8 +2613,8 @@ impl App {
         self.activity
             .log(format!("Retrying {} references...", count));
 
+        let config = self.build_config();
         if let Some(tx) = &self.backend_cmd_tx {
-            let config = self.build_config();
             let _ = tx.send(BackendCommand::RetryReferences {
                 paper_index: paper_idx,
                 refs_to_retry: to_retry,
@@ -2909,6 +3013,31 @@ fn verdict_sort_key(rs: &RefState) -> u8 {
             }
         }
         None => 4,
+    }
+}
+
+/// Build a one-time warning message for a DB that is repeatedly failing.
+fn db_failure_warning(db_name: &str, rate_limited_count: usize, has_dblp_offline: bool) -> String {
+    let kind = if rate_limited_count > 0 {
+        "rate-limited (429)"
+    } else {
+        "failing"
+    };
+
+    match db_name {
+        "OpenAlex" => {
+            format!("OpenAlex {kind} repeatedly — check API key and credit balance at openalex.org")
+        }
+        "Semantic Scholar" => {
+            format!("Semantic Scholar {kind} repeatedly — check API key at semanticscholar.org")
+        }
+        "CrossRef" => format!(
+            "CrossRef {kind} repeatedly — set crossref_mailto in config for higher rate limits"
+        ),
+        "DBLP" if !has_dblp_offline => format!(
+            "DBLP online {kind} repeatedly — build an offline database: hallucinator-tui update-dblp"
+        ),
+        _ => format!("{db_name} {kind} repeatedly"),
     }
 }
 
@@ -3477,7 +3606,7 @@ mod tests {
         let mut app = test_app();
         app.screen = Screen::Config;
         app.config_state.section = ConfigSection::Databases;
-        app.config_state.item_cursor = 4; // first DB toggle (0=DBLP, 1=ACL, 2=cache, 3=clear, 4+=toggles)
+        app.config_state.item_cursor = 6; // first DB toggle (0=DBLP, 1=ACL, 2=cache, 3=clear, 4=clear-nf, 5=searxng, 6+=toggles)
 
         app.update(Action::ToggleSafe);
 

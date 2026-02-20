@@ -159,6 +159,21 @@ pub(crate) fn clean_title_with_config(
         title = LEADING_YEAR.replace(&title, "").to_string();
     }
 
+    // Strip USENIX page headers/footers that get concatenated with reference text
+    // Pattern 1: "216 34th USENIX Security Symposium USENIX Association" (page number at start)
+    // Pattern 2: "USENIX Association 34th USENIX Security Symposium 2943" (page number at end)
+    // Use a single comprehensive pattern that handles both orderings
+    static USENIX_HEADER: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"(?:USENIX\s+Association\s+)?(?:\d+\s+)?\d+(?:st|nd|rd|th)\s+USENIX\s+(?:Security\s+Symposium|OSDI|ATC|NSDI|HotCloud|WOOT|FAST|LISA|SREcon)(?:\s+USENIX\s+Association)?(?:\s+\d+)?"
+        ).unwrap()
+    });
+    title = USENIX_HEADER.replace_all(&title, " ").to_string();
+
+    // Normalize whitespace after stripping
+    static MULTI_SPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s{2,}").unwrap());
+    title = MULTI_SPACE.replace_all(&title, " ").trim().to_string();
+
     // For non-quoted titles, truncate at first sentence-ending period
     if !from_quotes {
         title = truncate_at_sentence_end(&title);
@@ -2799,5 +2814,41 @@ fn test_good_proctor_or_big_brother() {
         title.to_lowercase().contains("big brother"),
         "Title should include 'Big Brother': {}",
         title
+    );
+}
+
+#[test]
+fn test_usenix_header_stripped() {
+    // USENIX page headers should be stripped from titles
+    let title = "The hiding virtues of ambiguity: quantifiably resilient watermarking of natural language text through synonym 216 34th USENIX Security Symposium USENIX Association substitutions";
+    let cleaned = clean_title(title, false);
+    println!("Cleaned title: {}", cleaned);
+    assert!(
+        !cleaned.contains("USENIX"),
+        "USENIX header should be stripped: {}",
+        cleaned
+    );
+    assert!(
+        cleaned.to_lowercase().contains("hiding virtues"),
+        "Title should retain main content: {}",
+        cleaned
+    );
+}
+
+#[test]
+fn test_usenix_header_at_end_stripped() {
+    // USENIX header at end of reference should be stripped
+    let title = "Fundamentals of Classical and Modern Error-Correcting Codes USENIX Association 34th USENIX Security Symposium 215";
+    let cleaned = clean_title(title, false);
+    println!("Cleaned title: {}", cleaned);
+    assert!(
+        !cleaned.contains("USENIX"),
+        "USENIX header should be stripped: {}",
+        cleaned
+    );
+    assert!(
+        cleaned.to_lowercase().contains("error-correcting"),
+        "Title should retain main content: {}",
+        cleaned
     );
 }

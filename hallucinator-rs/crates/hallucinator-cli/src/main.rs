@@ -26,6 +26,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Check a PDF, .bbl, or .bib file for hallucinated references
     Check {
@@ -55,6 +56,10 @@ enum Command {
         /// Path to offline ACL Anthology database
         #[arg(long)]
         acl_offline: Option<PathBuf>,
+
+        /// Path to offline OpenAlex Tantivy index
+        #[arg(long)]
+        openalex_offline: Option<PathBuf>,
 
         /// Comma-separated list of databases to disable
         #[arg(long, value_delimiter = ',')]
@@ -104,6 +109,20 @@ enum Command {
     UpdateAcl {
         /// Path to store the ACL SQLite database
         path: PathBuf,
+    },
+
+    /// Download and build the offline OpenAlex Tantivy index
+    UpdateOpenalex {
+        /// Path to store the OpenAlex index directory
+        path: PathBuf,
+
+        /// Only download S3 partitions newer than this date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Only index works published in this year or later (e.g. 2020)
+        #[arg(long)]
+        min_year: Option<u32>,
     },
 }
 
@@ -160,6 +179,11 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::UpdateDblp { path } => update_dblp(&path).await,
         Command::UpdateAcl { path } => update_acl(&path).await,
+        Command::UpdateOpenalex {
+            path,
+            since,
+            min_year,
+        } => update_openalex(&path, since.as_deref(), min_year).await,
         Command::Check {
             file_path,
             no_color,
@@ -168,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
             output,
             dblp_offline,
             acl_offline,
+            openalex_offline,
             disable_dbs,
             check_openalex_authors,
             num_workers,
@@ -235,6 +260,7 @@ async fn main() -> anyhow::Result<()> {
                     output,
                     dblp_offline,
                     acl_offline,
+                    openalex_offline,
                     disable_dbs,
                     check_openalex_authors,
                     num_workers,
@@ -259,6 +285,7 @@ async fn check(
     output: Option<PathBuf>,
     dblp_offline: Option<PathBuf>,
     acl_offline: Option<PathBuf>,
+    openalex_offline: Option<PathBuf>,
     disable_dbs: Vec<String>,
     check_openalex_authors: bool,
     num_workers: Option<usize>,
@@ -307,6 +334,19 @@ async fn check(
                 .databases
                 .as_ref()
                 .and_then(|d| d.acl_offline_path.as_ref())
+                .map(PathBuf::from)
+        });
+    let openalex_offline_path = openalex_offline
+        .or_else(|| {
+            std::env::var("OPENALEX_OFFLINE_PATH")
+                .ok()
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            file_config
+                .databases
+                .as_ref()
+                .and_then(|d| d.openalex_offline_path.as_ref())
                 .map(PathBuf::from)
         });
     let db_timeout_secs: u64 = std::env::var("DB_TIMEOUT")
@@ -449,6 +489,47 @@ async fn check(
         None
     };
 
+    // Open offline OpenAlex index if configured
+    let openalex_offline_db = if let Some(ref path) = openalex_offline_path {
+        if !path.exists() {
+            anyhow::bail!(
+                "Offline OpenAlex index not found at {}. Build it with: hallucinator-cli update-openalex {}",
+                path.display(),
+                path.display()
+            );
+        }
+        let db = hallucinator_openalex::OpenAlexDatabase::open(path)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if let Ok(staleness) = db.check_staleness(30)
+            && staleness.is_stale
+        {
+            let msg = if let Some(days) = staleness.age_days {
+                format!(
+                    "Offline OpenAlex index is {} days old. Consider running: hallucinator-cli update-openalex {}",
+                    days,
+                    path.display()
+                )
+            } else {
+                format!(
+                    "Offline OpenAlex index may be stale. Consider running: hallucinator-cli update-openalex {}",
+                    path.display()
+                )
+            };
+            if color.enabled() {
+                use owo_colors::OwoColorize;
+                writeln!(writer, "{}", msg.yellow())?;
+            } else {
+                writeln!(writer, "{}", msg)?;
+            }
+            writeln!(writer)?;
+        }
+
+        Some(Arc::new(Mutex::new(db)))
+    } else {
+        None
+    };
+
     if !file_path.exists() {
         anyhow::bail!("File not found: {}", file_path.display());
     }
@@ -516,6 +597,8 @@ async fn check(
         dblp_offline_db,
         acl_offline_path: acl_offline_path.clone(),
         acl_offline_db,
+        openalex_offline_path: openalex_offline_path.clone(),
+        openalex_offline_db,
         num_workers,
         db_timeout_secs,
         db_timeout_short_secs,
@@ -1288,6 +1371,162 @@ async fn update_acl(db_path: &PathBuf) -> anyhow::Result<()> {
         println!("Database is already up to date: {}", canonical.display());
     } else {
         println!("ACL database saved to: {}", canonical.display());
+    }
+
+    Ok(())
+}
+
+async fn update_openalex(
+    db_path: &PathBuf,
+    since: Option<&str>,
+    min_year: Option<u32>,
+) -> anyhow::Result<()> {
+    use indicatif::{HumanBytes, HumanCount, MultiProgress, ProgressBar, ProgressStyle};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    if since.is_none() && min_year.is_none() {
+        eprintln!("Warning: This may use ~15-30 GB of disk space for the full OpenAlex index.");
+    }
+    if let Some(since) = since {
+        eprintln!("Only downloading S3 partitions newer than {since}");
+    }
+    if let Some(min_year) = min_year {
+        eprintln!("Only indexing works published in {min_year} or later");
+    }
+
+    let multi = MultiProgress::new();
+
+    let bar_style = ProgressStyle::with_template(
+        "{spinner:.cyan} [{bar:40.cyan/dim}] {pos}/{len} files  {msg}",
+    )
+    .unwrap()
+    .progress_chars("=> ");
+
+    let spinner_style = ProgressStyle::with_template("{spinner:.cyan} {msg}").unwrap();
+    let file_spinner_style = ProgressStyle::with_template("  {spinner:.dim} {msg:.dim}").unwrap();
+
+    let bar = multi.add(ProgressBar::new(0));
+    bar.set_style(spinner_style.clone());
+    bar.set_message("Listing OpenAlex S3 partitions...");
+    bar.enable_steady_tick(Duration::from_millis(120));
+
+    let mut file_spinners: HashMap<String, ProgressBar> = HashMap::new();
+
+    let build_start = Instant::now();
+
+    let updated = hallucinator_openalex::build_database_filtered(
+        db_path,
+        since,
+        min_year,
+        |event| match event {
+            hallucinator_openalex::BuildProgress::ListingPartitions { message } => {
+                bar.set_message(message);
+            }
+            hallucinator_openalex::BuildProgress::FileStarted { filename } => {
+                let s = multi.add(ProgressBar::new_spinner());
+                s.set_style(file_spinner_style.clone());
+                s.set_message(filename.clone());
+                s.enable_steady_tick(Duration::from_millis(120));
+                file_spinners.insert(filename, s);
+            }
+            hallucinator_openalex::BuildProgress::FileComplete { filename } => {
+                if let Some(s) = file_spinners.remove(&filename) {
+                    s.finish_and_clear();
+                }
+            }
+            hallucinator_openalex::BuildProgress::FileProgress {
+                filename,
+                bytes_downloaded,
+            } => {
+                if let Some(s) = file_spinners.get(&filename) {
+                    s.set_message(format!("{} ({})", filename, HumanBytes(bytes_downloaded)));
+                }
+            }
+            hallucinator_openalex::BuildProgress::Downloading {
+                files_done,
+                files_total,
+                bytes_downloaded,
+                records_indexed,
+            } => {
+                if bar.length() == Some(0) && files_total > 0 {
+                    bar.set_length(files_total);
+                    bar.set_style(bar_style.clone());
+                }
+                bar.set_position(files_done);
+                let elapsed = build_start.elapsed().as_secs_f64();
+                let speed = if elapsed > 0.5 {
+                    format!(
+                        " ({}/s)",
+                        HumanBytes((bytes_downloaded as f64 / elapsed) as u64)
+                    )
+                } else {
+                    String::new()
+                };
+                let rate = if elapsed > 0.5 && records_indexed > 0 {
+                    format!(
+                        ", {} records ({}/s)",
+                        HumanCount(records_indexed),
+                        HumanCount((records_indexed as f64 / elapsed) as u64)
+                    )
+                } else if records_indexed > 0 {
+                    format!(", {} records", HumanCount(records_indexed))
+                } else {
+                    String::new()
+                };
+                bar.set_message(format!("{}{}{}", HumanBytes(bytes_downloaded), speed, rate));
+            }
+            hallucinator_openalex::BuildProgress::Committing { records_indexed } => {
+                bar.set_message(format!(
+                    "Committing... {} records",
+                    HumanCount(records_indexed)
+                ));
+            }
+            hallucinator_openalex::BuildProgress::FileSkipped { filename, error } => {
+                if let Some(s) = file_spinners.remove(&filename) {
+                    s.finish_and_clear();
+                }
+                bar.suspend(|| {
+                    eprintln!("Warning: skipped {} ({error})", filename);
+                });
+            }
+            hallucinator_openalex::BuildProgress::Merging => {
+                for (_, s) in file_spinners.drain() {
+                    s.finish_and_clear();
+                }
+                bar.set_message("Merging index segments...");
+            }
+            hallucinator_openalex::BuildProgress::Complete {
+                publications,
+                skipped,
+                failed_files,
+            } => {
+                if skipped {
+                    bar.finish_with_message("Index is already up to date");
+                } else {
+                    let warn = if failed_files.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({} files failed)", failed_files.len())
+                    };
+                    bar.finish_with_message(format!(
+                        "Indexed {} publications (total {:.0?}){}",
+                        HumanCount(publications),
+                        build_start.elapsed(),
+                        warn,
+                    ));
+                }
+            }
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let canonical = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.clone());
+    if !updated {
+        println!("Index is already up to date: {}", canonical.display());
+    } else {
+        println!("OpenAlex index saved to: {}", canonical.display());
     }
 
     Ok(())

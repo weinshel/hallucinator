@@ -86,9 +86,8 @@ fn strip_page_headers(text: &str) -> String {
     });
 
     // "USENIX Association" on its own line (often appears before the symposium line)
-    static USENIX_ASSOC_ONLY: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?m)^\s*USENIX\s+Association\s*$").unwrap()
-    });
+    static USENIX_ASSOC_ONLY: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?m)^\s*USENIX\s+Association\s*$").unwrap());
 
     // IEEE S&P, EuroS&P, etc.
     static IEEE_HEADER: Lazy<Regex> = Lazy::new(|| {
@@ -807,7 +806,14 @@ mod tests {
         );
         let section = find_references_section(text).unwrap();
         // Should contain the actual references, not the table content
-        assert!(section.contains("[1] First real reference"), "Section: {}", section);
-        assert!(!section.contains("Classification"), "Should not contain table content");
+        assert!(
+            section.contains("[1] First real reference"),
+            "Section: {}",
+            section
+        );
+        assert!(
+            !section.contains("Classification"),
+            "Should not contain table content"
+        );
     }
 }

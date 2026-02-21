@@ -97,6 +97,10 @@ enum Command {
         /// Clear only not-found entries from the cache and exit
         #[arg(long)]
         clear_not_found: bool,
+
+        /// Export results as JSON to this path (compatible with hallucinator-tui --load)
+        #[arg(long)]
+        json: Option<PathBuf>,
     },
 
     /// Download and build the offline DBLP database
@@ -202,6 +206,7 @@ async fn main() -> anyhow::Result<()> {
             cache_path,
             clear_cache,
             clear_not_found,
+            json,
         } => {
             if clear_cache || clear_not_found {
                 let path = cache_path
@@ -269,11 +274,88 @@ async fn main() -> anyhow::Result<()> {
                     cache_path,
                     file_config,
                     config_source,
+                    json,
                 )
                 .await
             }
         }
     }
+}
+
+/// Saved reference metadata for --json export (captured before check_references consumes refs).
+struct RefMeta {
+    original_number: usize,
+    title: String,
+    skip_reason: Option<String>,
+}
+
+/// Build report data from CLI results for JSON export.
+///
+/// Returns (unused_paper_field, report_refs, results_vec, stats).
+fn build_report_data(
+    _filename: &str,
+    results: &[hallucinator_core::ValidationResult],
+    ref_meta: &[RefMeta],
+    skip_stats: &hallucinator_core::SkipStats,
+) -> (
+    (),
+    Vec<hallucinator_reporting::ReportRef>,
+    Vec<Option<hallucinator_core::ValidationResult>>,
+    hallucinator_core::CheckStats,
+) {
+    // Build results vec: None for skipped refs, Some for checked refs
+    let mut results_vec: Vec<Option<hallucinator_core::ValidationResult>> =
+        Vec::with_capacity(ref_meta.len());
+    let mut report_refs: Vec<hallucinator_reporting::ReportRef> =
+        Vec::with_capacity(ref_meta.len());
+
+    // Results from check_references correspond 1:1 to the input refs
+    for (i, meta) in ref_meta.iter().enumerate() {
+        let index = meta.original_number.saturating_sub(1);
+        if meta.skip_reason.is_some() {
+            // Skipped ref: don't include checker result
+            results_vec.push(None);
+            report_refs.push(hallucinator_reporting::ReportRef {
+                index,
+                title: meta.title.clone(),
+                skip_info: Some(hallucinator_reporting::SkipInfo {
+                    reason: meta.skip_reason.clone().unwrap_or_default(),
+                }),
+                fp_reason: None,
+            });
+        } else if let Some(r) = results.get(i) {
+            results_vec.push(Some(r.clone()));
+            report_refs.push(hallucinator_reporting::ReportRef {
+                index,
+                title: meta.title.clone(),
+                skip_info: None,
+                fp_reason: None,
+            });
+        }
+    }
+
+    // Compute stats from the non-skipped results
+    let mut stats = hallucinator_core::CheckStats {
+        total: ref_meta.len(),
+        skipped: skip_stats.url_only + skip_stats.short_title + skip_stats.no_title,
+        ..Default::default()
+    };
+    for result in results_vec.iter().flatten() {
+        match result.status {
+            hallucinator_core::Status::Verified => stats.verified += 1,
+            hallucinator_core::Status::NotFound => stats.not_found += 1,
+            hallucinator_core::Status::AuthorMismatch => stats.author_mismatch += 1,
+        }
+        if result
+            .retraction_info
+            .as_ref()
+            .is_some_and(|ri| ri.is_retracted)
+        {
+            stats.retracted += 1;
+        }
+    }
+
+    ((), report_refs, results_vec, stats)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -294,6 +376,7 @@ async fn check(
     cache_path: Option<PathBuf>,
     file_config: hallucinator_core::config_file::ConfigFile,
     config_source: Option<PathBuf>,
+    json_output: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // Print config file source
     match &config_source {
@@ -616,7 +699,7 @@ async fn check(
 
     // Handle archives: extract each file and run check on each independently
     if hallucinator_ingest::is_archive_path(&file_path) {
-        return run_archive_check(&file_path, config, output, color).await;
+        return run_archive_check(&file_path, config, output, color, json_output).await;
     }
 
     // Single file: extract then check
@@ -670,6 +753,18 @@ async fn check(
     });
 
     let skip_stats = extraction.skip_stats.clone();
+
+    // Save ref metadata for --json export (before check_references consumes them)
+    let ref_meta: Vec<RefMeta> = extraction
+        .references
+        .iter()
+        .map(|r| RefMeta {
+            original_number: r.original_number,
+            title: r.title.clone().unwrap_or_default(),
+            skip_reason: r.skip_reason.clone(),
+        })
+        .collect();
+
     let results =
         hallucinator_core::check_references(extraction.references, config, progress_cb, cancel)
             .await;
@@ -683,6 +778,28 @@ async fn check(
     output::print_retraction_warnings(&mut writer, &results, color)?;
     output::print_summary(&mut writer, &results, &skip_stats, color)?;
 
+    // --json export
+    if let Some(json_path) = json_output {
+        let (_, report_refs, results_vec, stats) =
+            build_report_data(&file_name, &results, &ref_meta, &skip_stats);
+        let paper = hallucinator_reporting::ReportPaper {
+            filename: &file_name,
+            stats: &stats,
+            results: &results_vec,
+            verdict: None,
+        };
+        let ref_slices: &[&[hallucinator_reporting::ReportRef]] = &[&report_refs];
+        hallucinator_reporting::export_results(
+            &[paper],
+            ref_slices,
+            hallucinator_reporting::ExportFormat::Json,
+            &json_path,
+            false,
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        eprintln!("Results saved to {}", json_path.display());
+    }
+
     Ok(())
 }
 
@@ -692,6 +809,7 @@ async fn run_archive_check(
     config: hallucinator_core::Config,
     output: Option<PathBuf>,
     color: ColorMode,
+    json_output: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     use hallucinator_ingest::archive::{ArchiveItem, extract_archive_streaming};
 
@@ -719,6 +837,15 @@ async fn run_archive_check(
 
     let mut file_count = 0usize;
     let config = Arc::new(config);
+
+    // Accumulator for --json export
+    struct PerFileData {
+        filename: String,
+        report_refs: Vec<hallucinator_reporting::ReportRef>,
+        results_vec: Vec<Option<hallucinator_core::ValidationResult>>,
+        stats: hallucinator_core::CheckStats,
+    }
+    let mut json_data: Vec<PerFileData> = Vec::new();
 
     for item in rx {
         match item {
@@ -782,6 +909,18 @@ async fn run_archive_check(
 
                 let skip_stats = extraction.skip_stats.clone();
                 let config_clone = Arc::clone(&config);
+
+                // Save ref metadata for --json export
+                let ref_meta: Vec<RefMeta> = extraction
+                    .references
+                    .iter()
+                    .map(|r| RefMeta {
+                        original_number: r.original_number,
+                        title: r.title.clone().unwrap_or_default(),
+                        skip_reason: r.skip_reason.clone(),
+                    })
+                    .collect();
+
                 let refs = extraction.references;
 
                 let results = hallucinator_core::check_references(
@@ -800,6 +939,18 @@ async fn run_archive_check(
                 output::print_retraction_warnings(&mut writer, &results, color)?;
                 output::print_summary(&mut writer, &results, &skip_stats, color)?;
                 writeln!(writer)?;
+
+                // Accumulate for --json export
+                if json_output.is_some() {
+                    let (_, report_refs, results_vec, stats) =
+                        build_report_data(&extracted.filename, &results, &ref_meta, &skip_stats);
+                    json_data.push(PerFileData {
+                        filename: extracted.filename.clone(),
+                        report_refs,
+                        results_vec,
+                        stats,
+                    });
+                }
             }
             ArchiveItem::Done { total } => {
                 writeln!(writer, "Processed {} file(s) from archive.", total)?;
@@ -814,6 +965,30 @@ async fn run_archive_check(
 
     if file_count == 0 {
         writeln!(writer, "No processable files found in archive.")?;
+    }
+
+    // --json export for archive
+    if let Some(json_path) = json_output {
+        let report_papers: Vec<hallucinator_reporting::ReportPaper<'_>> = json_data
+            .iter()
+            .map(|d| hallucinator_reporting::ReportPaper {
+                filename: &d.filename,
+                stats: &d.stats,
+                results: &d.results_vec,
+                verdict: None,
+            })
+            .collect();
+        let ref_slices: Vec<&[hallucinator_reporting::ReportRef]> =
+            json_data.iter().map(|d| d.report_refs.as_slice()).collect();
+        hallucinator_reporting::export_results(
+            &report_papers,
+            &ref_slices,
+            hallucinator_reporting::ExportFormat::Json,
+            &json_path,
+            false,
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        eprintln!("Results saved to {}", json_path.display());
     }
 
     Ok(())

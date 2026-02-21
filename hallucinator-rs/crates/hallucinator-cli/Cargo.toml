@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 hallucinator-core.workspace = true
 hallucinator-ingest.workspace = true
+hallucinator-reporting.workspace = true
 hallucinator-pdf.workspace = true
 hallucinator-pdf-mupdf.workspace = true
 hallucinator-bbl.workspace = true

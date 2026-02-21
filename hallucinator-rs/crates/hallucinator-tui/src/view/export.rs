@@ -13,6 +13,8 @@ pub use hallucinator_reporting::ExportFormat;
 pub enum ExportScope {
     ThisPaper,
     AllPapers,
+    /// Only papers that have at least one problematic reference.
+    ProblematicPapers,
 }
 
 impl ExportScope {
@@ -20,6 +22,15 @@ impl ExportScope {
         match self {
             Self::ThisPaper => "This paper",
             Self::AllPapers => "All papers",
+            Self::ProblematicPapers => "Problematic papers",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::ThisPaper => Self::AllPapers,
+            Self::AllPapers => Self::ProblematicPapers,
+            Self::ProblematicPapers => Self::ThisPaper,
         }
     }
 }
@@ -30,8 +41,9 @@ pub struct ExportState {
     pub active: bool,
     pub format: ExportFormat,
     pub scope: ExportScope,
+    pub problematic_only: bool,
     pub output_path: String,
-    pub cursor: usize, // 0=format, 1=scope, 2=path, 3=confirm
+    pub cursor: usize, // 0=format, 1=scope, 2=filter, 3=path, 4=confirm
     pub editing_path: bool,
     pub edit_buffer: String,
     pub message: Option<String>,
@@ -43,6 +55,7 @@ impl Default for ExportState {
             active: false,
             format: ExportFormat::Json,
             scope: ExportScope::AllPapers,
+            problematic_only: false,
             output_path: "hallucinator-results".to_string(),
             cursor: 0,
             editing_path: false,
@@ -57,7 +70,7 @@ pub fn render(f: &mut Frame, app: &App) {
     let theme = &app.theme;
     let export = &app.export_state;
     let area = f.area();
-    let popup = centered_rect(50, 14, area);
+    let popup = centered_rect(50, 15, area);
 
     let mut lines = vec![
         Line::from(Span::styled(
@@ -90,8 +103,23 @@ pub fn render(f: &mut Frame, app: &App) {
         Span::styled(export.scope.label(), Style::default().fg(theme.active)),
     ]));
 
+    // Filter
+    let filter_indicator = if export.cursor == 2 { "> " } else { "  " };
+    let filter_label = if export.problematic_only {
+        "Problematic only"
+    } else {
+        "All references"
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  {}Filter:  ", filter_indicator),
+            Style::default().fg(theme.text),
+        ),
+        Span::styled(filter_label, Style::default().fg(theme.active)),
+    ]));
+
     // Output path
-    let path_indicator = if export.cursor == 2 { "> " } else { "  " };
+    let path_indicator = if export.cursor == 3 { "> " } else { "  " };
     let path_display = if export.editing_path {
         format!("{}\u{2588}", export.edit_buffer)
     } else {
@@ -117,7 +145,7 @@ pub fn render(f: &mut Frame, app: &App) {
     lines.push(Line::from(""));
 
     // Confirm button
-    let confirm_style = if export.cursor == 3 {
+    let confirm_style = if export.cursor == 4 {
         Style::default()
             .fg(theme.header_fg)
             .bg(theme.active)

@@ -6,8 +6,8 @@ use crate::orchestrator::query_all_databases;
 use crate::pool::{RefJob, ValidationPool};
 use crate::retraction::check_retraction;
 use crate::{
-    ArxivInfo, Config, DbResult, DbStatus, DoiInfo, ProgressEvent, Reference, RetractionInfo,
-    Status, ValidationResult,
+    Config, DbResult, DbStatus, DoiInfo, ProgressEvent, Reference, RetractionInfo, Status,
+    ValidationResult,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -357,11 +357,7 @@ pub async fn check_single_reference(
         failed_dbs: db_result.failed_dbs,
         db_results: db_result.db_results,
         doi_info,
-        arxiv_info: reference.arxiv_id.as_ref().map(|id| ArxivInfo {
-            arxiv_id: id.clone(),
-            valid: false, // Will be validated separately if needed
-            title: None,
-        }),
+        arxiv_info: None, // TODO(#124): implement arXiv ID validation
         retraction_info,
     }
 }

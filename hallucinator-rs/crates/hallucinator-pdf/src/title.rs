@@ -951,16 +951,16 @@ fn try_acm_year(ref_text: &str) -> Option<(String, bool)> {
 fn try_arxiv_preprint(ref_text: &str) -> Option<(String, bool)> {
     // Try Format 2 first: ". arXiv:ID, Year" (more common in recent papers)
     // Pattern: Title ends at ". arXiv:" and the arXiv ID is followed by ", Year"
-    static RE2: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"\.\s*arXiv\s*:\s*\d+\.\d+(?:v\d+)?\s*,\s*(?:19|20)\d{2}").unwrap());
+    static RE2: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\.\s*arXiv\s*:\s*\d+\.\d+(?:v\d+)?\s*,\s*(?:19|20)\d{2}").unwrap()
+    });
 
     if let Some(m) = RE2.find(ref_text) {
         let before_arxiv = &ref_text[..m.start()];
 
         // Find the title: look for the last ". X" pattern (sentence boundary)
-        static TITLE_START: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r#"\.\s+([A-Z0-9"\u{201c}])"#).unwrap()
-        });
+        static TITLE_START: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r#"\.\s+([A-Z0-9"\u{201c}])"#).unwrap());
 
         let mut title_start_pos = None;
         for caps in TITLE_START.captures_iter(before_arxiv) {
@@ -988,9 +988,8 @@ fn try_arxiv_preprint(ref_text: &str) -> Option<(String, bool)> {
         let before_comma = &ref_text[..m.start()];
 
         // Find the title: look for the last ". X" pattern (sentence boundary)
-        static TITLE_START: Lazy<Regex> = Lazy::new(|| {
-            Regex::new(r#"\.\s+([A-Z0-9"\u{201c}])"#).unwrap()
-        });
+        static TITLE_START: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r#"\.\s+([A-Z0-9"\u{201c}])"#).unwrap());
 
         let mut title_start_pos = None;
         for caps in TITLE_START.captures_iter(before_comma) {
@@ -1017,9 +1016,8 @@ fn try_arxiv_preprint(ref_text: &str) -> Option<(String, bool)> {
     let before_year = &ref_text[..m.start()];
 
     // Find the title: look for the last ". X" pattern (sentence boundary) before the year
-    static TITLE_START: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"\.\s+([A-Z0-9"\u{201c}])"#).unwrap()
-    });
+    static TITLE_START: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"\.\s+([A-Z0-9"\u{201c}])"#).unwrap());
 
     let mut title_start_pos = None;
     for caps in TITLE_START.captures_iter(before_year) {
@@ -1074,7 +1072,8 @@ fn try_venue_marker(ref_text: &str) -> Option<(String, bool)> {
         if let Some(venue_match) = vp.find(ref_text) {
             // Check if this match is actually an editor list, not a venue
             // Use floor_char_boundary to avoid slicing in the middle of a UTF-8 character
-            let editor_check_end = ref_text.floor_char_boundary(venue_match.start().saturating_add(200));
+            let editor_check_end =
+                ref_text.floor_char_boundary(venue_match.start().saturating_add(200));
             if EDITOR_PATTERN.is_match(&ref_text[venue_match.start()..editor_check_end]) {
                 // This is an editor list, not a regular venue.
                 // Extract the title from BEFORE the ". In editors" marker
@@ -1438,8 +1437,7 @@ fn try_book_citation(ref_text: &str) -> Option<(String, bool)> {
 
     // Skip if the "title" starts with words indicating this is an editor list, not a book title
     // e.g., "and A. Oh, editors, Advances..." should not match
-    static EDITOR_START: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)^editors?,").unwrap());
+    static EDITOR_START: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^editors?,").unwrap());
     if EDITOR_START.is_match(title_text) {
         return None;
     }
@@ -1519,7 +1517,8 @@ fn try_direct_in_venue(ref_text: &str) -> Option<(String, bool)> {
 fn try_accessed_date(ref_text: &str) -> Option<(String, bool)> {
     // Match: "Title. (Accessed MM-DD-YYYY)" or "(Ac- cessed ...)" with hyphenation
     static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^([A-Z][^.]+)\.\s*\((?:Ac-?\s*cessed|Accessed|Retrieved|Last accessed)\s+").unwrap()
+        Regex::new(r"^([A-Z][^.]+)\.\s*\((?:Ac-?\s*cessed|Accessed|Retrieved|Last accessed)\s+")
+            .unwrap()
     });
 
     let caps = RE.captures(ref_text)?;
@@ -1538,7 +1537,8 @@ fn try_accessed_date(ref_text: &str) -> Option<(String, bool)> {
 fn try_standard_document(ref_text: &str) -> Option<(String, bool)> {
     // Match: "Title. IEEE No XXX, Year" or "Title. ISO XXXX, Year" etc.
     static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^([A-Z][^.]+)\.\s*(?:IEEE|ISO|NIST|RFC|FIPS|ITU)\s+(?:No\.?\s*)?[\d\-]+").unwrap()
+        Regex::new(r"^([A-Z][^.]+)\.\s*(?:IEEE|ISO|NIST|RFC|FIPS|ITU)\s+(?:No\.?\s*)?[\d\-]+")
+            .unwrap()
     });
 
     let caps = RE.captures(ref_text)?;
@@ -1701,7 +1701,12 @@ fn split_sentences_skip_initials(text: &str) -> Vec<String> {
             if word_before.to_lowercase() == "al" {
                 let after_period = &text[m.end()..];
                 let is_author = AUTHOR_AFTER.iter().any(|re| re.is_match(after_period));
-                if !is_author && after_period.chars().next().is_some_and(|c| c.is_uppercase()) {
+                if !is_author
+                    && after_period
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_uppercase())
+                {
                     // This "al." is followed by what looks like a title - treat it as a boundary
                     // (don't continue, fall through to sentence boundary handling)
                 } else {
@@ -3134,7 +3139,9 @@ fn test_usenix_workshop_participants_title() {
     let (title, _) = extract_title_from_reference(ref_text);
     println!("Workshop title extracted: {}", title);
     assert!(
-        title.to_lowercase().contains("identifying research challenges"),
+        title
+            .to_lowercase()
+            .contains("identifying research challenges"),
         "Should extract title from workshop report format: {}",
         title,
     );
@@ -3161,7 +3168,9 @@ fn test_usenix_url_accessed_date() {
     let (title, _) = extract_title_from_reference(ref_text);
     println!("URL accessed title: {}", title);
     assert!(
-        title.to_lowercase().contains("defcon 30 hacking conference"),
+        title
+            .to_lowercase()
+            .contains("defcon 30 hacking conference"),
         "Should extract title from URL reference: {}",
         title,
     );
@@ -3171,7 +3180,8 @@ fn test_usenix_url_accessed_date() {
 fn test_usenix_ieee_standard() {
     // Paper 194 ref 1: IEEE standard document
     // Should extract: "IEEE recommended practice for speech quality measurements"
-    let ref_text = "IEEE recommended practice for speech quality mea- surements. IEEE No 297-1969, 1969.";
+    let ref_text =
+        "IEEE recommended practice for speech quality mea- surements. IEEE No 297-1969, 1969.";
     let (title, _) = extract_title_from_reference(ref_text);
     println!("IEEE standard title: {}", title);
     assert!(
@@ -3289,7 +3299,8 @@ fn test_et_al_extraction() {
     );
 
     // Test full extraction
-    let ref_text = "A. Smith et al. Machine learning for security analysis. In Proceedings of IEEE, 2023.";
+    let ref_text =
+        "A. Smith et al. Machine learning for security analysis. In Proceedings of IEEE, 2023.";
     let (title, _) = extract_title_from_reference(ref_text);
     assert!(
         title.contains("Machine learning"),

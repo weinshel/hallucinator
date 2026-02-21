@@ -76,7 +76,7 @@ impl App {
                     self.export_state.active = false;
                 }
                 Action::MoveDown => {
-                    self.export_state.cursor = (self.export_state.cursor + 1).min(3);
+                    self.export_state.cursor = (self.export_state.cursor + 1).min(4);
                 }
                 Action::MoveUp => {
                     self.export_state.cursor = self.export_state.cursor.saturating_sub(1);
@@ -91,24 +91,21 @@ impl App {
                         self.export_state.format = formats[(idx + 1) % formats.len()];
                     }
                     1 => {
-                        self.export_state.scope = match self.export_state.scope {
-                            crate::view::export::ExportScope::ThisPaper => {
-                                crate::view::export::ExportScope::AllPapers
-                            }
-                            crate::view::export::ExportScope::AllPapers => {
-                                crate::view::export::ExportScope::ThisPaper
-                            }
-                        };
+                        self.export_state.scope = self.export_state.scope.next();
                         self.export_state.output_path =
                             self.export_default_path(self.export_state.scope);
                     }
                     2 => {
+                        // Toggle problematic-only filter
+                        self.export_state.problematic_only = !self.export_state.problematic_only;
+                    }
+                    3 => {
                         // Start editing the output path
                         self.export_state.editing_path = true;
                         self.export_state.edit_buffer = self.export_state.output_path.clone();
                         self.input_mode = InputMode::TextInput;
                     }
-                    3 => {
+                    4 => {
                         let path = format!(
                             "{}.{}",
                             self.export_state.output_path,
@@ -128,6 +125,17 @@ impl App {
                                 };
                                 idx.map(|i| vec![i])
                                     .unwrap_or_else(|| (0..self.papers.len()).collect())
+                            }
+                            crate::view::export::ExportScope::ProblematicPapers => {
+                                (0..self.papers.len())
+                                    .filter(|&i| {
+                                        self.papers.get(i).is_some_and(|p| {
+                                            p.stats.not_found > 0
+                                                || p.stats.author_mismatch > 0
+                                                || p.stats.retracted > 0
+                                        })
+                                    })
+                                    .collect::<Vec<_>>()
                             }
                         };
                         // Build full results from ref_states for export
@@ -191,6 +199,7 @@ impl App {
                             &ref_slices,
                             self.export_state.format,
                             std::path::Path::new(&path),
+                            self.export_state.problematic_only,
                         ) {
                             Ok(()) => {
                                 self.export_state.message = Some(format!("Saved to {}", path));

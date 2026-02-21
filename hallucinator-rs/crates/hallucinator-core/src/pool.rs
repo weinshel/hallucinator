@@ -19,8 +19,7 @@ use crate::db::searxng::Searxng;
 use crate::orchestrator::{build_database_list, query_local_databases};
 use crate::rate_limit::{self, DbQueryError, DoiContext};
 use crate::{
-    ArxivInfo, Config, DbResult, DbStatus, DoiInfo, ProgressEvent, Reference, Status,
-    ValidationResult,
+    Config, DbResult, DbStatus, DoiInfo, ProgressEvent, Reference, Status, ValidationResult,
 };
 
 // ── Public API (unchanged) ──────────────────────────────────────────────
@@ -570,11 +569,7 @@ async fn finalize_collector(collector: &RefCollector) {
         failed_dbs: all_failed_dbs,
         db_results: all_db_results,
         doi_info,
-        arxiv_info: collector.reference.arxiv_id.as_ref().map(|id| ArxivInfo {
-            arxiv_id: id.clone(),
-            valid: false,
-            title: None,
-        }),
+        arxiv_info: None, // TODO(#124): implement arXiv ID validation
         retraction_info,
     };
 
@@ -828,11 +823,7 @@ async fn coordinator_loop(
                             failed_dbs: local_result.failed_dbs.clone(),
                             db_results,
                             doi_info: None,
-                            arxiv_info: reference.arxiv_id.as_ref().map(|id| ArxivInfo {
-                                arxiv_id: id.clone(),
-                                valid: false,
-                                title: None,
-                            }),
+                            arxiv_info: None, // TODO(#124): implement arXiv ID validation
                             retraction_info: None,
                         }
                     } else {
@@ -948,11 +939,7 @@ async fn coordinator_loop(
                 failed_dbs: local_result.failed_dbs,
                 db_results: all_db_results,
                 doi_info,
-                arxiv_info: reference.arxiv_id.as_ref().map(|id| ArxivInfo {
-                    arxiv_id: id.clone(),
-                    valid: false,
-                    title: None,
-                }),
+                arxiv_info: None, // TODO(#124): implement arXiv ID validation
                 retraction_info,
             };
 
@@ -1004,11 +991,7 @@ async fn coordinator_loop(
                     valid: false,
                     title: None,
                 }),
-                arxiv_info: reference.arxiv_id.as_ref().map(|id| ArxivInfo {
-                    arxiv_id: id.clone(),
-                    valid: false,
-                    title: None,
-                }),
+                arxiv_info: None, // TODO(#124): implement arXiv ID validation
                 retraction_info: None,
             };
 
@@ -1144,11 +1127,7 @@ fn build_validation_result(
         failed_dbs: db_result.failed_dbs,
         db_results: db_result.db_results,
         doi_info: None,
-        arxiv_info: reference.arxiv_id.as_ref().map(|id| ArxivInfo {
-            arxiv_id: id.clone(),
-            valid: false,
-            title: None,
-        }),
+        arxiv_info: None, // TODO(#124): implement arXiv ID validation
         retraction_info,
     }
 }

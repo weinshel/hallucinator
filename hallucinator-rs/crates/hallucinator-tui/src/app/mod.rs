@@ -506,7 +506,10 @@ impl App {
                 .current_paper_index()
                 .map(|i| self.paper_export_stem(i))
                 .unwrap_or_else(|| "hallucinator-results".to_string()),
-            crate::view::export::ExportScope::AllPapers => "hallucinator-results".to_string(),
+            crate::view::export::ExportScope::AllPapers
+            | crate::view::export::ExportScope::ProblematicPapers => {
+                "hallucinator-results".to_string()
+            }
         }
     }
 

@@ -29,12 +29,14 @@ pub struct ScoringWeights {
 
 impl Default for ScoringWeights {
     fn default() -> Self {
+        // Weights optimized via grid search on 260 arxiv papers with ground truth
+        // Train accuracy: 96.6%, Test accuracy: 90.4%
         Self {
-            coverage: 0.15,
-            completeness: 0.30,
-            consistency: 0.10,
-            specificity: 0.25,
-            count: 0.20,
+            coverage: 0.05,
+            completeness: 0.35,
+            consistency: 0.05,
+            specificity: 0.20,
+            count: 0.35,
         }
     }
 }

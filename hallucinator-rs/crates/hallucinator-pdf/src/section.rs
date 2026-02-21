@@ -268,8 +268,10 @@ pub(crate) fn segment_references_with_config(
 }
 
 fn try_ieee_with_config(ref_text: &str, config: &PdfParsingConfig) -> Option<Vec<String>> {
-    // Match [1], [2], etc. at start of string or after newline
-    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)(?:^|\n)\s*\[(\d+)\]\s*").unwrap());
+    // Match [1], [2], etc. at start of string, after newline, or after period
+    // (handles PDFs where text extraction doesn't preserve newlines between refs)
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?m)(?:^|\n|\.)\s*\[(\d+)\]\s*").unwrap());
 
     let re = config.ieee_segment_re.as_ref().unwrap_or(&RE);
     let matches: Vec<_> = re.find_iter(ref_text).collect();

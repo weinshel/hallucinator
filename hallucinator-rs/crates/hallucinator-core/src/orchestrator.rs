@@ -390,7 +390,9 @@ fn process_query_result(
             let paper_url = qr.paper_url.clone();
             let retraction = qr.retraction.clone();
 
-            if ref_authors.is_empty() || validate_authors(ref_authors, &found_authors) {
+            // Web Search (SearxNG) cannot provide author data, so skip author validation for it
+            let skip_author_check = name == "Web Search" && found_authors.is_empty();
+            if ref_authors.is_empty() || skip_author_check || validate_authors(ref_authors, &found_authors) {
                 let db_result = DbResult {
                     db_name: name.clone(),
                     status: DbStatus::Match,

@@ -1364,6 +1364,7 @@ dependencies = [
 name = "hallucinator-pdf"
 version = "0.1.1-alpha.5"
 dependencies = [
+ "anyhow",
  "flate2",
  "hallucinator-bbl",
  "hallucinator-core",
@@ -1371,6 +1372,7 @@ dependencies = [
  "once_cell",
  "rapidfuzz",
  "regex",
+ "strsim",
  "tar",
  "thiserror 2.0.18",
 ]

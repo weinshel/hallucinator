@@ -3,6 +3,40 @@ use regex::Regex;
 
 use crate::config::PdfParsingConfig;
 
+/// Segmentation strategy identifier for scoring and debugging
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SegmentationStrategy {
+    Ieee,
+    Numbered,
+    Aaai,
+    Neurips,
+    MlFullName,
+    SpringerNature,
+    Fallback,
+}
+
+impl SegmentationStrategy {
+    /// Specificity score: explicit structural markers score higher
+    pub fn specificity_score(&self) -> f64 {
+        match self {
+            Self::Ieee => 1.0,
+            Self::Numbered => 0.95,
+            Self::Aaai => 0.8,
+            Self::Neurips => 0.8,
+            Self::MlFullName => 0.8,
+            Self::SpringerNature => 0.75,
+            Self::Fallback => 0.3,
+        }
+    }
+}
+
+/// Result of a single segmentation strategy attempt
+#[derive(Debug, Clone)]
+pub struct SegmentationResult {
+    pub strategy: SegmentationStrategy,
+    pub references: Vec<String>,
+}
+
 /// Locate the references section in the document text.
 ///
 /// Searches for common reference section headers (References, Bibliography, Works Cited)
@@ -110,11 +144,31 @@ fn strip_page_headers(text: &str) -> String {
         ).unwrap()
     });
 
+    // ACM conference headers: "CONF 'YY, Month DD–DD, YYYY, City, Country"
+    // Examples: "ASIA CCS '26, June 01–05, 2026, Bangalore, India"
+    //           "CHI '24, May 11-16, 2024, Honolulu, HI, USA"
+    static ACM_CONF_HEADER: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"(?m)(?:ASIA\s+CCS|CHI|UIST|CSCW|MobiSys|MobiCom|SenSys|UbiComp|IMC|SIGCOMM|SOSP|OSDI|PLDI|POPL|ICSE|FSE|ASE|ISSTA|WWW|KDD|SIGIR|SIGMOD|VLDB|ICML|NeurIPS|ICLR|CVPR|ICCV|ECCV|ACL|EMNLP|NAACL)\s*['']?\d{2}(?:,\s*(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}[–-]\d{1,2},\s*\d{4})?,\s*[A-Za-z\s,.]+"
+        ).unwrap()
+    });
+
+    // ACM author/affiliation header that sometimes appears: "Author Name, Affiliation"
+    // Pattern: "O.A Akanji, M. Egele, and G. StringhiniASIA CCS"
+    // This handles concatenated author names with conference names
+    static ACM_AUTHOR_HEADER: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r"(?m)[A-Z]\.\s*[A-Za-z]+(?:,\s*[A-Z]\.\s*[A-Za-z]+)*(?:,\s*and\s+[A-Z]\.\s*[A-Za-z]+)?(?:ASIA\s+CCS|CHI|WWW|CCS)"
+        ).unwrap()
+    });
+
     let mut result = USENIX_HEADER.replace_all(text, "\n").to_string();
     result = USENIX_ASSOC_ONLY.replace_all(&result, "\n").to_string();
     result = IEEE_HEADER.replace_all(&result, "\n").to_string();
     result = NDSS_HEADER.replace_all(&result, "\n").to_string();
     result = CCS_HEADER.replace_all(&result, "\n").to_string();
+    result = ACM_CONF_HEADER.replace_all(&result, "\n").to_string();
+    result = ACM_AUTHOR_HEADER.replace_all(&result, "\n").to_string();
 
     result
 }
@@ -131,56 +185,115 @@ pub fn segment_references(ref_text: &str) -> Vec<String> {
     segment_references_with_config(ref_text, &PdfParsingConfig::default())
 }
 
+/// Run all segmentation strategies and return all valid results.
+///
+/// This function is used by the scoring system to evaluate all possible
+/// segmentation approaches before selecting the best one.
+pub fn segment_references_all_strategies(
+    ref_text: &str,
+    config: &PdfParsingConfig,
+) -> Vec<SegmentationResult> {
+    let ref_text = strip_page_headers(ref_text);
+    let ref_text = ref_text.as_str();
+    let mut results = Vec::new();
+
+    // Strategy 1: IEEE
+    if let Some(refs) = try_ieee_with_config(ref_text, config) {
+        results.push(SegmentationResult {
+            strategy: SegmentationStrategy::Ieee,
+            references: refs,
+        });
+    }
+
+    // Strategy 2: Numbered
+    if let Some(refs) = try_numbered_with_config(ref_text, config) {
+        results.push(SegmentationResult {
+            strategy: SegmentationStrategy::Numbered,
+            references: refs,
+        });
+    }
+
+    // Strategy 3a: AAAI
+    if let Some(refs) = try_aaai(ref_text) {
+        results.push(SegmentationResult {
+            strategy: SegmentationStrategy::Aaai,
+            references: refs,
+        });
+    }
+
+    // Strategy 3b: NeurIPS
+    if let Some(refs) = try_neurips(ref_text) {
+        results.push(SegmentationResult {
+            strategy: SegmentationStrategy::Neurips,
+            references: refs,
+        });
+    }
+
+    // Strategy 3c: ML Full Name
+    if let Some(refs) = try_ml_full_name(ref_text) {
+        results.push(SegmentationResult {
+            strategy: SegmentationStrategy::MlFullName,
+            references: refs,
+        });
+    }
+
+    // Strategy 4: Springer/Nature
+    if let Some(refs) = try_springer_nature(ref_text) {
+        results.push(SegmentationResult {
+            strategy: SegmentationStrategy::SpringerNature,
+            references: refs,
+        });
+    }
+
+    // Strategy 5: Fallback (always succeeds)
+    let fallback_refs = fallback_double_newline_with_config(ref_text, config);
+    if !fallback_refs.is_empty() {
+        results.push(SegmentationResult {
+            strategy: SegmentationStrategy::Fallback,
+            references: fallback_refs,
+        });
+    }
+
+    results
+}
+
 /// Config-aware version of [`segment_references`].
+///
+/// Uses a scoring-based approach to select the best segmentation strategy.
+/// All strategies are run and scored based on quality metrics (coverage,
+/// completeness, consistency, specificity). The highest-scoring result is
+/// returned.
 pub(crate) fn segment_references_with_config(
     ref_text: &str,
     config: &PdfParsingConfig,
 ) -> Vec<String> {
-    // Preprocess: strip conference page headers/footers that get embedded in PDF text
-    // These break pattern matching (e.g., IEEE [1], [2], [3] sequentiality)
-    let ref_text = strip_page_headers(ref_text);
-    let ref_text = ref_text.as_str();
+    use crate::scoring::select_best_segmentation;
 
-    // Strategy 1: IEEE style [1], [2], ...
-    if let Some(refs) = try_ieee_with_config(ref_text, config) {
-        return refs;
+    let all_results = segment_references_all_strategies(ref_text, config);
+
+    if all_results.is_empty() {
+        return Vec::new();
     }
 
-    // Strategy 2: Numbered list 1., 2., ...
-    if let Some(refs) = try_numbered_with_config(ref_text, config) {
-        return refs;
-    }
+    // Use configured weights or defaults
+    let weights = config.scoring_weights();
 
-    // Strategy 3: Author-based formats (ML full names, AAAI, NeurIPS initials)
-    // Try all three and return the one that finds the most references
-    {
-        let ml_refs = try_ml_full_name(ref_text);
-        let aaai_refs = try_aaai(ref_text);
-        let neurips_refs = try_neurips(ref_text);
+    // Strip headers for scoring (same preprocessing as in segment_references_all_strategies)
+    let preprocessed = strip_page_headers(ref_text);
 
-        let mut best: Option<Vec<String>> = None;
-        for refs in [ml_refs, aaai_refs, neurips_refs].into_iter().flatten() {
-            if best.as_ref().is_none_or(|b| refs.len() > b.len()) {
-                best = Some(refs);
-            }
-        }
-        if let Some(refs) = best {
-            return refs;
-        }
-    }
-
-    // Strategy 4: Springer/Nature (line starts with capital + has (Year))
-    if let Some(refs) = try_springer_nature(ref_text) {
-        return refs;
-    }
-
-    // Strategy 5: Fallback — split by double newlines
-    fallback_double_newline_with_config(ref_text, config)
+    select_best_segmentation(all_results, &preprocessed, config, &weights)
+        .map(|r| r.references)
+        .unwrap_or_default()
 }
 
 fn try_ieee_with_config(ref_text: &str, config: &PdfParsingConfig) -> Option<Vec<String>> {
-    // Match [1], [2], etc. at start of string or after newline
-    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)(?:^|\n)\s*\[(\d+)\]\s*").unwrap());
+    // Match [1], [2], etc. at start of string, after newline, period, or closing bracket
+    // - Start/newline: standard IEEE format
+    // - Period: handles PDFs where text extraction doesn't preserve newlines
+    // - Closing bracket `]`: handles ACM format where DOIs end with `]` before next ref `[N]`
+    // - Digit: handles refs ending with year/page number directly before `[N]`
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?m)(?:^|\n|[.\]0-9])\s*\[(\d+)\]\s*").unwrap());
 
     let re = config.ieee_segment_re.as_ref().unwrap_or(&RE);
     let matches: Vec<_> = re.find_iter(ref_text).collect();

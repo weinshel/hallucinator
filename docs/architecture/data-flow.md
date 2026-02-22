@@ -16,31 +16,31 @@ PDF file
          │
          ▼
 ┌─────────────────┐
-│ Text Extraction  │  hallucinator-pdf + hallucinator-pdf-mupdf
+│ Text Extraction  │  hallucinator-parsing + hallucinator-pdf-mupdf
 │  (PdfBackend)    │  MuPDF extracts raw text with ligature expansion
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ Section Detection│  hallucinator-pdf/src/section.rs
+│ Section Detection│  hallucinator-parsing/src/section.rs
 │                  │  Locates "References" / "Bibliography" header
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│  Segmentation   │  hallucinator-pdf/src/section.rs
+│  Segmentation   │  hallucinator-parsing/src/section.rs
 │                  │  Splits section into individual references
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ Title/Author    │  hallucinator-pdf/src/title.rs, authors.rs
+│ Title/Author    │  hallucinator-parsing/src/title.rs, authors.rs
 │  Extraction     │  Parses title, authors, DOI, arXiv ID per ref
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│ Skip Filtering  │  hallucinator-pdf/src/extractor.rs
+│ Skip Filtering  │  hallucinator-parsing/src/extractor.rs
 │                  │  Removes URL-only and short-title refs
 └────────┬────────┘
          │
@@ -73,7 +73,7 @@ The ingest crate handles file type detection and archive extraction:
 
 ## Stage 2: Text Extraction
 
-**Crate:** `hallucinator-pdf` + `hallucinator-pdf-mupdf`
+**Crate:** `hallucinator-parsing` + `hallucinator-pdf-mupdf`
 
 The `PdfBackend` trait abstracts text extraction. The MuPDF backend:
 
@@ -84,7 +84,7 @@ The `PdfBackend` trait abstracts text extraction. The MuPDF backend:
 
 ## Stage 3: Section Detection
 
-**File:** `hallucinator-pdf/src/section.rs`
+**File:** `hallucinator-parsing/src/section.rs`
 
 Locates the references section by scanning for header patterns:
 
@@ -97,7 +97,7 @@ The section text between the header and the first end-marker (or EOF) is extract
 
 ## Stage 4: Reference Segmentation
 
-**File:** `hallucinator-pdf/src/section.rs`
+**File:** `hallucinator-parsing/src/section.rs`
 
 Individual references are split using priority-ordered strategies:
 
@@ -113,7 +113,7 @@ The system tries each strategy and picks the one that produces the most valid se
 
 ## Stage 5: Title and Author Extraction
 
-**Files:** `hallucinator-pdf/src/title.rs`, `authors.rs`, `identifiers.rs`
+**Files:** `hallucinator-parsing/src/title.rs`, `authors.rs`, `identifiers.rs`
 
 For each segmented reference:
 
@@ -127,7 +127,7 @@ For each segmented reference:
 
 ## Stage 6: Skip Filtering
 
-**File:** `hallucinator-pdf/src/extractor.rs`
+**File:** `hallucinator-parsing/src/extractor.rs`
 
 References are skipped (not validated) if:
 

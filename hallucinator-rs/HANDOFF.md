@@ -3,12 +3,18 @@
 **Branch**: `feat/cache-doi-improvements`
 **Status**: `cargo check` passes cleanly. NOT yet end-to-end tested.
 
+> **Note (2026):** `hallucinator-pdf` was later renamed to `hallucinator-parsing` to better
+> reflect its scope (reference parsing, not PDF I/O). The `PdfBackend` trait was moved to
+> `hallucinator-core`. Types were also renamed: `PdfExtractor` → `ReferenceExtractor`,
+> `PdfParsingConfig` → `ParsingConfig`, `PdfError` → `ParsingError`. The historical crate
+> names below reflect the state at the time of this refactor.
+
 ---
 
 ## What Was Done
 
 Full 3-phase architectural refactor to fix the inverted `hallucinator-core → hallucinator-pdf`
-dependency, isolate mupdf (AGPL), and add archive support to the CLI.
+(now `hallucinator-parsing`) dependency, isolate mupdf (AGPL), and add archive support to the CLI.
 
 ### Phase 1 — Types + utilities to core, dep direction reversed
 
@@ -42,6 +48,9 @@ TUI:
 
 ### Phase 3 — `PdfBackend` trait + `hallucinator-pdf-mupdf` isolation
 
+> **Note:** `PdfBackend` was later moved to `hallucinator-core`, and `hallucinator-pdf` was
+> renamed to `hallucinator-parsing`.
+
 - `hallucinator-pdf/src/backend.rs` (new): `PdfBackend: Send + Sync` trait
 - `hallucinator-pdf/src/extractor.rs`: added `extract_references_via_backend(&dyn PdfBackend)`;
   removed old `#[cfg(feature = "pdf")]` gated methods that called the deleted `extract.rs`
@@ -54,8 +63,8 @@ TUI:
 
 **Verified**:
 ```
-cargo tree -p hallucinator-pdf --no-dev-dependencies | grep mupdf
-# (empty — mupdf not in hallucinator-pdf prod deps)
+cargo tree -p hallucinator-parsing --no-dev-dependencies | grep mupdf
+# (empty — mupdf not in hallucinator-parsing prod deps)
 
 cargo tree -p hallucinator-pdf-mupdf | grep mupdf
 # shows mupdf only here
@@ -120,7 +129,7 @@ cargo run --bin hallucinator-tui
 ### 6. Ground truth test (slow, requires test-data)
 
 ```bash
-cargo test -p hallucinator-pdf --test bbl_ground_truth -- --ignored --nocapture
+cargo test -p hallucinator-parsing --test bbl_ground_truth -- --ignored --nocapture
 ```
 
 ---
@@ -132,9 +141,9 @@ cargo test -p hallucinator-pdf --test bbl_ground_truth -- --ignored --nocapture
 - The `bbl_ground_truth.rs` test has a `LocalMupdfBackend` defined inline. If mupdf API changes,
   update both that test and `hallucinator-pdf-mupdf/src/lib.rs`.
 - `hallucinator-web` is excluded from the workspace (in `Cargo.toml` `exclude`) — not checked
-  in this build. Its `stream.rs` was updated to remove the `use hallucinator_pdf::ExtractionResult`
+  in this build. Its `stream.rs` was updated to remove the `use hallucinator_parsing::ExtractionResult`
   import but not cargo-checked independently.
-- The `pdf = []` feature on `hallucinator-pdf` is now a pure no-op (backward compat shim).
+- The `pdf = []` feature on `hallucinator-parsing` is now a pure no-op (backward compat shim).
   Consumers specifying `features = ["pdf"]` won't get errors but also won't get mupdf — they need
   to depend on `hallucinator-pdf-mupdf` directly or use `hallucinator-ingest` (which pulls it in).
 
@@ -142,12 +151,15 @@ cargo test -p hallucinator-pdf --test bbl_ground_truth -- --ignored --nocapture
 
 ## Dep Graph After Refactor
 
+> **Note:** `hallucinator-pdf` has since been renamed to `hallucinator-parsing`, and
+> `PdfBackend` has been moved to `hallucinator-core`.
+
 ```
-hallucinator-core          ← Reference, ExtractionResult, SkipStats,
+hallucinator-core          ← Reference, ExtractionResult, SkipStats, PdfBackend trait,
                                get_query_words, extract_doi, extract_arxiv_id
 hallucinator-bbl           ← depends on core only
-hallucinator-pdf           ← depends on core; owns parsing pipeline + PdfBackend trait;
-                               NO mupdf prod dep
+hallucinator-parsing       ← depends on core; owns parsing pipeline (ReferenceExtractor);
+  (was hallucinator-pdf)       NO mupdf prod dep
 hallucinator-pdf-mupdf     ← thin mupdf impl of PdfBackend (sole AGPL island)
 hallucinator-ingest        ← unified dispatch (pdf/bbl/bib/archive);
                                pdf feature (default) pulls in hallucinator-pdf-mupdf

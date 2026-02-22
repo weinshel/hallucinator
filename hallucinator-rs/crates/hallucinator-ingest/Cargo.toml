@@ -14,7 +14,7 @@ pdf = ["dep:hallucinator-pdf-mupdf"]
 
 [dependencies]
 hallucinator-core.workspace = true
-hallucinator-pdf.workspace = true
+hallucinator-parsing.workspace = true
 hallucinator-pdf-mupdf = { workspace = true, optional = true }
 hallucinator-bbl.workspace = true
 thiserror.workspace = true

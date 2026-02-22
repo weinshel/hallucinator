@@ -8,10 +8,10 @@
 //! Each test mirrors the Python test functions and verifies that the Rust
 //! implementation produces the same outcomes.
 
-use hallucinator_pdf::identifiers::{extract_doi, get_query_words};
-use hallucinator_pdf::section::segment_references;
-use hallucinator_pdf::text_processing::fix_hyphenation;
-use hallucinator_pdf::title::{clean_title, extract_title_from_reference};
+use hallucinator_parsing::identifiers::{extract_doi, get_query_words};
+use hallucinator_parsing::section::segment_references;
+use hallucinator_parsing::text_processing::fix_hyphenation;
+use hallucinator_parsing::title::{clean_title, extract_title_from_reference};
 
 // =============================================================================
 // FIX 1: Title Ending with ?/! Followed by Venue (venue-after-punctuation truncation)

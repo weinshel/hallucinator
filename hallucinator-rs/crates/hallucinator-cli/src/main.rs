@@ -1040,13 +1040,13 @@ fn dry_run_pdf(
 ) -> anyhow::Result<()> {
     use owo_colors::OwoColorize;
 
-    use hallucinator_pdf::PdfBackend as _;
+    use hallucinator_core::PdfBackend as _;
     let text = hallucinator_pdf_mupdf::MupdfBackend
         .extract_text(file_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let ref_section = hallucinator_pdf::section::find_references_section(&text)
+    let ref_section = hallucinator_parsing::section::find_references_section(&text)
         .ok_or_else(|| anyhow::anyhow!("No references section found"))?;
-    let raw_refs = hallucinator_pdf::section::segment_references(&ref_section);
+    let raw_refs = hallucinator_parsing::section::segment_references(&ref_section);
 
     if use_color {
         writeln!(
@@ -1066,12 +1066,12 @@ fn dry_run_pdf(
     }
 
     for (i, ref_text) in raw_refs.iter().enumerate() {
-        let doi = hallucinator_pdf::identifiers::extract_doi(ref_text);
-        let arxiv_id = hallucinator_pdf::identifiers::extract_arxiv_id(ref_text);
+        let doi = hallucinator_parsing::identifiers::extract_doi(ref_text);
+        let arxiv_id = hallucinator_parsing::identifiers::extract_arxiv_id(ref_text);
         let (extracted_title, from_quotes) =
-            hallucinator_pdf::title::extract_title_from_reference(ref_text);
-        let cleaned_title = hallucinator_pdf::title::clean_title(&extracted_title, from_quotes);
-        let authors = hallucinator_pdf::authors::extract_authors_from_reference(ref_text);
+            hallucinator_parsing::title::extract_title_from_reference(ref_text);
+        let cleaned_title = hallucinator_parsing::title::clean_title(&extracted_title, from_quotes);
+        let authors = hallucinator_parsing::authors::extract_authors_from_reference(ref_text);
 
         // Normalize raw citation for display
         let raw_display: String = ref_text.split_whitespace().collect::<Vec<_>>().join(" ");

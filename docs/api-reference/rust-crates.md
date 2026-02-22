@@ -7,7 +7,7 @@ This guide covers how to use hallucinator crates as dependencies in your own Rus
 | Use case | Crate | What you get |
 |----------|-------|-------------|
 | Validate references programmatically | `hallucinator-core` | `check_references()`, all DB backends, caching, rate limiting |
-| Extract references from PDFs | `hallucinator-pdf` + `hallucinator-pdf-mupdf` | `PdfExtractor`, section detection, title/author extraction |
+| Extract references from PDFs | `hallucinator-parsing` + `hallucinator-pdf-mupdf` | `ReferenceExtractor`, section detection, title/author extraction |
 | Parse BBL/BIB files | `hallucinator-bbl` | `extract_references_from_bbl()`, `extract_references_from_bib()` |
 | Unified file dispatch | `hallucinator-ingest` | Auto-detection (PDF/BBL/BIB/archive), streaming archive extraction |
 | Export results | `hallucinator-reporting` | JSON, CSV, Markdown, Text, HTML export |
@@ -115,13 +115,14 @@ The progress callback receives these events during validation:
 Extract and parse references without validating:
 
 ```rust
-use hallucinator_pdf::{PdfBackend, PdfExtractor};
+use hallucinator_core::PdfBackend;
+use hallucinator_parsing::ReferenceExtractor;
 use hallucinator_pdf_mupdf::MupdfBackend;
 
 let text = MupdfBackend.extract_text(std::path::Path::new("paper.pdf"))?;
 
-// Use PdfExtractor for the full pipeline
-let extractor = PdfExtractor::new(MupdfBackend);
+// Use ReferenceExtractor for the full pipeline
+let extractor = ReferenceExtractor::new(MupdfBackend);
 let result = extractor.extract(std::path::Path::new("paper.pdf"))?;
 
 for reference in &result.references {
@@ -133,10 +134,10 @@ for reference in &result.references {
 
 ## Adding a Custom PDF Backend
 
-Implement `PdfBackend` to use a different PDF library:
+Implement `PdfBackend` (defined in `hallucinator-core`) to use a different PDF library:
 
 ```rust
-use hallucinator_pdf::PdfBackend;
+use hallucinator_core::PdfBackend;
 
 struct MyPdfBackend;
 

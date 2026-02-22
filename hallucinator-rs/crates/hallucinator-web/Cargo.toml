@@ -10,7 +10,8 @@ dist = false
 
 [dependencies]
 hallucinator-core = { path = "../hallucinator-core" }
-hallucinator-pdf = { path = "../hallucinator-pdf", features = ["pdf"] }
+hallucinator-parsing = { path = "../hallucinator-parsing" }
+hallucinator-ingest = { path = "../hallucinator-ingest" }
 hallucinator-dblp = { path = "../hallucinator-dblp" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 tokio-util = "0.7"

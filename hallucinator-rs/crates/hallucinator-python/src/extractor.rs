@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use hallucinator_pdf::{PdfBackend, PdfExtractor, PdfParsingConfigBuilder};
+use hallucinator_core::PdfBackend;
+use hallucinator_parsing::{ParsingConfigBuilder, ReferenceExtractor};
 
 #[cfg(feature = "pdf")]
 use crate::archive::PyArchiveIterator;
-use crate::errors::pdf_error_to_py;
+use crate::errors::{backend_error_to_py, parsing_error_to_py};
 use crate::types::{PyExtractionResult, PyReference};
 
 /// A configurable PDF reference extractor.
@@ -25,20 +26,20 @@ use crate::types::{PyExtractionResult, PyReference};
 ///
 #[pyclass(name = "NativePdfExtractor")]
 pub struct PyPdfExtractor {
-    builder: PdfParsingConfigBuilder,
-    cached: Option<PdfExtractor>,
+    builder: ParsingConfigBuilder,
+    cached: Option<ReferenceExtractor>,
 }
 
 impl PyPdfExtractor {
     /// Get or rebuild the underlying Rust extractor.
-    fn extractor(&mut self) -> PyResult<&PdfExtractor> {
+    fn extractor(&mut self) -> PyResult<&ReferenceExtractor> {
         if self.cached.is_none() {
             let config = self
                 .builder
                 .clone()
                 .build()
                 .map_err(|e| PyValueError::new_err(format!("Invalid regex: {}", e)))?;
-            self.cached = Some(PdfExtractor::with_config(config));
+            self.cached = Some(ReferenceExtractor::with_config(config));
         }
         Ok(self.cached.as_ref().unwrap())
     }
@@ -54,7 +55,7 @@ impl PyPdfExtractor {
     #[new]
     fn new() -> Self {
         Self {
-            builder: PdfParsingConfigBuilder::new(),
+            builder: ParsingConfigBuilder::new(),
             cached: None,
         }
     }
@@ -209,7 +210,7 @@ impl PyPdfExtractor {
         let backend = hallucinator_pdf_mupdf::MupdfBackend;
         backend
             .extract_text(&PathBuf::from(path))
-            .map_err(pdf_error_to_py)
+            .map_err(backend_error_to_py)
     }
 
     /// Locate the references section in document text (step 2).
@@ -238,8 +239,8 @@ impl PyPdfExtractor {
         let prev = prev_authors.unwrap_or_default();
         let parsed = ext.parse_reference(text, &prev);
         match parsed {
-            hallucinator_pdf::extractor::ParsedRef::Ref(r) => Ok(Some(PyReference::from(r))),
-            hallucinator_pdf::extractor::ParsedRef::Skip(..) => Ok(None),
+            hallucinator_parsing::extractor::ParsedRef::Ref(r) => Ok(Some(PyReference::from(r))),
+            hallucinator_parsing::extractor::ParsedRef::Skip(..) => Ok(None),
         }
     }
 
@@ -257,13 +258,13 @@ impl PyPdfExtractor {
         let prev = prev_authors.unwrap_or_default();
         let parsed = ext.parse_reference(text, &prev);
         match parsed {
-            hallucinator_pdf::extractor::ParsedRef::Ref(r) => {
+            hallucinator_parsing::extractor::ParsedRef::Ref(r) => {
                 Ok((Some(PyReference::from(r)), None))
             }
-            hallucinator_pdf::extractor::ParsedRef::Skip(reason, _, _) => {
+            hallucinator_parsing::extractor::ParsedRef::Skip(reason, _, _) => {
                 let reason_str = match reason {
-                    hallucinator_pdf::extractor::SkipReason::UrlOnly => "url_only",
-                    hallucinator_pdf::extractor::SkipReason::ShortTitle => "short_title",
+                    hallucinator_parsing::extractor::SkipReason::UrlOnly => "url_only",
+                    hallucinator_parsing::extractor::SkipReason::ShortTitle => "short_title",
                 };
                 Ok((None, Some(reason_str.to_string())))
             }
@@ -278,7 +279,7 @@ impl PyPdfExtractor {
         let ext = self.extractor()?;
         let result = ext
             .extract_references_from_text(text)
-            .map_err(pdf_error_to_py)?;
+            .map_err(parsing_error_to_py)?;
         Ok(PyExtractionResult::from(result))
     }
 

@@ -274,7 +274,8 @@ searxng_url = "http://localhost:8080"
 
 | Crate | Purpose |
 |-------|---------|
-| `hallucinator-pdf` | PDF text extraction (MuPDF), reference parsing, archive handling |
+| `hallucinator-parsing` | Reference section parsing and extraction (section detection, segmentation, title/author extraction) |
+| `hallucinator-pdf-mupdf` | MuPDF backend for PDF text extraction (AGPL-3.0 isolation layer) |
 | `hallucinator-core` | Validation engine, database backends, fuzzy matching, retraction checks |
 | `hallucinator-dblp` | Offline DBLP database builder and querier (SQLite + FTS5) |
 | `hallucinator-acl` | Offline ACL Anthology database builder and querier |

@@ -6,7 +6,7 @@
 //! quality metrics.
 
 use crate::authors::extract_authors_from_reference_with_config;
-use crate::config::PdfParsingConfig;
+use crate::config::ParsingConfig;
 use crate::section::SegmentationResult;
 use crate::title::extract_title_from_reference_with_config;
 
@@ -47,7 +47,7 @@ impl Default for ScoringWeights {
 pub fn score_segmentation(
     result: &SegmentationResult,
     ref_section_text: &str,
-    config: &PdfParsingConfig,
+    config: &ParsingConfig,
     weights: &ScoringWeights,
 ) -> f64 {
     let refs = &result.references;
@@ -100,16 +100,14 @@ pub fn score_segmentation(
 }
 
 /// Check if a raw reference has extractable title and authors.
-fn has_extractable_content(raw_ref: &str, config: &PdfParsingConfig) -> bool {
+fn has_extractable_content(raw_ref: &str, config: &ParsingConfig) -> bool {
     // Try to extract title
     let (title, _) = extract_title_from_reference_with_config(raw_ref, config);
-    let has_title = !title.is_empty()
-        && title.split_whitespace().count() >= config.min_title_words;
+    let has_title = !title.is_empty() && title.split_whitespace().count() >= config.min_title_words;
 
     // Try to extract authors
     let authors = extract_authors_from_reference_with_config(raw_ref, config);
-    let has_authors = !authors.is_empty()
-        && !authors.iter().all(|a| a == "__SAME_AS_PREVIOUS__");
+    let has_authors = !authors.is_empty() && !authors.iter().all(|a| a == "__SAME_AS_PREVIOUS__");
 
     has_title && has_authors
 }
@@ -126,11 +124,7 @@ fn coefficient_of_variation(lengths: impl Iterator<Item = usize>) -> f64 {
         return 1.0;
     }
 
-    let variance = lengths
-        .iter()
-        .map(|l| (l - mean).powi(2))
-        .sum::<f64>()
-        / lengths.len() as f64;
+    let variance = lengths.iter().map(|l| (l - mean).powi(2)).sum::<f64>() / lengths.len() as f64;
     let std_dev = variance.sqrt();
 
     (std_dev / mean).min(1.0)
@@ -140,7 +134,7 @@ fn coefficient_of_variation(lengths: impl Iterator<Item = usize>) -> f64 {
 pub fn select_best_segmentation(
     results: Vec<SegmentationResult>,
     ref_section_text: &str,
-    config: &PdfParsingConfig,
+    config: &ParsingConfig,
     weights: &ScoringWeights,
 ) -> Option<SegmentationResult> {
     results
@@ -186,7 +180,11 @@ mod tests {
     fn test_scoring_weights_default_sum() {
         let w = ScoringWeights::default();
         let sum = w.coverage + w.completeness + w.consistency + w.specificity + w.count;
-        assert!((sum - 1.0).abs() < 0.001, "Weights should sum to 1.0: {}", sum);
+        assert!(
+            (sum - 1.0).abs() < 0.001,
+            "Weights should sum to 1.0: {}",
+            sum
+        );
     }
 
     #[test]
@@ -195,7 +193,7 @@ mod tests {
             strategy: SegmentationStrategy::Fallback,
             references: vec![],
         };
-        let config = PdfParsingConfig::default();
+        let config = ParsingConfig::default();
         let weights = ScoringWeights::default();
         let score = score_segmentation(&result, "some text", &config, &weights);
         assert_eq!(score, 0.0);
@@ -215,7 +213,7 @@ mod tests {
             "[1] Smith, J., Jones, A., \"A paper about something\", IEEE, 2023.\n",
             "[2] Doe, J., \"Another paper here\", ACM, 2022."
         );
-        let config = PdfParsingConfig::default();
+        let config = ParsingConfig::default();
         let weights = ScoringWeights::default();
         let score = score_segmentation(&result, ref_text, &config, &weights);
         assert!(score > 0.0, "Score should be positive: {}", score);
@@ -238,7 +236,7 @@ mod tests {
             },
         ];
         let ref_text = "Some reference text here";
-        let config = PdfParsingConfig::default();
+        let config = ParsingConfig::default();
         let weights = ScoringWeights::default();
 
         let best = select_best_segmentation(results, ref_text, &config, &weights);

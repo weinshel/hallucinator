@@ -2,40 +2,40 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::Path;
 
-use crate::config::PdfParsingConfig;
-use crate::{ExtractionResult, PdfBackend, PdfError, Reference, SkipStats};
+use crate::config::ParsingConfig;
+use crate::{ExtractionResult, ParsingError, PdfBackend, Reference, SkipStats};
 use crate::{authors, identifiers, section, text_processing, title};
 
-/// A configurable PDF reference extraction pipeline.
+/// A configurable reference extraction pipeline.
 ///
-/// Holds a [`PdfParsingConfig`] and exposes each pipeline step as a method.
-/// The default constructor uses built-in defaults; use [`PdfExtractor::with_config`]
+/// Holds a [`ParsingConfig`] and exposes each pipeline step as a method.
+/// The default constructor uses built-in defaults; use [`ReferenceExtractor::with_config`]
 /// to supply custom regex patterns and thresholds.
-pub struct PdfExtractor {
-    config: PdfParsingConfig,
+pub struct ReferenceExtractor {
+    config: ParsingConfig,
 }
 
-impl Default for PdfExtractor {
+impl Default for ReferenceExtractor {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PdfExtractor {
+impl ReferenceExtractor {
     /// Create an extractor with default configuration.
     pub fn new() -> Self {
         Self {
-            config: PdfParsingConfig::default(),
+            config: ParsingConfig::default(),
         }
     }
 
     /// Create an extractor with a custom configuration.
-    pub fn with_config(config: PdfParsingConfig) -> Self {
+    pub fn with_config(config: ParsingConfig) -> Self {
         Self { config }
     }
 
     /// Get a reference to the current config.
-    pub fn config(&self) -> &PdfParsingConfig {
+    pub fn config(&self) -> &ParsingConfig {
         &self.config
     }
 
@@ -44,7 +44,7 @@ impl PdfExtractor {
         &self,
         pdf_path: &Path,
         backend: &dyn PdfBackend,
-    ) -> Result<ExtractionResult, PdfError> {
+    ) -> Result<ExtractionResult, ParsingError> {
         let text = backend.extract_text(pdf_path)?;
         self.extract_references_from_text(&text)
     }
@@ -67,10 +67,16 @@ impl PdfExtractor {
     }
 
     /// Run the extraction pipeline on already-extracted text.
-    pub fn extract_references_from_text(&self, text: &str) -> Result<ExtractionResult, PdfError> {
+    pub fn extract_references_from_text(
+        &self,
+        text: &str,
+    ) -> Result<ExtractionResult, ParsingError> {
+        // Expand typographic ligatures (ﬁ → fi, ﬂ → fl, etc.) early in the pipeline
+        // so all downstream steps see clean ASCII text.
+        let text = text_processing::expand_ligatures(text);
         let ref_section = self
-            .find_references_section(text)
-            .ok_or(PdfError::NoReferencesSection)?;
+            .find_references_section(&text)
+            .ok_or(ParsingError::NoReferencesSection)?;
 
         let raw_refs = self.segment_references(&ref_section);
 
@@ -139,7 +145,7 @@ pub enum SkipReason {
 fn parse_single_reference(
     ref_text: &str,
     prev_authors: &[String],
-    config: &PdfParsingConfig,
+    config: &ParsingConfig,
 ) -> ParsedRef {
     // Extract DOI and arXiv ID BEFORE fixing hyphenation
     let doi = identifiers::extract_doi(ref_text);
@@ -258,13 +264,13 @@ fn looks_like_citation(ref_text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PdfParsingConfigBuilder;
+    use crate::ParsingConfigBuilder;
 
-    // ── PdfExtractor with default config ──
+    // ── ReferenceExtractor with default config ──
 
     #[test]
     fn test_extractor_default_find_section() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         let text = "Body text.\n\nReferences\n\n[1] First ref.\n[2] Second ref.\n";
         let section = ext.find_references_section(text).unwrap();
         assert!(section.contains("[1] First ref."));
@@ -272,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_extractor_default_segment() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         let text = "\n[1] First reference text here.\n[2] Second reference text here.\n[3] Third reference.\n";
         let refs = ext.segment_references(text);
         assert_eq!(refs.len(), 3);
@@ -280,7 +286,7 @@ mod tests {
 
     #[test]
     fn test_extractor_default_parse_reference() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         let ref_text = r#"J. Smith, A. Jones, and C. Williams, "Detecting Fake References in Academic Papers," in Proc. IEEE Conf., 2023."#;
         let parsed = ext.parse_reference(ref_text, &[]);
         match parsed {
@@ -294,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_extractor_full_pipeline_from_text() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
 
         // In real PDFs, there's typically page content (page number, header text)
         // between the "References" header and the first [1] marker, providing
@@ -317,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_extractor_skips_url_only_refs() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         // Test URL skipping via parse_reference directly (avoids segmentation complexity)
         let ref_text = "See https://github.com/some/repo for details about the implementation.";
         let parsed = ext.parse_reference(ref_text, &[]);
@@ -338,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_extractor_no_references_section() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         // Very short text with no references header — fallback will kick in but
         // there won't be meaningful references to parse
         let text = "Short.";
@@ -351,11 +357,11 @@ mod tests {
 
     #[test]
     fn test_custom_section_header_regex() {
-        let config = PdfParsingConfigBuilder::new()
+        let config = ParsingConfigBuilder::new()
             .section_header_regex(r"(?i)\n\s*Bibliografía\s*\n")
             .build()
             .unwrap();
-        let ext = PdfExtractor::with_config(config);
+        let ext = ReferenceExtractor::with_config(config);
 
         // Should find Spanish header
         let text = "Body.\n\nBibliografía\n\n[1] Primer ref.\n[2] Segundo ref.\n[3] Tercer ref.\n";
@@ -377,11 +383,11 @@ mod tests {
 
     #[test]
     fn test_custom_section_end_regex() {
-        let config = PdfParsingConfigBuilder::new()
+        let config = ParsingConfigBuilder::new()
             .section_end_regex(r"(?i)\n\s*Apéndice")
             .build()
             .unwrap();
-        let ext = PdfExtractor::with_config(config);
+        let ext = ReferenceExtractor::with_config(config);
 
         let text = "Body.\n\nReferences\n\n[1] Ref one.\n\nApéndice A\n\nExtra stuff.";
         let section = ext.find_references_section(text).unwrap();
@@ -391,11 +397,11 @@ mod tests {
 
     #[test]
     fn test_custom_fallback_fraction() {
-        let config = PdfParsingConfigBuilder::new()
+        let config = ParsingConfigBuilder::new()
             .fallback_fraction(0.9) // only last 10%
             .build()
             .unwrap();
-        let ext = PdfExtractor::with_config(config);
+        let ext = ReferenceExtractor::with_config(config);
 
         // No references header, so fallback kicks in
         let text = "A".repeat(100) + " last ten percent here";
@@ -411,7 +417,7 @@ mod tests {
         let ref_text = "Smith, J. Three Word Title";
 
         // Default min_title_words=4 → should be SKIPPED (3 < 4)
-        let ext_default = PdfExtractor::new();
+        let ext_default = ReferenceExtractor::new();
         let parsed_default = ext_default.parse_reference(ref_text, &[]);
         match parsed_default {
             ParsedRef::Skip(SkipReason::ShortTitle, _, _) => {} // expected
@@ -419,11 +425,11 @@ mod tests {
         }
 
         // With min_title_words = 3, same reference should PASS
-        let config = PdfParsingConfigBuilder::new()
+        let config = ParsingConfigBuilder::new()
             .min_title_words(3)
             .build()
             .unwrap();
-        let ext = PdfExtractor::with_config(config);
+        let ext = ReferenceExtractor::with_config(config);
         let parsed = ext.parse_reference(ref_text, &[]);
         match parsed {
             ParsedRef::Ref(r) => {
@@ -434,11 +440,11 @@ mod tests {
 
         // With min_title_words = 10, a normal title should be skipped
         // (no strong signals to override the threshold)
-        let config_strict = PdfParsingConfigBuilder::new()
+        let config_strict = ParsingConfigBuilder::new()
             .min_title_words(10)
             .build()
             .unwrap();
-        let ext_strict = PdfExtractor::with_config(config_strict);
+        let ext_strict = ReferenceExtractor::with_config(config_strict);
         let long_ref = "Smith, J. A Five Word Paper Title Here";
         let parsed2 = ext_strict.parse_reference(long_ref, &[]);
         match parsed2 {
@@ -449,11 +455,8 @@ mod tests {
 
     #[test]
     fn test_custom_max_authors() {
-        let config = PdfParsingConfigBuilder::new()
-            .max_authors(2)
-            .build()
-            .unwrap();
-        let ext = PdfExtractor::with_config(config);
+        let config = ParsingConfigBuilder::new().max_authors(2).build().unwrap();
+        let ext = ReferenceExtractor::with_config(config);
 
         let ref_text = r#"A. Smith, B. Jones, C. Williams, and D. Brown, "A Paper About Testing Maximum Author Limits in Reference Parsing," in Proc. IEEE, 2023."#;
         let parsed = ext.parse_reference(ref_text, &[]);
@@ -472,11 +475,11 @@ mod tests {
     #[test]
     fn test_custom_ieee_segment_regex() {
         // Custom pattern that matches {1}, {2}, etc. instead of [1], [2]
-        let config = PdfParsingConfigBuilder::new()
+        let config = ParsingConfigBuilder::new()
             .ieee_segment_regex(r"\n\s*\{(\d+)\}\s*")
             .build()
             .unwrap();
-        let ext = PdfExtractor::with_config(config);
+        let ext = ReferenceExtractor::with_config(config);
 
         let text = "\n{1} First ref text here.\n{2} Second ref text here.\n{3} Third ref.\n";
         let refs = ext.segment_references(text);
@@ -486,11 +489,11 @@ mod tests {
 
     #[test]
     fn test_custom_compound_suffix() {
-        let config = PdfParsingConfigBuilder::new()
+        let config = ParsingConfigBuilder::new()
             .add_compound_suffix("powered".to_string())
             .build()
             .unwrap();
-        let ext = PdfExtractor::with_config(config);
+        let ext = ReferenceExtractor::with_config(config);
 
         // "AI- powered" should become "AI-powered" with the custom suffix
         let ref_text = r#"J. Smith, "An AI- powered Approach to Detecting Hallucinated References," in Proc. IEEE, 2023."#;
@@ -509,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_em_dash_same_authors() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         let prev_authors = vec!["J. Smith".to_string(), "A. Jones".to_string()];
 
         // Em-dash pattern followed by a quoted title (so extraction works reliably)
@@ -552,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_short_title_rescued_by_doi() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         // 3-word quoted title with DOI → should NOT be skipped despite short title
         let ref_text = r#"Smith, J. "Word Affect Intensities." doi:10.1234/test.2020"#;
         let parsed = ext.parse_reference(ref_text, &[]);
@@ -566,7 +569,7 @@ mod tests {
 
     #[test]
     fn test_short_title_rescued_by_arxiv() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         // 3-word title but has arXiv ID → should NOT be skipped
         let ref_text = "Smith, J. Word Affect Intensities. arXiv:1704.08798";
         let parsed = ext.parse_reference(ref_text, &[]);
@@ -580,7 +583,7 @@ mod tests {
 
     #[test]
     fn test_short_title_rescued_by_venue() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         // 3-word title with venue + year signals → should NOT be skipped
         let ref_text = "Smith, J. 2020. Three Word Title. In Proceedings of ACM CHI. New York.";
         let parsed = ext.parse_reference(ref_text, &[]);
@@ -594,7 +597,7 @@ mod tests {
 
     #[test]
     fn test_short_title_not_rescued_without_signals() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         // 3-word title with no strong signals → should be skipped
         let ref_text = "Smith, J. Three Word Title";
         let parsed = ext.parse_reference(ref_text, &[]);
@@ -608,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_url_only_skip_preserves_title() {
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         // A reference with a non-academic URL that also has a parseable title
         let ref_text =
             "Smith, J. 2023. Some Interesting Report About Software. https://example.com/report";
@@ -631,7 +634,7 @@ mod tests {
     fn test_two_word_title_rescued_by_venue() {
         // "Translation-based Recommendation" is 2 words — below min_title_words=4.
         // But it has venue ("Proceedings", "ACM", "Conference") + year → should be rescued.
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         let ref_text = "He, R.; Kang, W.-C.; and McAuley, J. 2017. Translation-based Recommendation. Proceedings of the Eleventh ACM Conference on Recommender Systems";
         let parsed = ext.parse_reference(ref_text, &[]);
         match parsed {
@@ -647,7 +650,7 @@ mod tests {
     #[test]
     fn test_disambiguated_year_suffix() {
         // AAAI year "2022b" — letter suffix for multiple papers by same author in one year
-        let ext = PdfExtractor::new();
+        let ext = ReferenceExtractor::new();
         let ref_text = "Feng, S.; and Luo, M. 2022b. TwiBot-22: Towards Graph-Based Twitter Bot Detection. In Proceedings of NeurIPS, 35254-35269";
         let parsed = ext.parse_reference(ref_text, &[]);
         match parsed {
@@ -666,11 +669,11 @@ mod tests {
     #[test]
     fn test_add_venue_cutoff_pattern() {
         // Add a custom cutoff pattern for a niche journal
-        let config = PdfParsingConfigBuilder::new()
+        let config = ParsingConfigBuilder::new()
             .add_venue_cutoff_pattern(r"(?i)\.\s*My Niche Journal\b.*$".to_string())
             .build()
             .unwrap();
-        let ext = PdfExtractor::with_config(config);
+        let ext = ReferenceExtractor::with_config(config);
 
         let ref_text = "Smith, J. and Jones, A. 2022. A Novel Approach to Reference Detection. My Niche Journal, vol 5.";
         let parsed = ext.parse_reference(ref_text, &[]);

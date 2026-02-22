@@ -15,6 +15,7 @@ Quick reference for each crate in the workspace: its responsibility, key types, 
 - `Status` — `Verified`, `NotFound`, `AuthorMismatch`
 - `DbStatus` — `Match`, `NoMatch`, `AuthorMismatch`, `Timeout`, `RateLimited`, `Error`, `Skipped`
 - `CheckStats` — Summary counts (total, verified, not_found, author_mismatch, retracted, skipped)
+- `PdfBackend` trait — Abstraction for PDF text extraction (moved here from `hallucinator-parsing`)
 - `DatabaseBackend` trait — Interface for all database backends
 - `ValidationPool` — Per-DB drainer pool for concurrent validation
 - `QueryCache` — Two-tier (DashMap + optional SQLite) cache
@@ -38,37 +39,38 @@ Quick reference for each crate in the workspace: its responsibility, key types, 
 
 ---
 
-## hallucinator-pdf
+## hallucinator-parsing
 
-**Responsibility:** PDF text extraction pipeline — backend-agnostic text extraction, reference section detection, segmentation into individual references, title/author/identifier extraction.
+**Responsibility:** Reference parsing pipeline — backend-agnostic text extraction, reference section detection, segmentation into individual references, title/author/identifier extraction. (Renamed from `hallucinator-pdf` to better reflect its scope.)
 
 **Key types:**
-- `PdfBackend` trait — Abstraction for PDF text extraction
-- `PdfExtractor` — Configurable extraction pipeline
-- `PdfParsingConfig` — Custom regex patterns, thresholds, segment strategies
+- `ReferenceExtractor` — Configurable extraction pipeline (formerly `PdfExtractor`)
+- `ParsingConfig` — Custom regex patterns, thresholds, segment strategies (formerly `PdfParsingConfig`)
+- `ParsingError` — Error type for parsing failures (formerly `PdfError`)
 
 **Key files:**
-- `src/lib.rs` — `PdfBackend` trait definition
-- `src/extractor.rs` — `PdfExtractor` pipeline orchestration
+- `src/lib.rs` — Public API and type exports
+- `src/extractor.rs` — `ReferenceExtractor` pipeline orchestration
 - `src/section.rs` — `find_references_section()`, `segment_references()`
 - `src/title.rs` — `extract_title_from_reference()`, `clean_title()`
 - `src/authors.rs` — `extract_authors_from_reference()`
 - `src/identifiers.rs` — `extract_doi()`, `extract_arxiv_id()`
-- `src/ligatures.rs` — Ligature expansion
 - `src/hyphenation.rs` — Hyphenation fixing
 
 **Dependencies:** regex
+
+Note: The `PdfBackend` trait now lives in `hallucinator-core`, not here.
 
 ---
 
 ## hallucinator-pdf-mupdf
 
-**Responsibility:** MuPDF implementation of the `PdfBackend` trait. **AGPL-licensed** — isolated to keep other crates permissive.
+**Responsibility:** MuPDF implementation of the `PdfBackend` trait (defined in `hallucinator-core`). **AGPL-licensed** — isolated to keep other crates permissive.
 
 **Key types:**
 - `MupdfBackend` — Implements `PdfBackend` using the `mupdf` crate
 
-**Dependencies:** mupdf, hallucinator-pdf
+**Dependencies:** mupdf, hallucinator-core
 
 ---
 
@@ -95,7 +97,7 @@ Quick reference for each crate in the workspace: its responsibility, key types, 
 **Key types:**
 - `ArchiveItem` — Streaming archive extraction results (`Pdf`, `Warning`, `Done`)
 
-**Dependencies:** hallucinator-pdf, hallucinator-pdf-mupdf, hallucinator-bbl, hallucinator-core, zip, tar, flate2, tempfile
+**Dependencies:** hallucinator-parsing, hallucinator-pdf-mupdf, hallucinator-bbl, hallucinator-core, zip, tar, flate2, tempfile
 
 ---
 

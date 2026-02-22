@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::config::PdfParsingConfig;
+use crate::config::ParsingConfig;
 
 /// Special sentinel value indicating the reference uses em-dashes to
 /// indicate "same authors as previous entry."
@@ -20,13 +20,13 @@ pub const SAME_AS_PREVIOUS: &str = "__SAME_AS_PREVIOUS__";
 /// Returns a list of author names, or `["__SAME_AS_PREVIOUS__"]` if the
 /// reference uses em-dashes.
 pub fn extract_authors_from_reference(ref_text: &str) -> Vec<String> {
-    extract_authors_from_reference_with_config(ref_text, &PdfParsingConfig::default())
+    extract_authors_from_reference_with_config(ref_text, &ParsingConfig::default())
 }
 
 /// Config-aware version of [`extract_authors_from_reference`].
 pub(crate) fn extract_authors_from_reference_with_config(
     ref_text: &str,
-    config: &PdfParsingConfig,
+    config: &ParsingConfig,
 ) -> Vec<String> {
     // Normalize whitespace
     static WS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());

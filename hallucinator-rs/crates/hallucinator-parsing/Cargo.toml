@@ -1,18 +1,12 @@
 [package]
-name = "hallucinator-pdf"
+name = "hallucinator-parsing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "PDF extraction and reference parsing for hallucinated reference detection"
+description = "Reference section parsing and extraction for hallucinated reference detection"
 
 [package.metadata.dist]
 dist = false
-
-[features]
-# Kept as an empty no-op for backward compatibility with consumers that
-# still specify features = ["pdf"]. mupdf is now in hallucinator-pdf-mupdf.
-default = []
-pdf = []
 
 [dependencies]
 hallucinator-core.workspace = true

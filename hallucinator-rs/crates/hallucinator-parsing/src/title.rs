@@ -2,7 +2,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
 
-use crate::config::PdfParsingConfig;
+use crate::config::ParsingConfig;
 use crate::text_processing::fix_hyphenation;
 
 /// Abbreviations that should NEVER be sentence boundaries (mid-title abbreviations).
@@ -28,13 +28,13 @@ static MID_SENTENCE_ABBREVIATIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 ///
 /// Returns `(title, from_quotes)` where `from_quotes` indicates if the title was in quotes.
 pub fn extract_title_from_reference(ref_text: &str) -> (String, bool) {
-    extract_title_from_reference_with_config(ref_text, &PdfParsingConfig::default())
+    extract_title_from_reference_with_config(ref_text, &ParsingConfig::default())
 }
 
 /// Config-aware version of [`extract_title_from_reference`].
 pub(crate) fn extract_title_from_reference_with_config(
     ref_text: &str,
-    config: &PdfParsingConfig,
+    config: &ParsingConfig,
 ) -> (String, bool) {
     // Fix hyphenation first (handles "pri-\nvacy" → "privacy")
     let ref_text = fix_hyphenation(ref_text);
@@ -166,14 +166,14 @@ pub(crate) fn extract_title_from_reference_with_config(
 
 /// Clean extracted title by removing trailing venue/metadata.
 pub fn clean_title(title: &str, from_quotes: bool) -> String {
-    clean_title_with_config(title, from_quotes, &PdfParsingConfig::default())
+    clean_title_with_config(title, from_quotes, &ParsingConfig::default())
 }
 
 /// Config-aware version of [`clean_title`].
 pub(crate) fn clean_title_with_config(
     title: &str,
     from_quotes: bool,
-    config: &PdfParsingConfig,
+    config: &ParsingConfig,
 ) -> String {
     if title.is_empty() {
         return String::new();
@@ -430,10 +430,7 @@ pub(crate) fn clean_title_with_config(
 
 // ───────────────── Format-specific extractors ─────────────────
 
-fn try_quoted_title_with_config(
-    ref_text: &str,
-    config: &PdfParsingConfig,
-) -> Option<(String, bool)> {
+fn try_quoted_title_with_config(ref_text: &str, config: &ParsingConfig) -> Option<(String, bool)> {
     // First, try greedy IEEE pattern for titles with nested/inner quotes.
     // Matches from first " to last ," (IEEE convention: title ends with comma inside quotes)
     // e.g. "Autoadmin "what-if" index analysis utility,"
@@ -1122,8 +1119,9 @@ fn try_venue_marker(ref_text: &str) -> Option<(String, bool)> {
                 // 3. Contains comma-separated names
                 let looks_like_author_list = {
                     let text = parts[1].trim();
-                    let has_initials =
-                        Regex::new(r"\b[A-Z]\.\s").unwrap().is_match(text);
+                    static INITIALS_RE: Lazy<Regex> =
+                        Lazy::new(|| Regex::new(r"\b[A-Z]\.\s").unwrap());
+                    let has_initials = INITIALS_RE.is_match(text);
                     let words: Vec<&str> = text.split_whitespace().collect();
                     let cap_words = words
                         .iter()
@@ -1631,9 +1629,8 @@ fn try_thesis_citation(ref_text: &str) -> Option<(String, bool)> {
     });
 
     // Also handle inverted format: "Surname, I., Title"
-    static AUTHOR_INVERTED: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^[A-Za-z\u{00C0}-\u{024F}'-]+,\s*(?:[A-Z]\.\s*)+,?\s+").unwrap()
-    });
+    static AUTHOR_INVERTED: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"^[A-Za-z\u{00C0}-\u{024F}'-]+,\s*(?:[A-Z]\.\s*)+,?\s+").unwrap());
 
     let title_start = if let Some(m) = AUTHOR_END.find(ref_text) {
         m.end()
@@ -1674,10 +1671,10 @@ fn strip_leading_surname(title: &str) -> String {
         Regex::new(r"^[A-Z][a-zA-Z\u{00A8}\u{00C0}-\u{024F}\u{0300}-\u{036F}'-]{1,14},\s+([A-Z])")
             .unwrap()
     });
-    if let Some(caps) = LEADING_SURNAME.captures(title) {
-        if let Some(title_start) = caps.get(1) {
-            return title[title_start.start()..].to_string();
-        }
+    if let Some(caps) = LEADING_SURNAME.captures(title)
+        && let Some(title_start) = caps.get(1)
+    {
+        return title[title_start.start()..].to_string();
     }
     title.to_string()
 }
@@ -1780,20 +1777,36 @@ pub(crate) fn split_sentences_skip_initials(text: &str) -> Vec<String> {
             // Surname + "and" + Name, followed by author terminator (comma, period, or another "and")
             // This prevents matching title phrases like "Universal and Transferable Adversarial"
             // which would otherwise match "Surname and Firstname" pattern
-            Regex::new(&format!(r"(?i)^([A-Z]{}{{1,12}})\s+and\s+[A-Z]{}{{1,12}}\s*(?:[,.]|\s+(?:and|et)\s)", sc, sc)).unwrap(),
+            Regex::new(&format!(
+                r"(?i)^([A-Z]{}{{1,12}})\s+and\s+[A-Z]{}{{1,12}}\s*(?:[,.]|\s+(?:and|et)\s)",
+                sc, sc
+            ))
+            .unwrap(),
             // Surname + "and" + Firstname Lastname. (two-word second author ending with period)
             // Handles "Griffin and Gordon Wilfong." author format
-            Regex::new(&format!(r"^([A-Z]{}+)\s+and\s+[A-Z]{}+\s+[A-Z]{}+\.", sc, sc, sc)).unwrap(),
+            Regex::new(&format!(
+                r"^([A-Z]{}+)\s+and\s+[A-Z]{}+\s+[A-Z]{}+\.",
+                sc, sc, sc
+            ))
+            .unwrap(),
             // Surname + "and" + Firstname I. Lastname. (second author with middle initial)
             // Handles "Braga and Brenda J. Bond." author format
-            Regex::new(&format!(r"^([A-Z]{}+)\s+and\s+[A-Z]{}+\s+[A-Z]\.\s+[A-Z]{}+\.", sc, sc, sc)).unwrap(),
+            Regex::new(&format!(
+                r"^([A-Z]{}+)\s+and\s+[A-Z]{}+\s+[A-Z]\.\s+[A-Z]{}+\.",
+                sc, sc, sc
+            ))
+            .unwrap(),
             // Handle "and et al." pattern (unusual but appears in some references)
             Regex::new(r"^and\s+et\s+al\.").unwrap(),
             // Handle "Surname and et al." pattern (unusual format)
             Regex::new(&format!(r"^([A-Z]{}+)\s+and\s+et\s+al\.", sc)).unwrap(),
             // Surname + "and" + Initial. Surname: "Smith and A. Jones"
             // This handles "Initial. Surname and Initial. Surname" author lists
-            Regex::new(&format!(r"^([A-Z]{}+)\s+and\s+[A-Z]\.\s+([A-Z]{}+)", sc, sc)).unwrap(),
+            Regex::new(&format!(
+                r"^([A-Z]{}+)\s+and\s+[A-Z]\.\s+([A-Z]{}+)",
+                sc, sc
+            ))
+            .unwrap(),
             // Multi-part surname: "Van Goethem,"
             Regex::new(&format!(r"^([A-Z]{}+)\s+([A-Z]{}+)\s*,", sc, sc)).unwrap(),
             // Middle initial without period: "D Kaplan,"
@@ -1802,13 +1815,25 @@ pub(crate) fn split_sentences_skip_initials(text: &str) -> Vec<String> {
             Regex::new(&format!(r"^([A-Z]{}+)\s+et\s+al\.", sc)).unwrap(),
             // Surname, Firstname I. (inverted format with middle initial, followed by next name)
             // Handles "Burns, Samuel C. Rios" after split at "J."
-            Regex::new(&format!(r"^([A-Z]{}+)\s*,\s*[A-Z]{}+\s+[A-Z]\.\s*[A-Z]", sc, sc)).unwrap(),
+            Regex::new(&format!(
+                r"^([A-Z]{}+)\s*,\s*[A-Z]{}+\s+[A-Z]\.\s*[A-Z]",
+                sc, sc
+            ))
+            .unwrap(),
             // Surname, Firstname [Middlenames...] I. (inverted format with middle names + initial)
             // Handles "Oliveira, Ana Flávia C. Moura" after split at "P."
-            Regex::new(&format!(r"^([A-Z]{}+)\s*,\s*[A-Z]{}+(?:\s+[A-Z]{}+)+\s+[A-Z]\.\s*[A-Z]", sc, sc, sc)).unwrap(),
+            Regex::new(&format!(
+                r"^([A-Z]{}+)\s*,\s*[A-Z]{}+(?:\s+[A-Z]{}+)+\s+[A-Z]\.\s*[A-Z]",
+                sc, sc, sc
+            ))
+            .unwrap(),
             // Surname, Firstname [Middle...] Lastname, (inverted format in comma-separated author list)
             // Handles "Mazurek, Aron Laszka," and "Klemmer, Stefan Albert Horstmann,"
-            Regex::new(&format!(r"^([A-Z]{}+)\s*,\s*[A-Z]{}+(?:\s+[A-Z]{}+)+\s*,", sc, sc, sc)).unwrap(),
+            Regex::new(&format!(
+                r"^([A-Z]{}+)\s*,\s*[A-Z]{}+(?:\s+[A-Z]{}+)+\s*,",
+                sc, sc, sc
+            ))
+            .unwrap(),
             // Surname, Firstname, (inverted format with single first name)
             // Handles "Jordan, Qijun," in author list
             Regex::new(&format!(r"^([A-Z]{}+)\s*,\s*[A-Z]{}{{2,}}\s*,", sc, sc)).unwrap(),
@@ -1826,7 +1851,11 @@ pub(crate) fn split_sentences_skip_initials(text: &str) -> Vec<String> {
             Regex::new(&format!(r"^([A-Z]{}+)\s*,\s*and\s+\.", sc)).unwrap(),
             // Lowercase surname particles (Dutch/German/French): "van Rijswijk", "von Neumann", "de la Cruz"
             // After initial like "R. van Rijswijk-Deij,"
-            Regex::new(&format!(r"^(?:van|von|de|du|den|der|ten|ter|op|la|le|di|da|dos|das|del)\s+{}+", sc)).unwrap(),
+            Regex::new(&format!(
+                r"^(?:van|von|de|du|den|der|ten|ter|op|la|le|di|da|dos|das|del)\s+{}+",
+                sc
+            ))
+            .unwrap(),
             // Middle name + Surname + "and": "J. Zico Kolter, and Matt Fredrikson"
             // Matches "Zico Kolter, and M" where Zico is middle name, Kolter is surname
             Regex::new(&format!(r"^([A-Z]{}+)\s+([A-Z]{}+),\s+and\s+[A-Z]", sc, sc)).unwrap(),
@@ -1841,7 +1870,11 @@ pub(crate) fn split_sentences_skip_initials(text: &str) -> Vec<String> {
             // Require a 4th capitalized word OR a comma/initial after to avoid matching
             // short title phrases like "Three Word Title" at end of text
             // Use {1,} to match 2+ char names like "Gu" ([A-Z] + at least 1 more char)
-            Regex::new(&format!(r"^([A-Z]{}{{1,}})\s+([A-Z]{}{{1,}})\s+([A-Z]{}{{1,}})\s+(?:[A-Z]|,)", sc, sc, sc)).unwrap(),
+            Regex::new(&format!(
+                r"^([A-Z]{}{{1,}})\s+([A-Z]{}{{1,}})\s+([A-Z]{}{{1,}})\s+(?:[A-Z]|,)",
+                sc, sc, sc
+            ))
+            .unwrap(),
             // Surname followed by title in braces/brackets: "Apostolaki. {TANGO}:"
             // This handles cases where the title starts with special punctuation
             // After initial "M.", text "Apostolaki. {TANGO}" should continue (not split at M.)
@@ -1961,7 +1994,11 @@ pub(crate) fn split_sentences_skip_initials(text: &str) -> Vec<String> {
         if word_before.to_lowercase() == "v" {
             let after_period = &text[next_start..];
             // If followed by a surname (Capital + lowercase), this is a particle, not a sentence end
-            if after_period.chars().next().is_some_and(|c| c.is_uppercase()) {
+            if after_period
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_uppercase())
+            {
                 let second_char = after_period.chars().nth(1);
                 if second_char.is_some_and(|c| c.is_lowercase()) {
                     continue; // Skip - this is "v. Surname" pattern
@@ -1983,7 +2020,10 @@ pub(crate) fn split_sentences_skip_initials(text: &str) -> Vec<String> {
                 // which is only for after initials, not after full surnames)
                 // Skip the last pattern in AUTHOR_AFTER which is the Surname.Capital pattern
                 let author_patterns_for_surname = AUTHOR_AFTER.len().saturating_sub(1);
-                let is_author = AUTHOR_AFTER.iter().take(author_patterns_for_surname).any(|re| re.is_match(after_period));
+                let is_author = AUTHOR_AFTER
+                    .iter()
+                    .take(author_patterns_for_surname)
+                    .any(|re| re.is_match(after_period));
                 if is_author {
                     continue; // Skip — this surname is followed by more authors, not a sentence boundary
                 }
@@ -2097,7 +2137,7 @@ pub(crate) static DEFAULT_CUTOFF_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     ]
 });
 
-fn apply_cutoff_patterns_with_config(title: &str, config: &PdfParsingConfig) -> String {
+fn apply_cutoff_patterns_with_config(title: &str, config: &ParsingConfig) -> String {
     let patterns = config
         .venue_cutoff_patterns
         .resolve(&DEFAULT_CUTOFF_PATTERNS);
@@ -3802,28 +3842,75 @@ fn test_et_al_extraction() {
 #[test]
 fn test_new_edge_cases() {
     let cases = vec![
-        ("Tony J. Bates and Enke Chen. An Application of the BGP Community Attribute in Multi-home Routing. RFC 1998, August 1996", "An Application of the BGP Community Attribute"),
-        ("Timothy G. Griffin and Gordon Wilfong. An analysis of bgp convergence properties. In Proceedings of the Conference on Applications, Technologies, Architectures, and Protocols for Computer Communication, SIGCOMM '99, page 277–288, New York, NY, USA, 1999. Association for Computing Machinery", "An analysis of bgp convergence properties"),
-        ("Nigel P. Smart and Frederik Vercauteren. Fully homomorphic SIMD operations. Des. Codes Cryptogr., 71(1):57–81, 2014", "Fully homomorphic SIMD operations"),
-        ("M Y. Lu and et al. A Multimodal Generative AI Copilot for Human Pathology. Nature, 634:466–473, 2024", "A Multimodal Generative AI Copilot for Human Pathology"),
-        ("Andrew C. Harvey and Clara Fernandes. Time Series Models for Count or Qualitative Observations. Journal of Business & Economic Statistics, 1989. DOI:10.108 0/07350015.1989.10509750", "Time Series Models for Count or Qualitative Observations"),
-        ("Anthony A. Braga and Brenda J. Bond. Policing Crime and Disorder Hot Spots: A Randomized Controlled Trial. Criminology, 2008. DOI:10.1111/J.1745-9125.20 08.00124.X", "Policing Crime and Disorder Hot Spots"),
-        ("Mohammad S. Jalali and Jessica P. Kaiser. Cybersecurity in Hospitals: A Systematic, Organizational Perspective. Journal of Medical Internet Research, 20(5):e10059, 2018. doi:10. 2196/10059", "Cybersecurity in Hospitals"),
-        ("Sharan B. Merriam and Elizabeth J. Tisdell. Qualitative Research: A Guide to Design and Implementation. John Wiley & Sons, August 2015", "Qualitative Research: A Guide to Design and Implementation"),
-        ("Isra Mohamed Ali, Maurantonio Caprolu, and Roberto Di Pietro. Foundations, properties, and security applications of puzzles: A survey. ACM Comput. Surv., 53(4), 2020", "Foundations, properties, and security applications of puzzles"),
-        ("Michael J. Freedman and Robert Morris. Tarzan: a peerto-peer anonymizing network layer. In Proceedings of the 9th ACM Conference on Computer and Communications Security, CCS '02, page 193–206, New York, NY, USA, 2002. ACM", "Tarzan"),
-        ("Arjen K. Lenstra and Tim Voss. Information security risk assessment, aggregation, and mitigation. In ACISP, 2004", "Information security risk assessment, aggregation, and mitigation"),
-        ("Nigel P. Smart and Frederik Vercauteren. Fully homomorphic SIMD operations. Des. Codes Cryptogr., 2014", "Fully homomorphic SIMD operations"),
-        ("Simson L. Garfinkel and Philip Leclerc. Randomness concerns when deploying differential privacy. In WPES '20, September 2020. https://doi.org/10.1145/3411497.3420211", "Randomness concerns when deploying differential privacy"),
-        ("Matthew K. Franklin and Moti Yung. Communication complexity of secure computation (extended abstract). In ACM STOC, 1992", "Communication complexity of secure computation"),
+        (
+            "Tony J. Bates and Enke Chen. An Application of the BGP Community Attribute in Multi-home Routing. RFC 1998, August 1996",
+            "An Application of the BGP Community Attribute",
+        ),
+        (
+            "Timothy G. Griffin and Gordon Wilfong. An analysis of bgp convergence properties. In Proceedings of the Conference on Applications, Technologies, Architectures, and Protocols for Computer Communication, SIGCOMM '99, page 277–288, New York, NY, USA, 1999. Association for Computing Machinery",
+            "An analysis of bgp convergence properties",
+        ),
+        (
+            "Nigel P. Smart and Frederik Vercauteren. Fully homomorphic SIMD operations. Des. Codes Cryptogr., 71(1):57–81, 2014",
+            "Fully homomorphic SIMD operations",
+        ),
+        (
+            "M Y. Lu and et al. A Multimodal Generative AI Copilot for Human Pathology. Nature, 634:466–473, 2024",
+            "A Multimodal Generative AI Copilot for Human Pathology",
+        ),
+        (
+            "Andrew C. Harvey and Clara Fernandes. Time Series Models for Count or Qualitative Observations. Journal of Business & Economic Statistics, 1989. DOI:10.108 0/07350015.1989.10509750",
+            "Time Series Models for Count or Qualitative Observations",
+        ),
+        (
+            "Anthony A. Braga and Brenda J. Bond. Policing Crime and Disorder Hot Spots: A Randomized Controlled Trial. Criminology, 2008. DOI:10.1111/J.1745-9125.20 08.00124.X",
+            "Policing Crime and Disorder Hot Spots",
+        ),
+        (
+            "Mohammad S. Jalali and Jessica P. Kaiser. Cybersecurity in Hospitals: A Systematic, Organizational Perspective. Journal of Medical Internet Research, 20(5):e10059, 2018. doi:10. 2196/10059",
+            "Cybersecurity in Hospitals",
+        ),
+        (
+            "Sharan B. Merriam and Elizabeth J. Tisdell. Qualitative Research: A Guide to Design and Implementation. John Wiley & Sons, August 2015",
+            "Qualitative Research: A Guide to Design and Implementation",
+        ),
+        (
+            "Isra Mohamed Ali, Maurantonio Caprolu, and Roberto Di Pietro. Foundations, properties, and security applications of puzzles: A survey. ACM Comput. Surv., 53(4), 2020",
+            "Foundations, properties, and security applications of puzzles",
+        ),
+        (
+            "Michael J. Freedman and Robert Morris. Tarzan: a peerto-peer anonymizing network layer. In Proceedings of the 9th ACM Conference on Computer and Communications Security, CCS '02, page 193–206, New York, NY, USA, 2002. ACM",
+            "Tarzan",
+        ),
+        (
+            "Arjen K. Lenstra and Tim Voss. Information security risk assessment, aggregation, and mitigation. In ACISP, 2004",
+            "Information security risk assessment, aggregation, and mitigation",
+        ),
+        (
+            "Nigel P. Smart and Frederik Vercauteren. Fully homomorphic SIMD operations. Des. Codes Cryptogr., 2014",
+            "Fully homomorphic SIMD operations",
+        ),
+        (
+            "Simson L. Garfinkel and Philip Leclerc. Randomness concerns when deploying differential privacy. In WPES '20, September 2020. https://doi.org/10.1145/3411497.3420211",
+            "Randomness concerns when deploying differential privacy",
+        ),
+        (
+            "Matthew K. Franklin and Moti Yung. Communication complexity of secure computation (extended abstract). In ACM STOC, 1992",
+            "Communication complexity of secure computation",
+        ),
     ];
 
     let mut failures = Vec::new();
     for (i, (ref_text, expected_substr)) in cases.iter().enumerate() {
         let (title, _) = extract_title_from_reference(ref_text);
-        let ok = title.to_lowercase().contains(&expected_substr.to_lowercase());
+        let ok = title
+            .to_lowercase()
+            .contains(&expected_substr.to_lowercase());
         println!("[{}] {}", i + 1, if ok { "✓" } else { "✗" });
-        println!("    Input: {}...", &ref_text[..std::cmp::min(60, ref_text.len())]);
+        println!(
+            "    Input: {}...",
+            &ref_text[..std::cmp::min(60, ref_text.len())]
+        );
         println!("    Title: '{}'", title);
         if !ok {
             println!("    Expected: '{}'", expected_substr);

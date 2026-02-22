@@ -2,7 +2,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
 
-use crate::config::PdfParsingConfig;
+use crate::config::ParsingConfig;
 
 /// Common compound-word suffixes that should keep the hyphen.
 pub(crate) static COMPOUND_SUFFIXES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
@@ -65,11 +65,11 @@ pub fn expand_ligatures(text: &str) -> String {
 /// - `"detec- tion"` or `"detec-\ntion"` → `"detection"` (syllable break)
 /// - `"human- centered"` → `"human-centered"` (compound word)
 pub fn fix_hyphenation(text: &str) -> String {
-    fix_hyphenation_with_config(text, &PdfParsingConfig::default())
+    fix_hyphenation_with_config(text, &ParsingConfig::default())
 }
 
 /// Config-aware version of [`fix_hyphenation`].
-pub(crate) fn fix_hyphenation_with_config(text: &str, config: &PdfParsingConfig) -> String {
+pub(crate) fn fix_hyphenation_with_config(text: &str, config: &ParsingConfig) -> String {
     static RE: Lazy<Regex> = Lazy::new(|| {
         // Match: word-char, hyphen, whitespace (including newlines), then word chars
         Regex::new(r"(\w)-\s+(\w)(\w*)").unwrap()
@@ -190,8 +190,8 @@ mod tests {
 
     #[test]
     fn test_fix_hyphenation_custom_suffix() {
-        use crate::PdfParsingConfigBuilder;
-        let config = PdfParsingConfigBuilder::new()
+        use crate::ParsingConfigBuilder;
+        let config = ParsingConfigBuilder::new()
             .add_compound_suffix("powered".to_string())
             .build()
             .unwrap();
@@ -214,9 +214,9 @@ mod tests {
 
     #[test]
     fn test_fix_hyphenation_replace_suffixes() {
-        use crate::PdfParsingConfigBuilder;
+        use crate::ParsingConfigBuilder;
         // Replace ALL suffixes — only "powered" is a compound suffix now
-        let config = PdfParsingConfigBuilder::new()
+        let config = ParsingConfigBuilder::new()
             .set_compound_suffixes(vec!["powered".to_string()])
             .build()
             .unwrap();

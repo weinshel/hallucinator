@@ -11,6 +11,11 @@ use crate::model::paper::RefPhase;
 use crate::theme::Theme;
 use crate::view::truncate;
 
+struct LinkEntry {
+    label: String,
+    url: String,
+}
+
 /// Render the Reference Detail screen into the given area.
 /// `footer_area` is a full-width row below the main content + activity panel.
 pub fn render_in(
@@ -25,6 +30,44 @@ pub fn render_in(
     let paper = &app.papers[paper_index];
     let refs = &app.ref_states[paper_index];
     let rs = &refs[ref_index];
+
+    // --- Collect links for OSC 8 hyperlink rendering ---
+    let mut links: Vec<LinkEntry> = Vec::new();
+    if let Some(result) = &rs.result {
+        let scholar_query = encode_url_param(&rs.title);
+        let scholar_url = format!(
+            "https://scholar.google.com/scholar?q=%22{}%22",
+            scholar_query
+        );
+        links.push(LinkEntry {
+            label: "Open in Google Scholar".into(),
+            url: scholar_url,
+        });
+        if let Some(doi) = &result.doi_info {
+            let url = format!("https://doi.org/{}", doi.doi);
+            links.push(LinkEntry {
+                label: format!("DOI: {url}"),
+                url,
+            });
+        }
+        if let Some(arxiv) = &result.arxiv_info {
+            let url = format!("https://arxiv.org/abs/{}", arxiv.arxiv_id);
+            links.push(LinkEntry {
+                label: format!("arXiv: {url}"),
+                url,
+            });
+        }
+    } else if matches!(rs.phase, RefPhase::Skipped(_)) && !rs.title.is_empty() {
+        let scholar_query = encode_url_param(&rs.title);
+        let scholar_url = format!(
+            "https://scholar.google.com/scholar?q=%22{}%22",
+            scholar_query
+        );
+        links.push(LinkEntry {
+            label: "Open in Google Scholar".into(),
+            url: scholar_url,
+        });
+    }
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // breadcrumb
@@ -296,29 +339,6 @@ pub fn render_in(
             }
         }
 
-        // LINKS section — show URLs on their own lines for terminal auto-detection
-        lines.push(Line::from(""));
-        section_header(&mut lines, "LINKS", theme);
-        let scholar_query = encode_url_param(&rs.title);
-        let scholar_url = format!("https://scholar.google.com/scholar?q={}", scholar_query);
-        url_line(&mut lines, "Google Scholar", &scholar_url, theme);
-        if let Some(doi) = &result.doi_info {
-            url_line(
-                &mut lines,
-                "DOI",
-                &format!("https://doi.org/{}", doi.doi),
-                theme,
-            );
-        }
-        if let Some(arxiv) = &result.arxiv_info {
-            url_line(
-                &mut lines,
-                "arXiv",
-                &format!("https://arxiv.org/abs/{}", arxiv.arxiv_id),
-                theme,
-            );
-        }
-
         // RETRACTION section
         if let Some(retraction) = &result.retraction_info
             && retraction.is_retracted
@@ -365,20 +385,25 @@ pub fn render_in(
             }
         }
     } else if matches!(rs.phase, RefPhase::Skipped(_)) {
-        // Skipped refs: show a search link if we have a title
-        if !rs.title.is_empty() {
-            lines.push(Line::from(""));
-            section_header(&mut lines, "LINKS", theme);
-            let scholar_query = encode_url_param(&rs.title);
-            let scholar_url = format!("https://scholar.google.com/scholar?q={}", scholar_query);
-            url_line(&mut lines, "Google Scholar", &scholar_url, theme);
-        }
+        // No extra content for skipped refs (links added below)
     } else {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  Result pending...",
             Style::default().fg(theme.dim),
         )));
+    }
+
+    // LINKS section (inside scrollable content, OSC 8 applied after render)
+    if !links.is_empty() {
+        lines.push(Line::from(""));
+        section_header(&mut lines, "LINKS", theme);
+        for link in &links {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", link.label),
+                Style::default().fg(theme.active),
+            )));
+        }
     }
 
     let content = Paragraph::new(lines)
@@ -391,6 +416,9 @@ pub fn render_in(
         .scroll((app.detail_scroll, 0));
 
     f.render_widget(content, chunks[1]);
+
+    // Apply OSC 8 hyperlinks to link rows visible in the rendered buffer
+    apply_osc8_links(f, chunks[1], &links);
 
     // --- Footer ---
     render_footer(f, footer_area, theme);
@@ -412,18 +440,61 @@ fn labeled_line<'a>(lines: &mut Vec<Line<'a>>, label: &'a str, value: &str, them
     ]));
 }
 
-/// Render a link: label on one line, URL on the next (for terminal click detection).
-fn url_line(lines: &mut Vec<Line<'_>>, label: &str, url: &str, theme: &Theme) {
-    lines.push(Line::from(vec![Span::styled(
-        format!("  {label:<16}"),
-        Style::default().fg(theme.dim),
-    )]));
-    lines.push(Line::from(Span::styled(
-        format!("    {url}"),
-        Style::default()
-            .fg(theme.active)
-            .add_modifier(Modifier::UNDERLINED),
-    )));
+/// Scan the rendered buffer inside a bordered content area for link display text
+/// and overwrite matching cells with OSC 8 terminal hyperlink escape sequences.
+fn apply_osc8_links(f: &mut Frame, content_area: Rect, links: &[LinkEntry]) {
+    if links.is_empty() || content_area.height < 3 || content_area.width < 3 {
+        return;
+    }
+
+    // Inner area (inside the border)
+    let inner_x = content_area.x + 1;
+    let inner_y = content_area.y + 1;
+    let inner_w = content_area.width - 2;
+    let inner_h = content_area.height - 2;
+
+    let buf = f.buffer_mut();
+
+    for link in links {
+        let display = format!("  {}", link.label);
+        let display_chars: Vec<char> = display.chars().collect();
+
+        // Scan visible rows for this link's display text
+        for row in 0..inner_h {
+            let y = inner_y + row;
+
+            // Check if this row starts with the display text
+            let matches = display_chars.iter().enumerate().all(|(col, &ch)| {
+                let x = inner_x + col as u16;
+                if x >= inner_x + inner_w {
+                    return false;
+                }
+                let sym = buf[(x, y)].symbol();
+                sym.len() == 1 && sym.as_bytes()[0] as char == ch
+            });
+
+            if !matches || display_chars.is_empty() {
+                continue;
+            }
+
+            // Overwrite label cells with OSC 8 hyperlink in 2-char chunks
+            // (workaround for ratatui#902 — ANSI width miscalculation)
+            let label_chars: Vec<char> = link.label.chars().collect();
+            let mut pos = 0usize;
+            while pos < label_chars.len() {
+                let end = (pos + 2).min(label_chars.len());
+                let chunk: String = label_chars[pos..end].iter().collect();
+                let cell_x = inner_x + 2 + pos as u16;
+                if cell_x >= inner_x + inner_w {
+                    break;
+                }
+                let hyperlink = format!("\x1B]8;;{}\x07{}\x1B]8;;\x07", link.url, chunk);
+                buf[(cell_x, y)].set_symbol(&hyperlink);
+                pos = end;
+            }
+            break; // Found this link, move to next
+        }
+    }
 }
 
 fn render_footer(f: &mut Frame, area: Rect, theme: &Theme) {

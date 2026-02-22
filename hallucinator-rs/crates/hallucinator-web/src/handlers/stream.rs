@@ -12,7 +12,7 @@ use hallucinator_core::{Config, ExtractionResult, ProgressEvent, SkipStats, Vali
 use crate::models::*;
 use crate::state::AppState;
 use crate::upload::{self, FileType, FormFields};
-use hallucinator_pdf::archive::{self, ExtractedPdf};
+use hallucinator_ingest::archive::{self, ExtractedPdf};
 
 pub async fn stream(State(state): State<Arc<AppState>>, multipart: Multipart) -> impl IntoResponse {
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);
@@ -331,7 +331,7 @@ async fn process_archive_file(
 async fn extract_pdf_blocking(path: &std::path::Path) -> Result<ExtractionResult, String> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        hallucinator_pdf::extract_references(&path)
+        hallucinator_ingest::extract_references(&path)
             .map_err(|e| format!("PDF extraction failed: {}", e))
     })
     .await

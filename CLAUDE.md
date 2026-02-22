@@ -83,6 +83,7 @@ docker run -p 5001:5001 hallucinator
 - `legacy/app.py` - Flask web application (legacy Python)
 - `legacy/templates/index.html` - Web UI with embedded JS/CSS
 - `legacy/dblp_offline.py` - Offline DBLP database builder and query module (legacy Python)
+- `hallucinator-rs/crates/hallucinator-parsing/` - Reference parsing pipeline (section detection, segmentation, title/author extraction)
 - `hallucinator-rs/` - Primary Rust implementation (see workspace structure in README)
 
 ### Validation Result Types

@@ -1262,7 +1262,7 @@ dependencies = [
  "hallucinator-dblp",
  "hallucinator-ingest",
  "hallucinator-openalex",
- "hallucinator-pdf",
+ "hallucinator-parsing",
  "hallucinator-pdf-mupdf",
  "hallucinator-reporting",
  "indicatif",
@@ -1331,7 +1331,7 @@ dependencies = [
  "flate2",
  "hallucinator-bbl",
  "hallucinator-core",
- "hallucinator-pdf",
+ "hallucinator-parsing",
  "hallucinator-pdf-mupdf",
  "tar",
  "thiserror 2.0.18",
@@ -1361,7 +1361,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hallucinator-pdf"
+name = "hallucinator-parsing"
 version = "0.1.1-alpha.5"
 dependencies = [
  "anyhow",
@@ -1381,7 +1381,7 @@ dependencies = [
 name = "hallucinator-pdf-mupdf"
 version = "0.1.1-alpha.5"
 dependencies = [
- "hallucinator-pdf",
+ "hallucinator-core",
  "mupdf",
 ]
 
@@ -1409,7 +1409,6 @@ dependencies = [
  "hallucinator-dblp",
  "hallucinator-ingest",
  "hallucinator-openalex",
- "hallucinator-pdf",
  "hallucinator-reporting",
  "indicatif",
  "mimalloc",

@@ -29,12 +29,12 @@ impl<T: Clone> ListOverride<T> {
     }
 }
 
-/// Configuration for the PDF reference extraction pipeline.
+/// Configuration for the reference extraction pipeline.
 ///
 /// All regex fields are `Option<Regex>` — `None` means "use the built-in default".
-/// Use [`PdfParsingConfigBuilder`] to construct with string patterns.
+/// Use [`ParsingConfigBuilder`] to construct with string patterns.
 #[derive(Debug, Clone)]
-pub struct PdfParsingConfig {
+pub struct ParsingConfig {
     // ── section.rs ──
     /// Regex to locate the references section header.
     pub(crate) section_header_re: Option<Regex>,
@@ -72,7 +72,7 @@ pub struct PdfParsingConfig {
     pub(crate) scoring_weights: Option<ScoringWeights>,
 }
 
-impl Default for PdfParsingConfig {
+impl Default for ParsingConfig {
     fn default() -> Self {
         Self {
             section_header_re: None,
@@ -91,7 +91,7 @@ impl Default for PdfParsingConfig {
     }
 }
 
-impl PdfParsingConfig {
+impl ParsingConfig {
     /// Get the scoring weights, using defaults if not configured.
     pub(crate) fn scoring_weights(&self) -> ScoringWeights {
         self.scoring_weights.clone().unwrap_or_default()
@@ -103,12 +103,12 @@ impl PdfParsingConfig {
     }
 }
 
-/// Builder for [`PdfParsingConfig`].
+/// Builder for [`ParsingConfig`].
 ///
 /// Accepts string patterns that are compiled to `Regex` in [`build()`](Self::build).
 /// Fails fast with `regex::Error` if any pattern is invalid.
 #[derive(Debug, Clone, Default)]
-pub struct PdfParsingConfigBuilder {
+pub struct ParsingConfigBuilder {
     section_header_re: Option<String>,
     section_end_re: Option<String>,
     fallback_fraction: Option<f64>,
@@ -141,7 +141,7 @@ enum ListOverridePlainBuilder {
     Extend(Vec<String>),
 }
 
-impl PdfParsingConfigBuilder {
+impl ParsingConfigBuilder {
     pub fn new() -> Self {
         Self::default()
     }
@@ -245,8 +245,8 @@ impl PdfParsingConfigBuilder {
         self
     }
 
-    /// Compile all string patterns into regexes and produce a [`PdfParsingConfig`].
-    pub fn build(self) -> Result<PdfParsingConfig, regex::Error> {
+    /// Compile all string patterns into regexes and produce a [`ParsingConfig`].
+    pub fn build(self) -> Result<ParsingConfig, regex::Error> {
         let compile = |opt: Option<String>| -> Result<Option<Regex>, regex::Error> {
             opt.map(|p| Regex::new(&p)).transpose()
         };
@@ -276,7 +276,7 @@ impl PdfParsingConfigBuilder {
             }
         };
 
-        Ok(PdfParsingConfig {
+        Ok(ParsingConfig {
             section_header_re: compile(self.section_header_re)?,
             section_end_re: compile(self.section_end_re)?,
             fallback_fraction: self.fallback_fraction.unwrap_or(0.7),
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let config = PdfParsingConfig::default();
+        let config = ParsingConfig::default();
         assert_eq!(config.min_title_words, 4);
         assert_eq!(config.max_authors, 15);
         assert!((config.fallback_fraction - 0.7).abs() < f64::EPSILON);
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_builder_basic() {
-        let config = PdfParsingConfigBuilder::new()
+        let config = ParsingConfigBuilder::new()
             .min_title_words(3)
             .max_authors(20)
             .fallback_fraction(0.8)
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_builder_custom_regex() {
-        let config = PdfParsingConfigBuilder::new()
+        let config = ParsingConfigBuilder::new()
             .section_header_regex(r"(?i)\n\s*Bibliografía\s*\n")
             .build()
             .unwrap();
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_builder_invalid_regex() {
-        let result = PdfParsingConfigBuilder::new()
+        let result = ParsingConfigBuilder::new()
             .section_header_regex(r"[invalid")
             .build();
         assert!(result.is_err());

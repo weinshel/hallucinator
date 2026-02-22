@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::config::PdfParsingConfig;
+use crate::config::ParsingConfig;
 
 /// Segmentation strategy identifier for scoring and debugging
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -43,13 +43,13 @@ pub struct SegmentationResult {
 /// and returns the text between the header and any end markers (Appendix, Acknowledgments, etc.).
 /// Falls back to the last 30% of the document if no header is found.
 pub fn find_references_section(text: &str) -> Option<String> {
-    find_references_section_with_config(text, &PdfParsingConfig::default())
+    find_references_section_with_config(text, &ParsingConfig::default())
 }
 
 /// Config-aware version of [`find_references_section`].
 pub(crate) fn find_references_section_with_config(
     text: &str,
-    config: &PdfParsingConfig,
+    config: &ParsingConfig,
 ) -> Option<String> {
     static HEADER_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)\n\s*(?:References|Bibliography|Works\s+Cited)\s*\n").unwrap()
@@ -182,7 +182,7 @@ fn strip_page_headers(text: &str) -> String {
 /// 4. Springer/Nature: lines starting with uppercase + `(YYYY)` pattern
 /// 5. Fallback: double-newline splitting
 pub fn segment_references(ref_text: &str) -> Vec<String> {
-    segment_references_with_config(ref_text, &PdfParsingConfig::default())
+    segment_references_with_config(ref_text, &ParsingConfig::default())
 }
 
 /// Run all segmentation strategies and return all valid results.
@@ -191,7 +191,7 @@ pub fn segment_references(ref_text: &str) -> Vec<String> {
 /// segmentation approaches before selecting the best one.
 pub fn segment_references_all_strategies(
     ref_text: &str,
-    config: &PdfParsingConfig,
+    config: &ParsingConfig,
 ) -> Vec<SegmentationResult> {
     let ref_text = strip_page_headers(ref_text);
     let ref_text = ref_text.as_str();
@@ -265,7 +265,7 @@ pub fn segment_references_all_strategies(
 /// returned.
 pub(crate) fn segment_references_with_config(
     ref_text: &str,
-    config: &PdfParsingConfig,
+    config: &ParsingConfig,
 ) -> Vec<String> {
     use crate::scoring::select_best_segmentation;
 
@@ -286,7 +286,7 @@ pub(crate) fn segment_references_with_config(
         .unwrap_or_default()
 }
 
-fn try_ieee_with_config(ref_text: &str, config: &PdfParsingConfig) -> Option<Vec<String>> {
+fn try_ieee_with_config(ref_text: &str, config: &ParsingConfig) -> Option<Vec<String>> {
     // Match [1], [2], etc. at start of string, after newline, period, or closing bracket
     // - Start/newline: standard IEEE format
     // - Period: handles PDFs where text extraction doesn't preserve newlines
@@ -337,7 +337,7 @@ fn try_ieee_with_config(ref_text: &str, config: &PdfParsingConfig) -> Option<Vec
     Some(refs)
 }
 
-fn try_numbered_with_config(ref_text: &str, config: &PdfParsingConfig) -> Option<Vec<String>> {
+fn try_numbered_with_config(ref_text: &str, config: &ParsingConfig) -> Option<Vec<String>> {
     // Match 1-3 digit numbers only (not 4-digit years like 2018, 2024)
     // Papers rarely have 1000+ references, so this is a safe constraint
     static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)(?:^|\n)\s*(\d{1,3})\.\s+").unwrap());
@@ -618,7 +618,7 @@ fn try_springer_nature(ref_text: &str) -> Option<Vec<String>> {
     Some(refs)
 }
 
-fn fallback_double_newline_with_config(ref_text: &str, config: &PdfParsingConfig) -> Vec<String> {
+fn fallback_double_newline_with_config(ref_text: &str, config: &ParsingConfig) -> Vec<String> {
     static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\n\s*\n").unwrap());
 
     let re = config.fallback_segment_re.as_ref().unwrap_or(&RE);
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_find_section_custom_header_re() {
-        let config = crate::PdfParsingConfigBuilder::new()
+        let config = crate::ParsingConfigBuilder::new()
             .section_header_regex(r"(?i)\n\s*Literatur\s*\n")
             .build()
             .unwrap();
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn test_find_section_custom_end_re() {
-        let config = crate::PdfParsingConfigBuilder::new()
+        let config = crate::ParsingConfigBuilder::new()
             .section_end_regex(r"(?i)\n\s*Anhang")
             .build()
             .unwrap();
@@ -707,7 +707,7 @@ mod tests {
 
     #[test]
     fn test_find_section_custom_fallback_fraction() {
-        let config = crate::PdfParsingConfigBuilder::new()
+        let config = crate::ParsingConfigBuilder::new()
             .fallback_fraction(0.5)
             .build()
             .unwrap();
@@ -720,7 +720,7 @@ mod tests {
 
     #[test]
     fn test_segment_custom_ieee_regex() {
-        let config = crate::PdfParsingConfigBuilder::new()
+        let config = crate::ParsingConfigBuilder::new()
             .ieee_segment_regex(r"\n\s*<<(\d+)>>\s*")
             .build()
             .unwrap();
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn test_segment_custom_fallback_regex() {
-        let config = crate::PdfParsingConfigBuilder::new()
+        let config = crate::ParsingConfigBuilder::new()
             .fallback_segment_regex(r"---+")
             .build()
             .unwrap();

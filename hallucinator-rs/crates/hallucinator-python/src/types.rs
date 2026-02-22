@@ -1,8 +1,8 @@
 use pyo3::prelude::*;
 
-use hallucinator_pdf::{ExtractionResult, Reference, SkipStats};
+use hallucinator_core::{ExtractionResult, Reference, SkipStats};
 
-/// A parsed reference extracted from a PDF.
+/// A parsed reference extracted from a document.
 #[pyclass(name = "Reference")]
 #[derive(Debug, Clone)]
 pub struct PyReference {
@@ -83,7 +83,7 @@ impl PyReference {
         self.inner.arxiv_id.as_deref()
     }
 
-    /// 1-based position in the original PDF reference list (before skip filtering).
+    /// 1-based position in the original reference list (before skip filtering).
     #[getter]
     fn original_number(&self) -> usize {
         self.inner.original_number
@@ -162,7 +162,7 @@ impl PySkipStats {
     }
 }
 
-/// Result of extracting references from a PDF.
+/// Result of extracting references from a document.
 #[pyclass(name = "ExtractionResult")]
 #[derive(Debug, Clone)]
 pub struct PyExtractionResult {

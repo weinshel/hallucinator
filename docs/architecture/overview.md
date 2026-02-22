@@ -10,7 +10,7 @@ The workspace lives in `hallucinator-rs/` and contains 10 member crates plus 2 e
 hallucinator-rs/
 ├── crates/
 │   ├── hallucinator-core       # Validation engine, DB backends, caching, rate limiting
-│   ├── hallucinator-pdf        # PDF text extraction (backend-agnostic)
+│   ├── hallucinator-parsing     # Reference parsing pipeline (backend-agnostic)
 │   ├── hallucinator-pdf-mupdf  # MuPDF backend (AGPL-licensed)
 │   ├── hallucinator-bbl        # BibTeX .bbl/.bib file parsing
 │   ├── hallucinator-ingest     # Unified file dispatch + archive handling
@@ -37,7 +37,7 @@ Only `hallucinator-cli` and `hallucinator-tui` are distributed as release binari
                     └──────┬───────┘              │
                            │                      │
               ┌────────────▼────────────┐   ┌─────▼──────┐
-              │          core           │   │    pdf      │
+              │          core           │   │  parsing    │
               │  (validation, DB, cache)│   │  (extract)  │
               └────┬───────┬───────┬────┘   └─────┬───────┘
                    │       │       │              │
@@ -51,7 +51,7 @@ Only `hallucinator-cli` and `hallucinator-tui` are distributed as release binari
 
 The MuPDF library is licensed under AGPL. To keep the rest of the codebase under a permissive license:
 
-- `hallucinator-pdf` defines the `PdfBackend` trait (permissive license)
+- `hallucinator-core` defines the `PdfBackend` trait (permissive license)
 - `hallucinator-pdf-mupdf` implements `PdfBackend` using MuPDF (AGPL)
 - Only the final binaries (CLI/TUI) link to the AGPL crate
 - Library consumers (`hallucinator-core`, `hallucinator-python`) never depend on `hallucinator-pdf-mupdf` directly
@@ -80,7 +80,7 @@ Local backends (`is_local() = true`) are queried inline by the coordinator befor
 
 ### `PdfBackend`
 
-Defined in `hallucinator-pdf/src/lib.rs`. Abstracts PDF text extraction:
+Defined in `hallucinator-core`. Abstracts PDF text extraction:
 
 ```rust
 pub trait PdfBackend {

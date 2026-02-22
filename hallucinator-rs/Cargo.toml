@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/hallucinator-pdf",
+    "crates/hallucinator-parsing",
     "crates/hallucinator-pdf-mupdf",
     "crates/hallucinator-bbl",
     "crates/hallucinator-core",
@@ -31,7 +31,7 @@ repository = "https://github.com/gianlucasb/hallucinator"
 
 [workspace.dependencies]
 # Internal crates
-hallucinator-pdf = { path = "crates/hallucinator-pdf" }
+hallucinator-parsing = { path = "crates/hallucinator-parsing" }
 hallucinator-pdf-mupdf = { path = "crates/hallucinator-pdf-mupdf" }
 hallucinator-bbl = { path = "crates/hallucinator-bbl" }
 hallucinator-core = { path = "crates/hallucinator-core" }

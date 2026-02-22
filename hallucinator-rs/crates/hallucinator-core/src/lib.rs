@@ -5,6 +5,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 pub mod authors;
+pub mod backend;
 pub mod cache;
 pub mod checker;
 pub mod config_file;
@@ -18,6 +19,7 @@ pub mod retraction;
 pub mod text_utils;
 
 // Re-export for convenience
+pub use backend::{BackendError, PdfBackend};
 pub use cache::{DEFAULT_NEGATIVE_TTL, DEFAULT_POSITIVE_TTL, QueryCache};
 pub use orchestrator::{DbSearchResult, query_all_databases};
 pub use rate_limit::{DbQueryError, RateLimitedResult, RateLimiters};

@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
-use hallucinator_pdf::section::{find_references_section, segment_references_all_strategies};
-use hallucinator_pdf::scoring::{score_segmentation, ScoringWeights};
-use hallucinator_pdf::PdfParsingConfig;
+use hallucinator_parsing::ParsingConfig;
+use hallucinator_parsing::scoring::{ScoringWeights, score_segmentation};
+use hallucinator_parsing::section::{find_references_section, segment_references_all_strategies};
 use mupdf::Document;
 use tar::Archive;
 
@@ -23,7 +23,7 @@ fn main() -> Result<()> {
         .map(|s| s.as_str())
         .unwrap_or("./papers");
 
-    let config = PdfParsingConfig::default();
+    let config = ParsingConfig::default();
     let weights = ScoringWeights::default();
 
     let mut total_gt_refs = 0usize;
@@ -37,26 +37,23 @@ fn main() -> Result<()> {
 
     for entry in fs::read_dir(corpus_dir)? {
         let path = entry?.path();
-        if path.extension().map_or(false, |e| e == "pdf") {
-            if let Some(tarball) = find_matching_gt(&path) {
-                match evaluate_paper(&path, &tarball, &config, &weights) {
-                    Ok((gt_count, extracted_count, matched_count, unmatched)) => {
-                        total_gt_refs += gt_count;
-                        total_extracted_refs += extracted_count;
-                        total_matched_refs += matched_count;
-                        papers_evaluated += 1;
+        if path.extension().is_some_and(|e| e == "pdf")
+            && let Some(tarball) = find_matching_gt(&path)
+            && let Ok((gt_count, extracted_count, matched_count, unmatched)) =
+                evaluate_paper(&path, &tarball, &config, &weights)
+        {
+            total_gt_refs += gt_count;
+            total_extracted_refs += extracted_count;
+            total_matched_refs += matched_count;
+            papers_evaluated += 1;
 
-                        if matched_count == 0 && extracted_count > 0 {
-                            papers_with_zero_matches += 1;
-                        }
+            if matched_count == 0 && extracted_count > 0 {
+                papers_with_zero_matches += 1;
+            }
 
-                        // Collect sample unmatched
-                        if sample_unmatched.len() < 50 {
-                            sample_unmatched.extend(unmatched.into_iter().take(2));
-                        }
-                    }
-                    Err(_) => {}
-                }
+            // Collect sample unmatched
+            if sample_unmatched.len() < 50 {
+                sample_unmatched.extend(unmatched.into_iter().take(2));
             }
         }
     }
@@ -78,10 +75,18 @@ fn main() -> Result<()> {
         0.0
     };
 
-    eprintln!("Precision: {:.1}% ({}/{} extracted refs matched GT)",
-        precision * 100.0, total_matched_refs, total_extracted_refs);
-    eprintln!("Recall:    {:.1}% ({}/{} GT refs were extracted)",
-        recall * 100.0, total_matched_refs, total_gt_refs);
+    eprintln!(
+        "Precision: {:.1}% ({}/{} extracted refs matched GT)",
+        precision * 100.0,
+        total_matched_refs,
+        total_extracted_refs
+    );
+    eprintln!(
+        "Recall:    {:.1}% ({}/{} GT refs were extracted)",
+        recall * 100.0,
+        total_matched_refs,
+        total_gt_refs
+    );
     eprintln!("F1:        {:.3}", f1);
 
     // Show sample unmatched
@@ -106,46 +111,48 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// (gt_count, extracted_count, matched_count, unmatched)
+type EvalResult = (usize, usize, usize, Vec<(String, String, f64)>);
+
 fn evaluate_paper(
     pdf_path: &Path,
     gt_path: &Path,
-    config: &PdfParsingConfig,
+    config: &ParsingConfig,
     weights: &ScoringWeights,
-) -> Result<(usize, usize, usize, Vec<(String, String, f64)>)> {
+) -> Result<EvalResult> {
     let ground_truth = extract_bibtex_titles(gt_path)?;
     if ground_truth.is_empty() {
         anyhow::bail!("No ground truth");
     }
 
     let text = extract_text_from_pdf(pdf_path)?;
-    let ref_section = find_references_section(&text)
-        .ok_or_else(|| anyhow::anyhow!("No refs section"))?;
+    let ref_section =
+        find_references_section(&text).ok_or_else(|| anyhow::anyhow!("No refs section"))?;
 
     let all_results = segment_references_all_strategies(&ref_section, config);
 
     // Select best strategy by score
-    let best = all_results
-        .into_iter()
-        .max_by(|a, b| {
-            let sa = score_segmentation(a, &ref_section, config, weights);
-            let sb = score_segmentation(b, &ref_section, config, weights);
-            sa.partial_cmp(&sb).unwrap()
-        });
+    let best = all_results.into_iter().max_by(|a, b| {
+        let sa = score_segmentation(a, &ref_section, config, weights);
+        let sb = score_segmentation(b, &ref_section, config, weights);
+        sa.partial_cmp(&sb).unwrap()
+    });
 
     let Some(result) = best else {
         return Ok((ground_truth.len(), 0, 0, vec![]));
     };
 
     // Extract titles from references and apply clean_title
-    let extracted_titles: Vec<String> = result.references
+    let extracted_titles: Vec<String> = result
+        .references
         .iter()
         .filter_map(|r| {
-            let (title, from_quotes) = hallucinator_pdf::title::extract_title_from_reference(r);
+            let (title, from_quotes) = hallucinator_parsing::title::extract_title_from_reference(r);
             if title.is_empty() {
                 return None;
             }
             // Apply clean_title to remove trailing venue/metadata
-            let cleaned = hallucinator_pdf::title::clean_title(&title, from_quotes);
+            let cleaned = hallucinator_parsing::title::clean_title(&title, from_quotes);
             if cleaned.is_empty() || cleaned.split_whitespace().count() < config.min_title_words() {
                 None
             } else {
@@ -159,7 +166,8 @@ fn evaluate_paper(
     let mut unmatched = Vec::new();
 
     for et in &extracted_titles {
-        let best_match = ground_truth.iter()
+        let best_match = ground_truth
+            .iter()
             .map(|gt| (gt, similarity(&normalize_title(et), &normalize_title(gt))))
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
@@ -173,7 +181,12 @@ fn evaluate_paper(
         }
     }
 
-    Ok((ground_truth.len(), extracted_titles.len(), matched, unmatched))
+    Ok((
+        ground_truth.len(),
+        extracted_titles.len(),
+        matched,
+        unmatched,
+    ))
 }
 
 fn similarity(a: &str, b: &str) -> f64 {
@@ -194,18 +207,18 @@ fn extract_text_from_pdf(path: &Path) -> Result<String> {
     let doc = Document::open(path.to_str().unwrap()).context("Failed to open PDF")?;
     let mut text = String::new();
     for page_num in 0..doc.page_count()? {
-        if let Ok(page) = doc.load_page(page_num) {
-            if let Ok(text_page) = page.to_text_page(mupdf::TextPageFlags::empty()) {
-                for block in text_page.blocks() {
-                    for line in block.lines() {
-                        for ch in line.chars() {
-                            if let Some(c) = ch.char() {
-                                text.push(c);
-                            }
+        if let Ok(page) = doc.load_page(page_num)
+            && let Ok(text_page) = page.to_text_page(mupdf::TextPageFlags::empty())
+        {
+            for block in text_page.blocks() {
+                for line in block.lines() {
+                    for ch in line.chars() {
+                        if let Some(c) = ch.char() {
+                            text.push(c);
                         }
                     }
-                    text.push('\n');
                 }
+                text.push('\n');
             }
         }
     }
@@ -233,7 +246,7 @@ fn extract_bibtex_titles(gt_path: &Path) -> Result<Vec<String>> {
         for entry in archive.entries()? {
             let mut entry = entry?;
             let path = entry.path()?.to_path_buf();
-            if path.extension().map_or(false, |e| e == "bib" || e == "bbl") {
+            if path.extension().is_some_and(|e| e == "bib" || e == "bbl") {
                 let mut contents = String::new();
                 entry.read_to_string(&mut contents)?;
                 let titles = parse_bibtex_titles(&contents);
@@ -250,21 +263,21 @@ fn parse_bibtex_titles(content: &str) -> Vec<String> {
     let mut titles = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if line.to_lowercase().starts_with("title") {
-            if let Some(eq_pos) = line.find('=') {
-                let value = line[eq_pos + 1..].trim();
-                let title = if value.starts_with('{') {
-                    extract_braced(value)
-                } else if value.starts_with('"') {
-                    extract_quoted(value)
-                } else {
-                    None
-                };
-                if let Some(t) = title {
-                    if !t.is_empty() {
-                        titles.push(t);
-                    }
-                }
+        if line.to_lowercase().starts_with("title")
+            && let Some(eq_pos) = line.find('=')
+        {
+            let value = line[eq_pos + 1..].trim();
+            let title = if value.starts_with('{') {
+                extract_braced(value)
+            } else if value.starts_with('"') {
+                extract_quoted(value)
+            } else {
+                None
+            };
+            if let Some(t) = title
+                && !t.is_empty()
+            {
+                titles.push(t);
             }
         }
     }
@@ -278,11 +291,21 @@ fn extract_braced(s: &str) -> Option<String> {
     for (i, c) in s.char_indices() {
         match c {
             '{' => depth += 1,
-            '}' => { depth -= 1; if depth == 0 { end = i; break; } }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
             _ => {}
         }
     }
-    if end > 0 { Some(s[..end].to_string()) } else { None }
+    if end > 0 {
+        Some(s[..end].to_string())
+    } else {
+        None
+    }
 }
 
 fn extract_quoted(s: &str) -> Option<String> {
@@ -296,18 +319,27 @@ fn find_matching_gt(pdf_path: &Path) -> Option<PathBuf> {
 
     // First, try direct bib/bbl files (new format)
     let bib = parent.join(format!("{}.bib", stem));
-    if bib.exists() { return Some(bib); }
+    if bib.exists() {
+        return Some(bib);
+    }
     let bbl = parent.join(format!("{}.bbl", stem));
-    if bbl.exists() { return Some(bbl); }
+    if bbl.exists() {
+        return Some(bbl);
+    }
 
     // Fall back to tarball (old format)
     let tarball = parent.join(format!("{}.tar.gz", stem));
-    if tarball.exists() { return Some(tarball); }
+    if tarball.exists() {
+        return Some(tarball);
+    }
 
-    let arxiv_id: String = stem.chars().take_while(|c| *c != '_' && *c != '-').collect();
+    let arxiv_id: String = stem
+        .chars()
+        .take_while(|c| *c != '_' && *c != '-')
+        .collect();
     for entry in fs::read_dir(parent).ok()? {
         let path = entry.ok()?.path();
-        if path.extension().map_or(false, |e| e == "gz") {
+        if path.extension().is_some_and(|e| e == "gz") {
             let name = path.file_name()?.to_str()?;
             if name.starts_with(&arxiv_id) && name.ends_with(".tar.gz") {
                 return Some(path);

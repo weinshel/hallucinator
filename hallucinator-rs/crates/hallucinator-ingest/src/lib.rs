@@ -12,7 +12,7 @@ pub use archive::{ArchiveItem, ExtractedPdf, extract_archive_streaming, is_archi
 #[derive(Error, Debug)]
 pub enum IngestError {
     #[error("PDF extraction error: {0}")]
-    Pdf(#[from] hallucinator_pdf::PdfError),
+    Pdf(#[from] hallucinator_parsing::ParsingError),
     #[error("BBL/BIB extraction error: {0}")]
     Bbl(#[from] hallucinator_bbl::BblError),
     #[cfg(not(feature = "pdf"))]
@@ -43,7 +43,7 @@ pub fn extract_references(path: &Path) -> Result<ExtractionResult, IngestError> 
 #[cfg(feature = "pdf")]
 fn extract_pdf(path: &Path) -> Result<ExtractionResult, IngestError> {
     let backend = hallucinator_pdf_mupdf::MupdfBackend;
-    hallucinator_pdf::extract_references(path, &backend).map_err(IngestError::Pdf)
+    hallucinator_parsing::extract_references(path, &backend).map_err(IngestError::Pdf)
 }
 
 #[cfg(not(feature = "pdf"))]

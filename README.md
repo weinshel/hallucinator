@@ -21,6 +21,8 @@ You can install it with:
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/gianlucasb/hallucinator/releases/latest/download/hallucinator-tui-installer.sh | sh
 ```
 
+![demo](https://github.com/user-attachments/assets/b879eb66-5b94-4a75-9e34-79a024c5646e)
+
 See **[hallucinator-rs/README.md](hallucinator-rs/README.md)** for full documentation.
 
 ---

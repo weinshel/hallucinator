@@ -110,3 +110,10 @@ docker run -p 5001:5001 hallucinator
 - **Retry mechanism**: Tracks failed DBs and retries "not found" references at the end
 - **Timeout tracking**: Per-reference tracking of which DBs timed out, displayed in final results
 - **Retraction checking**: `check_retraction(doi)` and `check_retraction_by_title(title)` query CrossRef for retraction notices
+
+## Testing with Ground Truth
+
+When testing extraction against BibTeX/BBL ground truth files in `~/Software/arxiv-crawler/ground-truth`:
+- **Not all references in a .bib file are cited in the PDF** - BibTeX files often contain more entries than what's actually referenced in the paper
+- Compare extracted titles against ground truth using fuzzy matching, not exact counts
+- A paper with 40 extracted references but 100 entries in its .bib file is normal - focus on whether extracted titles match entries in ground truth, not on count parity

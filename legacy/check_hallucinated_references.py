@@ -1206,6 +1206,34 @@ def strip_running_headers(text):
 
 def segment_references(ref_text):
     """Split references section into individual references."""
+    # Preprocess: detect and truncate at reference section boundary
+    # Some PDFs include appendix/supplementary material after references
+    # Look for patterns that indicate end of references section
+    boundary_patterns = [
+        # Appendix headers - explicit "Appendix" keyword
+        r'\n\s*(?:APPENDIX|Appendix)\s*[A-Z]?\s*[\n:.]',
+        r'\n\s*(?:SUPPLEMENTARY|Supplementary)\s+(?:MATERIAL|Material|INFORMATION|Information)',
+        # Appendix section header: single letter on its own line followed by section title
+        # e.g., "\nA\nDetailed Benchmark Results"
+        r'\n\s*[A-Z]\s*\n\s*(?:Additional|Detailed|Extended|Supplemental|Proof|Experimental|Implementation|Benchmark|Dataset|Ablation|Hyperparameter)',
+        # Section headers like "A. Additional Results" or "A Additional Results" (same line)
+        r'\n\s*[A-Z]\s*[\.:]?\s+(?:Additional|Detailed|Extended|Supplemental|Proof|Experimental|Implementation|Benchmark|Dataset|Ablation|Hyperparameter)\s+',
+        # Mathematical proof section - standalone equation numbers like "(17)" on their own line
+        # followed by mathematical content (equations use = sign)
+        r'\n\s*\(\d{1,3}\)\s*\n[^\n]*=',
+    ]
+
+    earliest_boundary = len(ref_text)
+    for pattern in boundary_patterns:
+        match = re.search(pattern, ref_text)
+        if match and match.start() < earliest_boundary:
+            # Ensure we have at least some content before truncating
+            if match.start() > 500:  # Minimum 500 chars of references
+                earliest_boundary = match.start()
+
+    if earliest_boundary < len(ref_text):
+        ref_text = ref_text[:earliest_boundary].strip()
+
     # Try IEEE style: [1], [2], etc.
     ieee_pattern = r'\n\s*\[(\d+)\]\s*'
     ieee_matches = list(re.finditer(ieee_pattern, ref_text))
@@ -1877,11 +1905,51 @@ def extract_title_from_reference(ref_text):
         if len(title.split()) >= 2:
             return title, False
 
+    # === Format 1d: Abbreviated "et al." author - "I. et al. Surname. Title. Venue" ===
+    # Pattern: Single initial + "et al." + surname, then title after period
+    # Example: "J. et al. Betker. Dall-e 3. https://openai.com/dall-e-3, 2023."
+    # Example: "B. et al. Chen. Drct: Diffusion reconstruction contrastive training..."
+    # Example: "L. et al. Chai. What makes fake images detectable? In European conference..."
+    # This is a non-standard abbreviated format used in some papers
+    et_al_match = re.match(r'^[A-Z]\.\s*et\s+al\.\s*([A-Z][a-zA-Z\u00C0-\u024F-]+)\.\s*', ref_text)
+    if et_al_match:
+        after_author = ref_text[et_al_match.end():]
+        # Find where title ends - at venue/URL markers
+        title_end_patterns = [
+            r'\.\s*[Ii]n\s+[A-Z]',  # ". In Proceedings" / ". In European conference"
+            r'\.\s*(?:Proceedings|IEEE|ACM|USENIX|AAAI|CVPR|ICCV|NeurIPS|ICML|arXiv)',
+            r'\.\s*[Aa]rXiv\s+preprint',  # ". arXiv preprint"
+            r'\.\s*[Aa]dvances\s+in\s+',  # ". Advances in Neural Information"
+            r'\.\s*https?://',  # ". https://..."
+            r',\s*(?:pages?|pp\.)\s*\d+',  # ", pages 123" or ", pp. 123"
+            r',\s*\d+:\d+',  # ", 33:6840" - volume:pages
+            r',\s*\d{4}\.$',  # ", 2024." - year at end
+        ]
+        title_end = len(after_author)
+        for pattern in title_end_patterns:
+            m = re.search(pattern, after_author)
+            if m:
+                title_end = min(title_end, m.start())
+
+        if title_end > 0:
+            title = after_author[:title_end].strip()
+            title = re.sub(r'\.\s*$', '', title)
+            # Accept titles with 2+ words (some are short like "Dall-e 3")
+            if len(title.split()) >= 2:
+                return title, False
+
     # === Format 2a: Springer/Nature/Harvard - "Authors (Year) Title" or "Authors (Year). Title" ===
     # Pattern: "Surname I, ... (YYYY) Title text. Journal Name Vol(Issue):Pages"
     # Also handles Harvard/APA: "Surname, I. (YYYY). Title. Venue."
     # Year is in parentheses, optionally followed by period, then title
+    # IMPORTANT: Reject if year is preceded by ") (" which indicates journal "Vol (Issue) (Year)" format
+    # e.g., "IEEE Trans... 25 (7) (2024) 7374" - the (2024) is NOT an author-year pattern
     springer_year_match = re.search(r'\((\d{4}[a-z]?)\)\.?\s+', ref_text)
+    if springer_year_match:
+        # Check if this looks like a journal "Vol (Issue) (Year)" pattern - reject if so
+        before_year = ref_text[:springer_year_match.start()]
+        if re.search(r'\)\s*$', before_year):  # Preceded by closing paren = likely "Vol (Issue) (Year)"
+            springer_year_match = None
     if springer_year_match:
         after_year = ref_text[springer_year_match.end():]
         # Find where title ends - at journal/venue patterns
@@ -1927,10 +1995,14 @@ def extract_title_from_reference(ref_text):
         title_end_patterns = [
             r'\.\s*[Ii]n\s+[A-Z]',  # ". In Proceedings"
             r'\.\s*(?:Proceedings|IEEE|ACM|USENIX|arXiv)',
+            # ACM short journal format: ". Journal Name Vol (Year), Pages" or ". Journal Name (Year), Pages"
+            # Examples: ". Computers & Security 106 (2021), 102277", ". Frontiers in big Data 4 (2021), 729663"
+            r'\.\s*[A-Z][a-zA-Z\s&]+\d+\s*\((?:19|20)\d{2}\),\s*\d+',  # ". Journal Vol (Year), Pages"
+            r'\.\s*[A-Z][a-zA-Z\s&]+\((?:19|20)\d{2}\),\s*\d+',  # ". Journal (Year), Pages" (no volume)
             r'\.\s*[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014-]{10,},\s*\d+',  # ". Long Journal Name, vol" - long journal names
             r'\.\s*[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014-]{5,}\s*\((?:19|20)\d{2}\)',  # ". Journal Name (Year)" - Issue #106
             r'[?!]\s+[A-Z][a-zA-Z\s&+\u00AE\u2013\u2014-]+,\s*\d+\s*[(:]',  # "? Journal Name, vol(" - cut after ?/!
-            r'[?!]\s+[A-Z][a-z]+\s+(?:[A-Z][a-z]+\s+)?\d+\(',  # "? Journal Name 26(" - journal with volume
+            r'[?!]\s+[A-Z][a-z]+\s+(?:[A-Z][a-z]+\s+)?\d+\(',  # "? Journal 26(" - journal with volume
             r'[?!]\s+[A-Z][a-z]+\s+[a-z]+\s',  # "? Word word " - likely journal after question
             r'\s+doi:',
             r'\.\s*https?://',  # ". https://..." - URL after title (Issue #106)
@@ -2163,6 +2235,73 @@ def extract_title_from_reference(ref_text):
                     return title, False
 
             break
+
+    # === Format 6b: Elsevier comma-separated - "I. Surname, I. Surname, Title, Venue (Year)" ===
+    # Pattern: Authors with single initials (I. Surname) followed by comma-separated title and venue
+    # Example: "J. Fan, F. Vercauteren, Somewhat practical fully homomorphic encryption, Cryptology ePrint Archive, Report 2012/144 (2012)."
+    # Example: "I. Chillotti, N. Gama, M. Georgieva, M. Izabachène, TFHE: Fast fully homomorphic encryption over the torus, Journal of Cryptology 33 (1) (2020) 34–91."
+    # Key: Authors are "I. Surname," pattern, title is comma-separated segment before venue
+    # Venue keywords: Journal, Transactions, Archive, Conference, Proceedings, IEEE, ACM, Springer, arXiv
+    elsevier_author_pattern = r'^([A-Z]\.(?:\s*[A-Z]\.)*\s+[A-Z][a-zA-Z\u00C0-\u024F-]+(?:\s+[A-Z][a-zA-Z\u00C0-\u024F-]+)*,\s*)+'
+    if re.match(elsevier_author_pattern, ref_text):
+        # Find venue markers to identify where title ends
+        elsevier_venue_patterns = [
+            r',\s*(?:Cryptology\s+)?ePrint\s+Archive',  # Cryptology ePrint Archive
+            r',\s*arXiv(?:\s+preprint)?(?:\s+arXiv)?[:\s]',  # arXiv preprint
+            r',\s*(?:Journal|Transactions|Letters|Review|Annals|Archives?|Bulletin|Communications?|Proceedings?)\s+(?:of\s+)?[A-Z]',  # Journal of X
+            r',\s*[A-Z][a-zA-Z\s&]+(?:Journal|Transactions|Letters|Review|Magazine)',  # X Journal, X Transactions
+            r',\s*(?:IEEE|ACM|SIAM|AMS|Springer|Elsevier|Wiley)\s+',  # Publisher prefixed venues
+            r',\s*(?:in|In):\s+',  # "in:" Elsevier conference format
+            r',\s*(?:in|In)\s+(?:Proc\.|Proceedings|Conference|Workshop|Symposium)',  # "in Proceedings"
+            r',\s*(?:Proc\.|Proceedings|Conference|Workshop|Symposium)\s+',  # Direct venue start
+            r',\s*[A-Z][a-zA-Z.\s]+\d+\s*\(\d+\)\s*\(',  # "Journal Name Vol (Issue) (Year)"
+            r',\s*[A-Z][a-zA-Z.\s]+\d+\s*\(\d{4}\)',  # "Journal Name Vol (Year)"
+            # Elsevier journal with page numbers: "Journal Vol (Issue) (Year) Pages" or "Journal Vol (Year) Pages"
+            # Examples: "IEEE Trans... 25 (7) (2024) 7374–7387", "Future Gen... 141 (2023) 500–513"
+            r',\s*[A-Z][a-zA-Z\s&]+\d+\s*\(\d+\)\s*\(\d{4}\)\s*\d+',  # "Journal Vol (Issue) (Year) Pages"
+            r',\s*[A-Z][a-zA-Z\s&]+\d+\s*\(\d{4}\)\s*\d+[–-]',  # "Journal Vol (Year) Pages-" (with page range)
+            r',\s*(?:Technical\s+)?[Rr]eport\s+',  # Technical report
+            r',\s*Ph\.?D\.?\s+[Tt]hesis',  # PhD thesis
+            r',\s*[A-Z][a-zA-Z\s]+,\s*(?:vol\.|Vol\.|Volume)\s*\d+',  # "Journal, Vol. X"
+        ]
+
+        venue_start = None
+        for pattern in elsevier_venue_patterns:
+            m = re.search(pattern, ref_text)
+            if m:
+                if venue_start is None or m.start() < venue_start:
+                    venue_start = m.start()
+
+        if venue_start:
+            before_venue = ref_text[:venue_start].strip()
+            # Split by comma and find where authors end / title begins
+            # Authors follow pattern: "I. Surname" or "I. I. Surname"
+            parts = before_venue.split(',')
+            title_start_idx = None
+
+            for i, part in enumerate(parts):
+                part = part.strip()
+                if not part:
+                    continue
+
+                # Check if this looks like an author: "I. Surname" or "I. I. Surname" or "I.-J. Surname"
+                # Also handles: "and I. Surname"
+                is_author = bool(re.match(
+                    r'^(?:and\s+)?[A-Z]\.(?:\s*[A-Z]\.)*(?:\s*-\s*[A-Z]\.)*\s+[A-Z][a-zA-Z\u00C0-\u024F-]+(?:\s+[A-Z][a-zA-Z\u00C0-\u024F-]+)*$',
+                    part
+                ))
+
+                if not is_author:
+                    # This segment doesn't look like an author - it's the title start
+                    title_start_idx = i
+                    break
+
+            if title_start_idx is not None and title_start_idx > 0:
+                # Title is from this part to the end (before venue)
+                title = ', '.join(p.strip() for p in parts[title_start_idx:])
+                title = title.strip().rstrip(',')
+                if len(title.split()) >= 3:
+                    return title, False
 
     # === Format 7: APA/Harvard - "Surname, I., & Surname, I. (YYYY). Title." ===
     # Pattern: Authors with ampersand, year in parentheses, then title

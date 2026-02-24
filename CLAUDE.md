@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Development Policy
+
+**All new development should be in the Rust codebase (`hallucinator-rs/`).** The Python code in `legacy/` is frozen and should not be modified except for critical bug fixes. When porting features or fixes, implement them in the Rust crates.
+
 ## Project Overview
 
 **Hallucinated Reference Detector** - Detects potentially fabricated references in academic PDF papers by validating against multiple academic databases (CrossRef, arXiv, DBLP, Semantic Scholar, ACL Anthology, NeurIPS, Europe PMC, PubMed, and optionally OpenAlex). Also checks for retracted papers via CrossRef.
@@ -79,12 +83,16 @@ docker run -p 5001:5001 hallucinator
 - Web: `DBLP_OFFLINE_PATH` environment variable
 
 ### Key Files
-- `legacy/check_hallucinated_references.py` - Core validation logic, CLI interface (legacy Python)
-- `legacy/app.py` - Flask web application (legacy Python)
-- `legacy/templates/index.html` - Web UI with embedded JS/CSS
-- `legacy/dblp_offline.py` - Offline DBLP database builder and query module (legacy Python)
-- `hallucinator-rs/crates/hallucinator-parsing/` - Reference parsing pipeline (section detection, segmentation, title/author extraction)
+
+**Rust codebase (primary - all new development here):**
 - `hallucinator-rs/` - Primary Rust implementation (see workspace structure in README)
+- `hallucinator-rs/crates/hallucinator-parsing/` - Reference parsing pipeline (section detection, segmentation, title/author extraction)
+
+**Legacy Python (frozen - reference only):**
+- `legacy/check_hallucinated_references.py` - Core validation logic, CLI interface
+- `legacy/app.py` - Flask web application
+- `legacy/templates/index.html` - Web UI with embedded JS/CSS
+- `legacy/dblp_offline.py` - Offline DBLP database builder and query module
 
 ### Validation Result Types
 - **Verified** - Found in database with matching authors
